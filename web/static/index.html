@@ -1404,13 +1404,9 @@ a[onclick], button.text-xs, .text-xs[onclick], [onclick].underline {
       <svg class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       History
     </button>
-    <button class="nav-item" id="nav-fidelity" onclick="navigate('fidelity')">
-      <svg class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/><path d="M8 12h4"/></svg>
-      Fidelity
-    </button>
-    <button class="nav-item" id="nav-webull" onclick="navigate('webull')">
-      <svg class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="m7 10 3 3 4-5 3 3"/></svg>
-      Real Portfolio
+    <button class="nav-item" id="nav-broker" onclick="navigate('broker')">
+      <svg class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M3 21h18"/><path d="M5 21V7l7-4 7 4v14"/><path d="M9 9h.01M9 13h.01M9 17h.01M15 9h.01M15 13h.01M15 17h.01"/></svg>
+      Real Broker
     </button>
     <button class="nav-item" id="nav-ml" onclick="navigate('ml')">
       <svg class="w-4 h-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
@@ -3039,8 +3035,43 @@ a[onclick], button.text-xs, .text-xs[onclick], [onclick].underline {
       </div>
     </div>
 
+    <!-- ══════════════════ BROKER SWITCHER STYLE ══════════════════ -->
+    <style>
+      .broker-switcher {
+        display:flex;align-items:center;gap:8px;
+        padding:9px 20px;
+        border-bottom:1px solid var(--surface-rule);
+        background:var(--surface);
+        flex-shrink:0;
+      }
+      .broker-switcher-label {
+        font-size:10px;font-weight:700;color:var(--ink-faint);
+        text-transform:uppercase;letter-spacing:.08em;margin-right:6px;
+      }
+      .broker-pill {
+        padding:5px 14px;border-radius:99px;
+        font-size:12px;font-weight:700;
+        background:var(--surface-raised);color:var(--ink-faint);
+        border:1px solid var(--surface-rule);
+        cursor:pointer;transition:all .12s ease;
+      }
+      .broker-pill:hover { color:var(--ink); }
+      .broker-pill-active {
+        background:var(--accent);color:#000;
+        border-color:var(--accent);
+      }
+    </style>
+
     <!-- ══════════════════ FIDELITY PANEL ══════════════════ -->
     <div id="panel-fidelity" class="tab-panel" style="height:calc(100vh - 57px);overflow:hidden;flex-direction:column">
+
+      <!-- Broker switcher -->
+      <div class="broker-switcher">
+        <span class="broker-switcher-label">Broker</span>
+        <button class="broker-pill broker-pill-active" data-broker="fidelity" onclick="showBroker('fidelity')">Fidelity</button>
+        <button class="broker-pill" data-broker="webull" onclick="showBroker('webull')">Webull</button>
+      </div>
+
 
       <!-- Top stats bar -->
       <div style="background:var(--surface);border-bottom:1px solid var(--surface-rule);padding:10px 20px;display:flex;align-items:center;gap:0;flex-shrink:0;min-height:54px">
@@ -3156,7 +3187,16 @@ a[onclick], button.text-xs, .text-xs[onclick], [onclick].underline {
     <!-- ══════════════════ END FIDELITY PANEL ══════════════════ -->
 
     <!-- ══════════════════ WEBULL REAL PORTFOLIO ══════════════════ -->
-    <div id="panel-webull" class="tab-panel p-6 space-y-5 max-w-6xl">
+    <div id="panel-webull" class="tab-panel">
+
+      <!-- Broker switcher -->
+      <div class="broker-switcher">
+        <span class="broker-switcher-label">Broker</span>
+        <button class="broker-pill" data-broker="fidelity" onclick="showBroker('fidelity')">Fidelity</button>
+        <button class="broker-pill broker-pill-active" data-broker="webull" onclick="showBroker('webull')">Webull</button>
+      </div>
+
+      <div class="p-6 space-y-5 max-w-6xl">
 
       <!-- Connection Card -->
       <div class="card p-5" id="wb-connect-card">
@@ -3340,6 +3380,7 @@ a[onclick], button.text-xs, .text-xs[onclick], [onclick].underline {
         <button class="btn-primary" onclick="wbPlaceOrder()">Place Order</button>
       </div>
 
+      </div><!-- /p-6 wrapper -->
     </div>
     <!-- ══════════════════ END WEBULL PANEL ══════════════════ -->
 
@@ -4130,16 +4171,40 @@ function updateClock() {
 // ═══════════════════════════════════════════════════════════════
 // NAVIGATION
 // ═══════════════════════════════════════════════════════════════
+// Switch between real-broker sub-pages (Fidelity / Webull) while keeping
+// the unified "Real Broker" nav item highlighted.
+function showBroker(which) {
+  if (which !== 'fidelity' && which !== 'webull') which = 'fidelity';
+  navigate(which);
+}
+
 function navigate(tab) {
+  // 'broker' is a virtual tab that resolves to last-selected real broker
+  if (tab === 'broker') {
+    let stored = 'fidelity';
+    try { stored = localStorage.getItem('brokerChoice') || 'fidelity'; } catch(e){}
+    if (stored !== 'fidelity' && stored !== 'webull') stored = 'fidelity';
+    tab = stored;
+  }
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-  document.getElementById('panel-'+tab).classList.add('active');
-  document.getElementById('nav-'+tab).classList.add('active');
+  const panel = document.getElementById('panel-'+tab);
+  if (panel) panel.classList.add('active');
+  const navBtn = document.getElementById('nav-'+tab);
+  if (navBtn) navBtn.classList.add('active');
+  // Broker sub-pages activate the unified "Real Broker" nav entry
+  if (tab === 'fidelity' || tab === 'webull') {
+    const nb = document.getElementById('nav-broker');
+    if (nb) nb.classList.add('active');
+    document.querySelectorAll('.broker-pill').forEach(p =>
+      p.classList.toggle('broker-pill-active', p.dataset.broker === tab));
+    try { localStorage.setItem('brokerChoice', tab); } catch(e){}
+  }
   currentTab = tab;
   if (tab !== 'paper' && _quoteTimer) { clearTimeout(_quoteTimer); _quoteTimer = null; }
   if (tab !== 'paper' && _equityTimer) { clearTimeout(_equityTimer); _equityTimer = null; }
   document.querySelector('main').style.overflow = (tab === 'fidelity') ? 'hidden' : '';
-  const titles = {dashboard:'Dashboard',analyze:'Analyze',portfolio:'Portfolio',paper:'Paper Trading',backtest:'Backtest & Screener',history:'History',fidelity:'Fidelity',webull:'Real Portfolio (Webull)',ml:'Machine Learning',rl:'RL Agent',settings:'Settings'};
+  const titles = {dashboard:'Dashboard',analyze:'Analyze',portfolio:'Portfolio',paper:'Paper Trading',backtest:'Backtest & Screener',history:'History',fidelity:'Real Broker · Fidelity',webull:'Real Broker · Webull',ml:'Machine Learning',rl:'RL Agent',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[tab]||tab;
   if (tab==='portfolio') loadPortfolio();
   if (tab==='paper') { loadPaperStatus(); loadAutostartConfig(); loadCandidateHistory(); loadPaperEquityChart(); }
@@ -9567,8 +9632,7 @@ const TA_PAGES = [
   {id:'paper',lbl:'Paper Trading',sub:'Simulated trading',ic:'◈'},
   {id:'backtest',lbl:'Backtest & Screener',sub:'Historical testing',ic:'↗'},
   {id:'history',lbl:'History',sub:'Analysis records',ic:'◷'},
-  {id:'fidelity',lbl:'Fidelity',sub:'Brokerage integration',ic:'$'},
-  {id:'webull',lbl:'Real Portfolio',sub:'Webull positions',ic:'▣'},
+  {id:'broker',lbl:'Real Broker',sub:'Fidelity or Webull',ic:'$'},
   {id:'ml',lbl:'Machine Learning',sub:'Model training & status',ic:'◎'},
   {id:'rl',lbl:'RL Agent',sub:'Reinforcement learning',ic:'⚡'},
   {id:'settings',lbl:'Settings',sub:'API keys & preferences',ic:'⚙'},
@@ -9698,7 +9762,7 @@ document.addEventListener('keydown', e => {
   }
   if (_kbG) {
     clearTimeout(_kbGT); _kbG=false;
-    const m={d:'dashboard',a:'analyze',p:'portfolio',t:'paper',b:'backtest',h:'history',f:'fidelity',w:'webull',m:'ml',r:'rl',s:'settings'};
+    const m={d:'dashboard',a:'analyze',p:'portfolio',t:'paper',b:'backtest',h:'history',k:'broker',f:'fidelity',w:'webull',m:'ml',r:'rl',s:'settings'};
     const dest=m[e.key.toLowerCase()];
     if (dest&&typeof navigate==='function') { navigate(dest); showToast('→ '+dest,'info','',1200); }
   }
