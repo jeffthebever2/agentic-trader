@@ -1,0 +1,17 @@
+{
+  "tickers": [
+    "NVDA",
+    "AAPL",
+    "MSFT",
+    "GOOGL",
+    "AMZN"
+  ],
+  "obs_dim": 125,
+  "act_dim": 5,
+  "hidden": [
+    256,
+    256
+  ],
+  "max_position_size": 0.1,
+  "starting_cash": 100000.0
+}

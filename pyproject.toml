@@ -1,0 +1,146 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradingagents"
+version = "0.2.4"
+description = "TradingAgents: Multi-Agents LLM Financial Trading Framework"
+readme = "docs/README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "langchain-core>=0.3.81",
+    "backtrader>=1.9.78.123",
+    "ddgs>=9.0.0",
+    "feedparser>=6.0.11",
+    "langchain-anthropic>=0.3.15",
+    "langchain-experimental>=0.3.4",
+    "langchain-google-genai>=4.0.0",
+    "langchain-openai>=0.3.23",
+    "langgraph>=0.4.8",
+    "langgraph-checkpoint-sqlite>=2.0.0",
+    "matplotlib>=3.9.0",
+    "numpy>=2.0.0",
+    "pandas>=2.3.0",
+    "parsel>=1.10.0",
+    "pydantic>=2.11.0",
+    "python-dotenv>=1.1.0",
+    "PyTextNow>=1.2.1",
+    "pytz>=2025.2",
+    "questionary>=2.1.0",
+    "redis>=6.2.0",
+    "requests>=2.32.4",
+    "rich>=14.0.0",
+    "scikit-learn>=1.5.0",
+    "typer>=0.21.0",
+    "setuptools>=80.9.0",
+    "stockstats>=0.6.5",
+    "tqdm>=4.67.1",
+    "typing-extensions>=4.14.0",
+    "vaderSentiment>=3.3.2",
+    "whoosh>=2.7.4",
+    "yfinance>=0.2.63",
+    "fidelity-api>=0.0.16",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+media = [
+    "instaloader>=4.14.0",
+    "yt-dlp>=2025.12.0",
+]
+web = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "psutil>=5.9.0",
+]
+
+[project.scripts]
+tradingagents = "cli.main:app"
+
+[tool.setuptools.packages.find]
+include = ["tradingagents*", "cli*"]
+
+[tool.setuptools.package-data]
+cli = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "unit: fast isolated unit tests",
+    "integration: tests requiring external services",
+    "smoke: quick sanity-check tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py310', 'py311', 'py312', 'py313']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["tradingagents", "cli"]
+skip = ["__init__.py"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "langchain.*",
+    "langchain_core.*",
+    "langchain_experimental.*",
+    "langgraph.*",
+    "yfinance.*",
+    "pandas.*",
+    "numpy.*",
+    "matplotlib.*",
+    "sklearn.*",
+    "vaderSentiment.*",
+    "feedparser.*",
+    "ddgs.*",
+    "parsel.*",
+    "rich.*",
+    "questionary.*",
+    "redis.*",
+    "pydantic.*",
+    "backtrader.*",
+    "stockstats.*",
+    "tqdm.*",
+    "pytz.*",
+]
+ignore_missing_imports = true
