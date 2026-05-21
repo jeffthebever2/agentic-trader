@@ -2682,116 +2682,7 @@ def _rolling_trade_stats(trades: list[dict], n: int = 20) -> dict:
         "avg_win": avg_win, "avg_loss": avg_loss, "n": len(pnls),
     }
 
-
-def position_size(
-    account: PaperAccount,
-    price: float,
-    account_value: float,
-    args: argparse.Namespace,
-    ml_probability: float | None = None,
-    atr: float = 0.0,
-    stop: float = 0.0,
-    regime_factor: float = 1.0,
-    now: "dt.datetime | None" = None,
-    prices: "dict | None" = None,
-) -> int:
-    """Dynamic position sizer. Layers: Kelly → ML confidence → streak → time-of-day →
-    daily-profit lock-in → drawdown → regime → ATR risk → heat cap → cash floor."""
-    if price <= 0 or account_value <= 0:
-        return 0
-
-    cap_max = args.position_cap_pct / 100.0
-    cap_min = getattr(args, "position_cap_min_pct", 10.0) / 100.0
-    risk_per_trade_pct = getattr(args, "risk_per_trade_pct", 0.0)
-
-    # ── 1. Kelly-fraction base pct ─────────────────────────────────────────────
-    stats = _rolling_trade_stats(account.trades, n=20)
-    kelly_pct = stats["kelly"]
-    if stats["n"] < 5:
-        # Too few trades — start at midpoint, let system learn
-        base_pct = (cap_min + cap_max) / 2.0
-    else:
-        # Kelly gives optimal bet size; clamp between cap_min and cap_max
-        base_pct = max(cap_min, min(cap_max, kelly_pct))
-
-    # ── 2. ML confidence scalar (min→max within Kelly range) ──────────────────
-    if ml_probability is not None and ml_probability > 0:
-        ml_threshold = getattr(args, "ml_probability_threshold", None) or 0.58
-        high_conf = getattr(args, "position_high_confidence_threshold", 0.80)
-        t = (ml_probability - ml_threshold) / max(high_conf - ml_threshold, 0.01)
-        t = max(0.0, min(1.0, t))
-        # Scale base_pct up toward cap_max based on ML conviction
-        base_pct = base_pct + t * (cap_max - base_pct) * 0.6
-    else:
-        base_pct = cap_min
-
-    # ── 3. Streak adjustment ───────────────────────────────────────────────────
-    loss_streak = stats["loss_streak"]
-    win_streak = stats["win_streak"]
-    if loss_streak >= 3:
-        base_pct *= 0.50   # 3+ losses: cut in half — protect from hole-digging
-    elif loss_streak == 2:
-        base_pct *= 0.70   # 2 losses: trim significantly
-    elif loss_streak == 1:
-        base_pct *= 0.85   # 1 loss: slight caution
-    elif win_streak >= 4:
-        base_pct = min(cap_max, base_pct * 1.20)  # hot streak: press a bit
-    elif win_streak >= 2:
-        base_pct = min(cap_max, base_pct * 1.10)  # 2+ wins: mild press
-
-    # ── 4. Time-of-day factor ──────────────────────────────────────────────────
-    tod_factor = 1.0
-    if now is not None:
-        market_open_minutes = (now.hour - 9) * 60 + now.minute - 30
-        if market_open_minutes < 15:
-            tod_factor = 0.0   # first 15 min: no entries (erratic price action)
-        elif market_open_minutes < 45:
-            tod_factor = 0.85  # 9:45-10:15: cautious, still settling
-        elif market_open_minutes > 360:
-            tod_factor = 0.0   # last 30 min: no new entries (avoid MOC risk)
-        elif market_open_minutes > 300:
-            tod_factor = 0.80  # last hour: reduce size
-        elif 90 <= market_open_minutes <= 210:
-            tod_factor = 0.90  # midday 11:00-12:30: typically choppy
-    base_pct *= tod_factor
-    if base_pct <= 0:
-        return 0
-
-    # ── 5. Daily profit lock-in: protect gains if up big today ────────────────
-    today_str = now.strftime("%Y-%m-%d") if now else ""
-    today_pnl = sum(
-        float(t.get("pnl", 0)) for t in account.trades
-        if str(t.get("exit_time", ""))[:10] == today_str
-    ) if today_str else 0.0
-    daily_profit_target = account.starting_cash * 0.01  # 1% daily profit target
-    if today_pnl >= daily_profit_target * 2:
-        base_pct *= 0.50  # up 2%+ today: half size to protect
-    elif today_pnl >= daily_profit_target:
-        base_pct *= 0.75  # hit daily target: reduce slightly
-
-    # ── 6. Apply regime factor (already includes drawdown from caller) ─────────
-    base_pct *= regime_factor
-    base_pct = max(cap_min * 0.5, min(cap_max, base_pct))  # soft clamp
-
-    # ── 7. ATR risk-based sizing: size so max loss = risk_pct of account ───────
-    if risk_per_trade_pct > 0 and (atr > 0 or stop > 0):
-        risk_dollars = account_value * (risk_per_trade_pct / 100.0)
-        stop_dist = (price - stop) if stop > 0 and price > stop else max(atr, price * 0.01)
-        atr_shares = int(math.floor(risk_dollars / stop_dist)) if stop_dist > 0 else 0
-        cap_shares = int(math.floor(account_value * cap_max / price))
-        shares_from_risk = min(atr_shares, cap_shares)
-        # Blend: 60% ATR-risk, 40% Kelly-pct
-        pct_shares = int(math.floor(account_value * base_pct / price))
-        blended = int(round(shares_from_risk * 0.6 + pct_shares * 0.4))
-        # Use settled_cash as ceiling — never size into unsettled funds
-        budget = max(0.0, account.settled_cash - args.commission)
-        return max(0, min(blended, int(math.floor(budget / price))))
-
-    # ── 8. Percentage-of-account sizing ───────────────────────────────────────
-    max_position_value = account_value * base_pct
-    # Use settled_cash as ceiling — never size into unsettled funds
-    budget = max(0.0, min(account.settled_cash - args.commission, max_position_value))
-    return max(0, int(math.floor(budget / price)))
+# NOTE: position_size(...) has been migrated to tradingagents.portfolio.position_sizing.PositionSizer.calculate_dynamic_size()
 
 
 def compute_market_breadth(raw: dict[str, pd.DataFrame], trade_date: dt.date) -> float:
@@ -3544,14 +3435,25 @@ def scan_account_once(
             })
             continue
 
-        shares = position_size(
-            account, price, account_value, args,
+        from tradingagents.portfolio.position_sizing import PositionSizer
+        rolling_stats = _rolling_trade_stats(account.trades, n=20)
+        
+        adv = None
+        if hasattr(candidate, "raw_data") and candidate.raw_data is not None and "Volume" in candidate.raw_data.columns and len(candidate.raw_data) >= 20:
+            adv = float(candidate.raw_data["Volume"].iloc[-20:].mean())
+
+        shares = PositionSizer().calculate_dynamic_size(
+            account=account,
+            price=price,
+            account_value=account_value,
+            args=args,
             ml_probability=candidate.ml_probability,
             atr=candidate.atr,
-            stop=buy_candidate.stop,
+            stop=candidate.stop if hasattr(candidate, "stop") else 0.0,
             regime_factor=combined_size_factor,
             now=now,
-            prices=prices,
+            adv=adv,
+            rolling_stats=rolling_stats,
         )
         if shares <= 0:
             skipped += 1

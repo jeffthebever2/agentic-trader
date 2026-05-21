@@ -1,14 +1,16 @@
-"""Position sizing helpers, including conservative half-Kelly sizing."""
+"""Position sizing helpers, including continuous Kelly sizing and liquidity caps."""
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+import math
+import datetime as dt
+from typing import Dict, Tuple, Any
 
 from tradingagents.agents.utils.memory import TradingMemoryLog
 
 
 class PositionSizer:
-    """Size paper positions based on confidence and historical outcomes."""
+    """Size paper positions based on confidence, historical outcomes, and risk metrics."""
 
     def calculate_kelly_size(
         self,
@@ -18,6 +20,7 @@ class PositionSizer:
         portfolio_value: float,
         confidence: float = 0.5,
         max_fraction: float = 0.02,
+        kelly_fraction_multiplier: float = 0.5, # default Half-Kelly, can pass 0.25 for Quarter
     ) -> float:
         if not (0 < win_rate < 1) or avg_win <= 0 or avg_loss >= 0 or portfolio_value <= 0:
             return 0.0
@@ -26,9 +29,13 @@ class PositionSizer:
         b = abs(avg_win / avg_loss)
         p = adjusted_win_rate
         q = 1 - p
+        
+        # Standard Discrete Kelly: f* = (bp - q) / b
         kelly_fraction = (b * p - q) / b
-        half_kelly = kelly_fraction / 2
-        return max(0.0, min(half_kelly, max_fraction))
+        
+        # Apply the fractional Kelly multiplier (e.g. 0.5 for Half-Kelly, 0.25 for Quarter-Kelly)
+        adjusted_kelly = kelly_fraction * kelly_fraction_multiplier
+        return max(0.0, min(adjusted_kelly, max_fraction))
 
     def calculate_position_size(
         self,
@@ -36,6 +43,8 @@ class PositionSizer:
         decision: Dict,
         portfolio_value: float,
         memory_log: TradingMemoryLog | None = None,
+        adv: float | None = None,
+        adv_cap_pct: float = 0.01,
     ) -> Tuple[int, str]:
         confidence = float(decision.get("confidence", 0.5))
         entry_target = decision.get("entry_target")
@@ -80,4 +89,148 @@ class PositionSizer:
 
         dollars_to_risk = portfolio_value * kelly_pct
         shares = int(dollars_to_risk / risk_amount)
+        
+        # ADV Liquidity Cap
+        if adv is not None and adv > 0:
+            max_shares_adv = int(adv * adv_cap_pct)
+            if shares > max_shares_adv:
+                return max_shares_adv, f"Capped by ADV limit ({adv_cap_pct:.1%})"
+                
         return shares, f"Half-Kelly={kelly_pct:.1%}, Risk/Reward={risk_reward:.2f}"
+        
+    def calculate_dynamic_size(
+        self,
+        account: Any,  # PaperAccount
+        price: float,
+        account_value: float,
+        args: Any,     # argparse.Namespace
+        ml_probability: float | None = None,
+        atr: float = 0.0,
+        stop: float = 0.0,
+        regime_factor: float = 1.0,
+        now: dt.datetime | None = None,
+        adv: float | None = None,
+        adv_cap_pct: float = 0.01,
+        kelly_fraction_multiplier: float = 0.5, # 0.5 for Half-Kelly, 0.25 for Quarter-Kelly
+        rolling_stats: Dict[str, Any] | None = None,
+    ) -> int:
+        """Dynamic position sizer. Layers: Kelly → ML confidence → streak → time-of-day →
+        daily-profit lock-in → drawdown → regime → ATR risk → heat cap → cash floor → liquidity cap."""
+        if price <= 0 or account_value <= 0:
+            return 0
+
+        cap_max = args.position_cap_pct / 100.0
+        cap_min = getattr(args, "position_cap_min_pct", 10.0) / 100.0
+        risk_per_trade_pct = getattr(args, "risk_per_trade_pct", 0.0)
+
+        # ── 1. Kelly-fraction base pct ─────────────────────────────────────────────
+        if rolling_stats is None:
+            kelly_pct = 0.0
+            n_trades = 0
+            loss_streak = 0
+            win_streak = 0
+        else:
+            kelly_pct = rolling_stats.get("kelly", 0.0)
+            n_trades = rolling_stats.get("n", 0)
+            loss_streak = rolling_stats.get("loss_streak", 0)
+            win_streak = rolling_stats.get("win_streak", 0)
+
+        if n_trades < 5:
+            # Too few trades — start at midpoint, let system learn
+            base_pct = (cap_min + cap_max) / 2.0
+        else:
+            # Apply fractional Kelly multiplier
+            adjusted_kelly = kelly_pct * (kelly_fraction_multiplier / 0.5) if kelly_pct > 0 else 0
+            # Kelly gives optimal bet size; clamp between cap_min and cap_max
+            base_pct = max(cap_min, min(cap_max, adjusted_kelly))
+
+        # ── 2. ML confidence scalar (min→max within Kelly range) ──────────────────
+        if ml_probability is not None and ml_probability > 0:
+            ml_threshold = getattr(args, "ml_probability_threshold", None) or 0.58
+            high_conf = getattr(args, "position_high_confidence_threshold", 0.80)
+            t = (ml_probability - ml_threshold) / max(high_conf - ml_threshold, 0.01)
+            t = max(0.0, min(1.0, t))
+            # Scale base_pct up toward cap_max based on ML conviction
+            base_pct = base_pct + t * (cap_max - base_pct) * 0.6
+        else:
+            base_pct = cap_min
+
+        # ── 3. Streak adjustment ───────────────────────────────────────────────────
+        if loss_streak >= 3:
+            base_pct *= 0.50   # 3+ losses: cut in half — protect from hole-digging
+        elif loss_streak == 2:
+            base_pct *= 0.70   # 2 losses: trim significantly
+        elif loss_streak == 1:
+            base_pct *= 0.85   # 1 loss: slight caution
+        elif win_streak >= 4:
+            base_pct = min(cap_max, base_pct * 1.20)  # hot streak: press a bit
+        elif win_streak >= 2:
+            base_pct = min(cap_max, base_pct * 1.10)  # 2+ wins: mild press
+
+        # ── 4. Time-of-day factor ──────────────────────────────────────────────────
+        tod_factor = 1.0
+        if now is not None:
+            market_open_minutes = (now.hour - 9) * 60 + now.minute - 30
+            if market_open_minutes < 15:
+                tod_factor = 0.0   # first 15 min: no entries (erratic price action)
+            elif market_open_minutes < 45:
+                tod_factor = 0.85  # 9:45-10:15: cautious, still settling
+            elif market_open_minutes > 360:
+                tod_factor = 0.0   # last 30 min: no new entries (avoid MOC risk)
+            elif market_open_minutes > 300:
+                tod_factor = 0.80  # last hour: reduce size
+            elif 90 <= market_open_minutes <= 210:
+                tod_factor = 0.90  # midday 11:00-12:30: typically choppy
+        base_pct *= tod_factor
+        if base_pct <= 0:
+            return 0
+
+        # ── 5. Daily profit lock-in: protect gains if up big today ────────────────
+        today_str = now.strftime("%Y-%m-%d") if now else ""
+        today_pnl = sum(
+            float(t.get("pnl", 0)) for t in getattr(account, "trades", [])
+            if str(t.get("exit_time", ""))[:10] == today_str
+        ) if today_str else 0.0
+        
+        starting_cash = getattr(account, "starting_cash", account_value)
+        daily_profit_target = starting_cash * 0.01  # 1% daily profit target
+        if today_pnl >= daily_profit_target * 2:
+            base_pct *= 0.50  # up 2%+ today: half size to protect
+        elif today_pnl >= daily_profit_target:
+            base_pct *= 0.75  # hit daily target: reduce slightly
+
+        # ── 6. Apply regime factor (already includes drawdown from caller) ─────────
+        base_pct *= regime_factor
+        base_pct = max(cap_min * 0.5, min(cap_max, base_pct))  # soft clamp
+
+        # ── 7. ATR risk-based sizing: size so max loss = risk_pct of account ───────
+        commission = getattr(args, "commission", 0.0)
+        settled_cash = getattr(account, "settled_cash", account_value)
+        
+        if risk_per_trade_pct > 0 and (atr > 0 or stop > 0):
+            risk_dollars = account_value * (risk_per_trade_pct / 100.0)
+            stop_dist = (price - stop) if stop > 0 and price > stop else max(atr, price * 0.01)
+            atr_shares = int(math.floor(risk_dollars / stop_dist)) if stop_dist > 0 else 0
+            cap_shares = int(math.floor(account_value * cap_max / price))
+            shares_from_risk = min(atr_shares, cap_shares)
+            
+            # Blend: 60% ATR-risk, 40% Kelly-pct
+            pct_shares = int(math.floor(account_value * base_pct / price))
+            blended = int(round(shares_from_risk * 0.6 + pct_shares * 0.4))
+            
+            # Use settled_cash as ceiling — never size into unsettled funds
+            budget = max(0.0, settled_cash - commission)
+            final_shares = max(0, min(blended, int(math.floor(budget / price))))
+        else:
+            # ── 8. Percentage-of-account sizing ───────────────────────────────────────
+            max_position_value = account_value * base_pct
+            # Use settled_cash as ceiling — never size into unsettled funds
+            budget = max(0.0, min(settled_cash - commission, max_position_value))
+            final_shares = max(0, int(math.floor(budget / price)))
+            
+        # ── 9. ADV Liquidity Cap (New constraint) ───────────────────────────────────
+        if adv is not None and adv > 0:
+            max_shares_adv = int(math.floor(adv * adv_cap_pct))
+            final_shares = min(final_shares, max_shares_adv)
+            
+        return final_shares

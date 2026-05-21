@@ -150,15 +150,6 @@ def filter_by_price(data: dict, min_price: float = MIN_PRICE,
         "Min/max price is enforced at each scan date."
     )
     return kept
-            continue
-        kept[ticker] = df
-    label = f"${min_price:.0f}"
-    if max_price is not None:
-        label += f"–${max_price:.0f}"
-    else:
-        label += "+"
-    print(f"Price filter ({label}): removed {removed}, kept {len(kept)}")
-    return kept
 
 
 # ── New indicator helper functions ────────────────────────────────────────────
