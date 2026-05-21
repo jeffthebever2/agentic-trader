@@ -118,7 +118,7 @@ def warm(tickers: list, start: str, end: str):
     # Sector ETFs
     sector_cache = CACHE_DIR / f"sectors_{start}_{end}.pkl"
     if not sector_cache.exists():
-        print(f"Downloading sector ETFs...", end="", flush=True)
+        print("Downloading sector ETFs...", end="", flush=True)
         try:
             sector_dfs = {}
             for etf in SECTOR_ETFS:

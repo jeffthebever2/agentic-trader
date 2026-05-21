@@ -1,8 +1,27 @@
+import os
 from dataclasses import dataclass
 from typing import Any
 
 
+# Two independent layers gate real broker execution:
+#   1. LIVE_TRADING_HARD_BLOCKED (this code constant) — the ultimate kill switch.
+#      While True, NO real order can ever be placed, regardless of any setting.
+#      This is intentionally a source-code change so it cannot be flipped from
+#      the dashboard or .env.
+#   2. LIVE_TRADING_ENABLED (admin .env toggle, default off) — the operational
+#      master switch surfaced in the admin panel. Even after the hard block is
+#      lifted in code, this must be turned on for live trading to function.
+# Plus, per request, every broker endpoint already requires per-user step-up
+# 2FA (require_step_up), so each user approves their own real trades.
 LIVE_TRADING_HARD_BLOCKED = True
+
+
+def live_trading_enabled() -> bool:
+    """Admin master toggle for live trading (default off). Read fresh each call
+    so flipping it in the dashboard takes effect without a restart."""
+    return os.environ.get("LIVE_TRADING_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 PROHIBITED_MARKET_ACTIONS = (
     "real broker order placement",

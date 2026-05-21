@@ -15,8 +15,10 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
+
+from web.auth import require_admin
 
 ROOT = Path(__file__).parent.parent.parent
 DEFAULT_OUTPUT_BASE = ROOT / "tmp" / "paper_trading_today"
@@ -28,6 +30,7 @@ DEFAULT_AUTOSTART_CONFIG = {
     "scan_interval_minutes": 15,
     "max_tickers": 0,
     "openrouter_model": "openai/gpt-4o-mini",
+    "model_bundle": "ml_models/stock_universe/model_bundle.joblib",
     "new_model_bundle": "ml_models/latest/model_bundle.joblib",
     "ai_shortlist_size": 30,
     "ai_max_picks": 5,
@@ -59,8 +62,12 @@ DEFAULT_AUTOSTART_CONFIG = {
     "max_heat_pct": 80.0,
     "double_target_exit_pct": 0.5,
     "premarket_warmup_minutes": 30,
+    "hold_overnight": True,
     "long_hold_days": 20,
     "sms_number": "",
+    "hil_timeout_minutes": 15,
+    "hil_auto_reject": True,
+    "sms_on_fills": False,
 }
 STRATEGIES = ["algorithm", "machine_learning", "ml_new", "combined", "pure_ai", "long_hold"]
 STRATEGY_LABELS = {
@@ -194,6 +201,7 @@ class PaperStartRequest(BaseModel):
     scan_interval_minutes: float = Field(15.0, ge=1.0, le=390.0)
     max_tickers: int = Field(0, ge=0, le=10000)
     openrouter_model: str = Field("openai/gpt-4o-mini", min_length=1, max_length=200)
+    model_bundle: str = Field("ml_models/stock_universe/model_bundle.joblib", max_length=500)
     new_model_bundle: str = Field("ml_models/latest/model_bundle.joblib", max_length=500)
     ai_shortlist_size: int = Field(30, ge=1, le=200)
     ai_max_picks: int = Field(5, ge=1, le=50)
@@ -230,6 +238,10 @@ class PaperStartRequest(BaseModel):
     double_target_exit_pct: float = Field(0.5, ge=0.0, le=1.0)
     webhook_url: str = Field("", max_length=500)
     sms_number: str = Field("", max_length=32)
+    hil_timeout_minutes: int = Field(15, ge=1, le=120)
+    hil_auto_reject: bool = True
+    sms_on_fills: bool = False
+    hold_overnight: bool = True
     long_hold_days: int = Field(20, ge=1, le=365)
     trade_fidelity: bool = False
     trade_fidelity_execute: bool = False
@@ -267,12 +279,29 @@ class MmsTestRequest(BaseModel):
     to: str
     message: str
 
+
+class EmailTestRequest(BaseModel):
+    to: str
+    subject: str = "Agentic Trader email test"
+    message: str
+
+
 @router.post("/paper/mms/test")
-async def paper_mms_test(req: MmsTestRequest):
+async def paper_mms_test(req: MmsTestRequest, admin: dict = Depends(require_admin)):
     try:
         from scripts.gmail_mms import send_gmail_mms
         result = send_gmail_mms(req.to, "TradingAgents Test", req.message)
         return result
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/paper/email/test")
+async def paper_email_test(req: EmailTestRequest, admin: dict = Depends(require_admin)):
+    try:
+        from scripts.email_sender import send_email
+
+        return send_email(req.to, req.subject, req.message)
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -290,11 +319,8 @@ async def get_hil_pending():
     return {"pending": False}
 
 from fastapi.responses import HTMLResponse
-from fastapi import Request
 
 import yfinance as yf
-import pandas as pd
-from datetime import datetime, timedelta
 import ssl
 
 # Fix for macOS yfinance SSL issues
@@ -575,7 +601,7 @@ class HilResolveRequest(BaseModel):
     action: str
 
 @router.post("/paper/hil/resolve")
-async def resolve_hil(req: HilResolveRequest):
+async def resolve_hil(req: HilResolveRequest, admin: dict = Depends(require_admin)):
     if HIL_STATE_FILE.exists():
         try:
             state = json.loads(HIL_STATE_FILE.read_text())
@@ -622,13 +648,27 @@ def _classify_reply(text: str) -> str | None:
 
 @router.post("/paper/sms/inbound")
 async def sendblue_inbound(request: Request):
-    """Sendblue inbound webhook: reply-to-approve HIL trades.
+    """Sendblue inbound webhook for two-way SMS commands.
 
-    Reply 'YES'/'NO' (or a 👍/👎 reaction) to the trade text instead of
-    tapping a link. Secured by the SENDBLUE_INBOUND_SECRET shared key
-    (?key=... or X-Inbound-Key header); Basic Auth is bypassed for this
-    route in app.py since Sendblue cannot send credentials.
+    Trade approvals are resolved in the authenticated dashboard, not by SMS
+    reply. This route is kept for STATUS/POSITIONS/HIL/HELP style commands.
+    Secured by the SENDBLUE_INBOUND_SECRET shared key (?key=... or
+    X-Inbound-Key header); Basic Auth is bypassed for this route in app.py
+    since Sendblue cannot send credentials.
     """
+    # Diagnostic: record every inbound hit (key presence only, never the value)
+    # so we can confirm Sendblue is actually delivering to this webhook.
+    try:
+        import datetime as _dt
+        _log = ROOT / "tmp" / "sms_inbound.log"
+        _log.parent.mkdir(exist_ok=True)
+        with _log.open("a", encoding="utf-8") as _f:
+            _f.write(f"{_dt.datetime.now().isoformat()} HIT key_present="
+                     f"{bool(request.query_params.get('key') or request.headers.get('x-inbound-key'))} "
+                     f"ua={request.headers.get('user-agent','')[:60]}\n")
+    except Exception:
+        pass
+
     secret = os.getenv("SENDBLUE_INBOUND_SECRET", "").strip()
     if secret:
         provided = (
@@ -660,69 +700,25 @@ async def sendblue_inbound(request: Request):
         or payload.get("text")
         or ""
     )
-    # Reactions may arrive as a dedicated field.
-    reaction = str(payload.get("reaction") or payload.get("emoji") or "")
-    decision = _classify_reply(content) or _classify_reply(reaction)
+    # Approval/rejection replies are intentionally ignored; approval happens
+    # inside the Cloudflare-protected dashboard. This router handles STATUS,
+    # POSITIONS, HIL, HELP, STOP, START, WHOAMI, ROLE, etc.
+    from web.sms_router import dispatch
+    from scripts.sms_alerts import send_sms
 
-    if not HIL_STATE_FILE.exists():
-        return {"success": False, "error": "no pending trade", "parsed": decision}
-    try:
-        state = json.loads(HIL_STATE_FILE.read_text())
-    except Exception:
-        return {"success": False, "error": "state unreadable"}
-
-    if state.get("status") != "pending":
-        return {"success": False, "error": "no pending trade", "parsed": decision}
-    if decision is None:
-        return {
-            "success": False,
-            "error": "unrecognized reply; send YES to approve or NO to reject",
-            "received": content[:120],
-        }
-
-    state["status"] = "approved" if decision == "approve" else "rejected"
-    state["resolved_via"] = "sms_reply"
-    HIL_STATE_FILE.write_text(json.dumps(state))
-
-    ticker = state.get("ticker", "")
-    try:
-        _sh = int(state.get("shares", 0))
-    except Exception:
-        _sh = 0
-    try:
-        _px = float(state.get("price", 0))
-    except Exception:
-        _px = 0.0
-    _line = f"{_sh} share{'s' if _sh != 1 else ''} @ ${_px:,.2f}" if _sh else ticker
-    if decision == "approve":
-        confirm = (
-            f"✅ TRADE CONFIRMED\n\n"
-            f"{ticker} · BUY\n"
-            f"{_line}\n"
-            f"Est. cost  ${_px * _sh:,.2f}\n\n"
-            f"Order is being placed now."
-        )
-    else:
-        confirm = (
-            f"❌ TRADE CANCELED\n\n"
-            f"{ticker} · {_line}\n"
-            f"No order placed."
-        )
-    try:
-        from scripts.sms_alerts import send_sms
-
-        to = (payload.get("from_number") or payload.get("number")
-              or _default_sms_number())
-        if to:
-            await asyncio.to_thread(send_sms, str(to), confirm)
-    except Exception:
-        pass
-
-    return {"success": True, "action": state["status"], "ticker": ticker}
+    from_number = str(payload.get("from_number") or payload.get("number") or "")
+    result = dispatch(from_number, content)
+    reply = result.get("reply") or ""
+    if reply and from_number:
+        try:
+            await asyncio.to_thread(send_sms, from_number, reply)
+        except Exception as exc:
+            result["send_error"] = str(exc)
+    return {"success": True, "router": result}
 
 
 @router.post("/paper/sms/test")
-async def test_sms(body: SmsTestRequest):
+async def test_sms(body: SmsTestRequest, admin: dict = Depends(require_admin)):
     load_dotenv(ROOT / ".env", override=True)
     phone = (body.phone or _default_sms_number()).strip()
     if not phone:
@@ -961,7 +957,7 @@ async def paper_status(force: bool = False):
 
 
 @router.post("/paper/start")
-async def start_paper_runner(body: PaperStartRequest):
+async def start_paper_runner(body: PaperStartRequest, admin: dict = Depends(require_admin)):
     global _process, _started_at, _last_command, _last_log_path, _last_output_base
 
     with _lock:
@@ -1071,6 +1067,14 @@ async def start_paper_runner(body: PaperStartRequest):
             "--ml-algo-only",
             "--no-dashboard",
         ]
+        command.extend(["--hil-timeout-minutes", str(body.hil_timeout_minutes)])
+        if not body.hil_auto_reject:
+            command.append("--hil-auto-approve")
+        if body.sms_on_fills:
+            command.append("--sms-on-fills")
+        command.append("--hold-overnight" if body.hold_overnight else "--no-hold-overnight")
+        if body.model_bundle:
+            command.extend(["--model-bundle", body.model_bundle])
         if body.new_model_bundle:
             command.extend(["--new-model-bundle", body.new_model_bundle])
         if not body.include_pure_ai:
@@ -1144,7 +1148,7 @@ async def get_autostart():
 
 
 @router.post("/paper/autostart")
-async def set_autostart(body: dict):
+async def set_autostart(body: dict, admin: dict = Depends(require_admin)):
     AUTOSTART_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     config = {**DEFAULT_AUTOSTART_CONFIG, **body}
     AUTOSTART_CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
@@ -1423,7 +1427,7 @@ async def paper_quotes(tickers: str = ""):
 
 
 @router.post("/paper/stop")
-async def stop_paper_runner():
+async def stop_paper_runner(admin: dict = Depends(require_admin)):
     global _process
     stopped_pids: list[int] = []
     with _lock:

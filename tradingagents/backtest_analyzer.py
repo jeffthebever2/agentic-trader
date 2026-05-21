@@ -2,8 +2,7 @@
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
-import logging
+from typing import Dict, Tuple, Optional
 
 from tradingagents.logging_config import get_logger
 

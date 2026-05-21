@@ -7,11 +7,10 @@ Usage:
 """
 
 import argparse
-from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from collections import deque
+from datetime import timedelta
 
 import pandas as pd
-import numpy as np
 
 MAX_POSITIONS_PER_DAY = 20
 MAX_SINGLE_POSITION_PCT = 0.20   # 20% of portfolio per position
@@ -217,7 +216,7 @@ def main():
     pnl_df = result["pnl_df"]
     if len(pnl_df) > 0:
         pnl_df["month"] = pd.to_datetime(pnl_df["entry_date"]).dt.to_period("M")
-        print(f"\nMonthly P&L:")
+        print("\nMonthly P&L:")
         for m, g in pnl_df.groupby("month"):
             wr = (g["pnl"] > 0).mean()
             print(f"  {m}: trades={len(g):3d}  win={wr:.1%}  pnl=${g['pnl'].sum():+,.0f}")
@@ -232,14 +231,14 @@ def main():
             for _, v in grp.head(3).iterrows():
                 print(f"    {v['date']} {v['ticker']}: {v['detail']}")
     else:
-        print(f"\nNo market violations detected.")
+        print("\nNo market violations detected.")
 
     # Goal check
     pnl = result["total_pnl"]
     wr = result["win_rate"]
     trades = result["total_trades"]
     print(f"\n{'='*50}")
-    print(f"GOAL CHECK")
+    print("GOAL CHECK")
     print(f"{'='*50}")
     print(f"Win rate >= 85%  : {'PASS' if wr >= 0.85 else 'FAIL'}  ({wr:.1%})")
     print(f"Profit >= $2,500 : {'PASS' if pnl >= 2500 else 'FAIL'}  (${pnl:+,.0f})")

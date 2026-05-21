@@ -3,7 +3,6 @@ Deep research backtest runner.
 Runs: python run_deep.py
 No CLI arguments needed — all settings are configured here.
 """
-import sys
 import types
 
 # ── Configure all settings here ──────────────────────────────────────

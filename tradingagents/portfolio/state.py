@@ -319,6 +319,10 @@ class PortfolioState:
             f"- Open positions: {len(self.positions)}/{self.max_positions}",
             f"- Current {ticker} exposure: {self.get_exposure(ticker):.1%}",
             f"- Buy capacity check: {'PASS' if buy_ok else 'BLOCK'} - {buy_reason}",
+            "  - Dynamic sizing guidelines for this trade:",
+            "    - 0.50 Confidence: Max 1% allocation",
+            "    - 0.70 Confidence: Max 3% allocation",
+            "    - 0.85+ Confidence: Max 10% allocation",
         ]
 
         stops = self.check_stops_and_limits()

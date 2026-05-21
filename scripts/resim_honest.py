@@ -5,8 +5,9 @@
   - win = realized PnL after costs > 0  (not 'touched a tick above entry')
 Report true frontier: max honest WR, and best honest profit, with n.
 """
-import pickle, itertools
-import numpy as np, pandas as pd
+import pickle
+import numpy as np
+import pandas as pd
 from resim import run_config, portfolio
 
 S = pd.read_pickle("/tmp/sigtab.pkl")

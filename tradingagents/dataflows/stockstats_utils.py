@@ -12,6 +12,14 @@ from .config import get_config
 logger = logging.getLogger(__name__)
 
 
+def yfinance_timeout() -> float:
+    """Network timeout for Yahoo calls used by Analyze tools."""
+    try:
+        return max(5.0, float(os.getenv("YFINANCE_TIMEOUT_SECONDS", "20")))
+    except ValueError:
+        return 20.0
+
+
 def yf_retry(func, max_retries=3, base_delay=2.0):
     """Execute a yfinance call with exponential backoff on rate limits.
 
@@ -33,6 +41,13 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
 
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
+    if data is None or not isinstance(data, pd.DataFrame) or data.empty:
+        raise ValueError("No OHLCV data returned from Yahoo Finance")
+    if "Date" not in data.columns:
+        raise ValueError("Yahoo Finance data is missing the Date column")
+    if "Close" not in data.columns:
+        raise ValueError("Yahoo Finance data is missing the Close column")
+
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
 
@@ -40,6 +55,8 @@ def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     data[price_cols] = data[price_cols].apply(pd.to_numeric, errors="coerce")
     data = data.dropna(subset=["Close"])
     data[price_cols] = data[price_cols].ffill().bfill()
+    if data.empty:
+        raise ValueError("Yahoo Finance OHLCV data had no usable rows")
 
     return data
 
@@ -66,9 +83,16 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
         f"{symbol}-YFin-data-{start_str}-{end_str}.csv",
     )
 
+    data = None
     if os.path.exists(data_file):
-        data = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
-    else:
+        try:
+            data = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
+            data = _clean_dataframe(data)
+        except Exception as exc:
+            logger.warning("Ignoring invalid OHLCV cache for %s: %s", symbol, exc)
+            data = None
+
+    if data is None:
         data = yf_retry(lambda: yf.download(
             symbol,
             start=start_str,
@@ -76,14 +100,18 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
             multi_level_index=False,
             progress=False,
             auto_adjust=True,
+            timeout=yfinance_timeout(),
         ))
+        if data is None or data.empty:
+            raise ValueError(f"No market data returned for {symbol}")
         data = data.reset_index()
+        data = _clean_dataframe(data)
         data.to_csv(data_file, index=False, encoding="utf-8")
-
-    data = _clean_dataframe(data)
 
     # Filter to curr_date to prevent look-ahead bias in backtesting
     data = data[data["Date"] <= curr_date_dt]
+    if data.empty:
+        raise ValueError(f"No market data for {symbol} on or before {curr_date}")
 
     return data
 

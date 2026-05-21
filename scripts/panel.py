@@ -19,7 +19,6 @@ Honesty:
 """
 from __future__ import annotations
 
-import pickle
 import sys
 from pathlib import Path
 
@@ -28,7 +27,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import honest_sweep as HS  # noqa: E402
-from honest_sweep import portfolio, fmt  # noqa: E402
+from honest_sweep import portfolio  # noqa: E402
 
 ENRICHED = "ml_models/stock_universe_candidate_20260512/training_data_enriched.csv"
 PX_PKL = "/tmp/honest_px.pkl"

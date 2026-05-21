@@ -1,5 +1,4 @@
 import sys
-import os
 from pathlib import Path
 
 # Add project root to path
@@ -14,7 +13,7 @@ import re
 import subprocess
 hil_token = secrets.token_urlsafe(50)
 
-print(f"\n[HIL] Activating secure Cloudflare Tunnel...")
+print("\n[HIL] Activating secure Cloudflare Tunnel...")
 subprocess.run("killall cloudflared 2>/dev/null || true", shell=True)
 subprocess.run("bash scripts/start_public_tunnel.sh", shell=True)
 

@@ -1,5 +1,7 @@
-"""Webull real-account portfolio integration."""
+"""Webull real-account portfolio integration (per-user isolated)."""
+import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -8,50 +10,68 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from tradingagents.compliance import validate_live_order
 
+from web.auth import require_admin, require_step_up, get_current_user
+
 router = APIRouter()
 
-# Store webull session state server-side (single-user local app)
-_WB_STATE_PATH = ROOT / ".webull_session.json"
-_wb_instance = None
+# Per-user Webull session: each user's broker login is isolated by email.
+# Instance objects are cached in-process; tokens persist to a per-user file.
+_wb_instances: dict[str, object] = {}
 
 
-def _get_wb():
+def _wb_state_path(email: str) -> Path:
+    digest = hashlib.sha256(email.lower().encode()).hexdigest()[:16]
+    return ROOT / f".webull_session_{digest}.json"
+
+
+def _wb_owner_hash(email: str) -> str:
+    return hashlib.sha256(email.lower().encode()).hexdigest()[:12]
+
+
+def _get_wb(email: str):
     try:
         from webull import webull
     except ModuleNotFoundError as exc:
         raise HTTPException(status_code=503, detail="Optional webull package is not installed.") from exc
-    global _wb_instance
-    if _wb_instance is None:
-        _wb_instance = webull()
-    return _wb_instance
+    inst = _wb_instances.get(email)
+    if inst is None:
+        inst = webull()
+        _wb_instances[email] = inst
+    return inst
 
 
-def _load_session() -> dict:
-    if _WB_STATE_PATH.exists():
+def _load_session(email: str) -> dict:
+    path = _wb_state_path(email)
+    if path.exists():
         try:
-            return json.loads(_WB_STATE_PATH.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             pass
     return {}
 
 
-def _save_session(data: dict):
-    _WB_STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+def _save_session(email: str, data: dict):
+    path = _wb_state_path(email)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
 
 
-def _clear_session():
-    if _WB_STATE_PATH.exists():
-        _WB_STATE_PATH.unlink()
-    global _wb_instance
-    _wb_instance = None
+def _clear_session(email: str):
+    path = _wb_state_path(email)
+    if path.exists():
+        path.unlink()
+    _wb_instances.pop(email, None)
 
 
-def _is_connected() -> bool:
-    wb = _get_wb()
+def _is_connected(email: str) -> bool:
+    wb = _get_wb(email)
     return bool(wb._access_token)
 
 
@@ -84,9 +104,9 @@ class PlaceOrderRequest(BaseModel):
 # ── Endpoints ──────────────────────────────────────────────────
 
 @router.get("/webull/status")
-async def wb_status():
+async def wb_status(user: dict = Depends(get_current_user)):
     try:
-        wb = _get_wb()
+        wb = _get_wb(user["email"])
     except HTTPException as exc:
         return {
             "connected": False,
@@ -94,21 +114,26 @@ async def wb_status():
             "account_id": None,
             "token_expire": None,
             "error": exc.detail,
+            "session_scope": "per_user",
+            "session_owner_hash": _wb_owner_hash(user["email"]),
         }
     connected = bool(wb._access_token)
-    session = _load_session()
+    session = _load_session(user["email"])
     return {
         "connected": connected,
         "username": session.get("username", ""),
         "account_id": wb._account_id or session.get("account_id"),
         "token_expire": str(wb._token_expire) if wb._token_expire else None,
+        "session_file": _wb_state_path(user["email"]).exists(),
+        "session_scope": "per_user",
+        "session_owner_hash": _wb_owner_hash(user["email"]),
     }
 
 
 @router.post("/webull/request-mfa")
-async def request_mfa(req: MfaRequest):
+async def request_mfa(req: MfaRequest, admin: dict = Depends(require_admin)):
     """Send MFA code to user's registered email/phone."""
-    wb = _get_wb()
+    wb = _get_wb(admin["email"])
     try:
         result = wb.get_mfa(req.username)
         return {"success": True, "detail": "MFA code sent", "result": str(result)}
@@ -117,8 +142,8 @@ async def request_mfa(req: MfaRequest):
 
 
 @router.post("/webull/login")
-async def wb_login(req: LoginRequest):
-    wb = _get_wb()
+async def wb_login(req: LoginRequest, admin: dict = Depends(require_admin)):
+    wb = _get_wb(admin["email"])
     try:
         if req.mfa_code:
             result = wb.login(
@@ -140,7 +165,7 @@ async def wb_login(req: LoginRequest):
             raise HTTPException(status_code=401, detail="Login failed — no access token returned. MFA may be required.")
 
         session = {"username": req.username, "account_id": wb._account_id}
-        _save_session(session)
+        _save_session(admin["email"], session)
 
         # Get trade token if PIN provided
         trade_token_ok = False
@@ -164,8 +189,8 @@ async def wb_login(req: LoginRequest):
 
 
 @router.post("/webull/trade-pin")
-async def wb_trade_pin(req: TradePinRequest):
-    wb = _get_wb()
+async def wb_trade_pin(req: TradePinRequest, admin: dict = Depends(require_admin)):
+    wb = _get_wb(admin["email"])
     if not wb._access_token:
         raise HTTPException(status_code=401, detail="Not logged in")
     try:
@@ -176,19 +201,19 @@ async def wb_trade_pin(req: TradePinRequest):
 
 
 @router.post("/webull/logout")
-async def wb_logout():
-    wb = _get_wb()
+async def wb_logout(admin: dict = Depends(require_admin)):
+    wb = _get_wb(admin["email"])
     try:
         wb.logout()
     except Exception:
         pass
-    _clear_session()
+    _clear_session(admin["email"])
     return {"success": True}
 
 
 @router.post("/webull/refresh")
-async def wb_refresh():
-    wb = _get_wb()
+async def wb_refresh(admin: dict = Depends(require_admin)):
+    wb = _get_wb(admin["email"])
     if not wb._access_token:
         raise HTTPException(status_code=401, detail="Not logged in")
     try:
@@ -199,8 +224,8 @@ async def wb_refresh():
 
 
 @router.get("/webull/account")
-async def wb_account():
-    wb = _get_wb()
+async def wb_account(user: dict = Depends(get_current_user)):
+    wb = _get_wb(user["email"])
     if not wb._access_token:
         raise HTTPException(status_code=401, detail="Not connected to Webull")
     try:
@@ -215,8 +240,8 @@ async def wb_account():
 
 
 @router.get("/webull/positions")
-async def wb_positions():
-    wb = _get_wb()
+async def wb_positions(user: dict = Depends(get_current_user)):
+    wb = _get_wb(user["email"])
     if not wb._access_token:
         raise HTTPException(status_code=401, detail="Not connected to Webull")
     try:
@@ -254,9 +279,9 @@ async def wb_positions():
 
 
 @router.get("/webull/orders")
-async def wb_orders(status: str = "Working"):
+async def wb_orders(status: str = "Working", user: dict = Depends(get_current_user)):
     """status: Working | Filled | Cancelled | All"""
-    wb = _get_wb()
+    wb = _get_wb(user["email"])
     if not wb._access_token:
         raise HTTPException(status_code=401, detail="Not connected to Webull")
     try:
@@ -289,7 +314,7 @@ async def wb_orders(status: str = "Working"):
 
 
 @router.post("/webull/orders")
-async def wb_place_order(req: PlaceOrderRequest):
+async def wb_place_order(req: PlaceOrderRequest, admin: dict = Depends(require_step_up)):
     decision = validate_live_order(req.model_dump())
     if not decision.allowed:
         raise HTTPException(
@@ -300,7 +325,7 @@ async def wb_place_order(req: PlaceOrderRequest):
                 "blocked_actions": list(decision.blocked_actions),
             },
         )
-    wb = _get_wb()
+    wb = _get_wb(admin["email"])
     if not wb._access_token:
         raise HTTPException(status_code=401, detail="Not connected")
     if not wb._trade_token:
@@ -320,8 +345,8 @@ async def wb_place_order(req: PlaceOrderRequest):
 
 
 @router.delete("/webull/orders/{order_id}")
-async def wb_cancel_order(order_id: str):
-    wb = _get_wb()
+async def wb_cancel_order(order_id: str, admin: dict = Depends(require_admin)):
+    wb = _get_wb(admin["email"])
     if not wb._access_token:
         raise HTTPException(status_code=401, detail="Not connected")
     try:

@@ -83,7 +83,7 @@ def wait_for_gmail_reply(from_email: str, subject_match: str, timeout_sec: int =
                     body_clean = body.strip().lower()
                     if body_clean:
                         return body_clean
-        except Exception as e:
+        except Exception:
             pass
             
         time.sleep(10)

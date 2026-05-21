@@ -53,3 +53,16 @@ class ModelValidationTests(unittest.TestCase):
                     client.get_llm()
 
                 self.assertEqual(caught, [])
+
+    def test_openrouter_catalog_does_not_include_known_retired_free_models(self):
+        retired_models = {
+            "nvidia/nemotron-3-super:free",
+            "openrouter/owl-alpha:free",
+            "deepseek/deepseek-r1:free",
+            "deepseek/deepseek-r1-0528:free",
+            "deepseek/deepseek-chat-v3-0324:free",
+            "nvidia/nemotron-3-nano-omni:free",
+            "nvidia/nemotron-nano-12b-2-vl:free",
+        }
+
+        self.assertTrue(retired_models.isdisjoint(get_known_models()["openrouter"]))

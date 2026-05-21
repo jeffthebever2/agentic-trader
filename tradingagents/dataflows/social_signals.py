@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-import json
-from typing import Iterable
 from urllib.parse import quote_plus
 
 import requests

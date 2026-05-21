@@ -7,8 +7,10 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+
+from web.auth import require_admin
 
 router = APIRouter()
 
@@ -20,6 +22,9 @@ SENSITIVE_KEYS = [
     "ALPHA_VANTAGE_API_KEY", "FIDELITY_USERNAME", "FIDELITY_PASSWORD",
     "TEXTNOW_USERNAME", "TEXTNOW_SID",
     "TEXTBELT_KEY",
+    # Cloudflare Workers AI + Access
+    "CLOUDFLARE_API_TOKEN",
+    "CF_ACCESS_AUD",
 ]
 
 CONFIG_KEYS = [
@@ -43,6 +48,29 @@ CONFIG_KEYS = [
     "SENDBLUE_API_SECRET",
     "SENDBLUE_FROM_NUMBER",
     "SENDBLUE_INBOUND_SECRET",
+    # Cloudflare Workers AI (non-secret config)
+    "CLOUDFLARE_ACCOUNT_ID",
+    "CLOUDFLARE_AI_GATEWAY_URL",
+    "CLOUDFLARE_DEFAULT_QUICK_MODEL",
+    "CLOUDFLARE_DEFAULT_DEEP_MODEL",
+    "CLOUDFLARE_D1_DATABASE_ID",
+    # Cloudflare Access (non-secret config)
+    "CF_ACCESS_TEAM_DOMAIN",
+    "CF_ACCESS_REQUIRED",
+    "CF_ACCESS_BOOTSTRAP_ADMIN",
+    # Default LLM provider for the app
+    "LLM_PROVIDER",
+    # Route all supported AI providers through the Cloudflare AI Gateway.
+    "CLOUDFLARE_GATEWAY_ALL",
+    # Per-provider on/off toggles (absent/blank = enabled).
+    "PROVIDER_OPENAI_ENABLED",
+    "PROVIDER_ANTHROPIC_ENABLED",
+    "PROVIDER_GOOGLE_ENABLED",
+    "PROVIDER_OPENROUTER_ENABLED",
+    "PROVIDER_DEEPSEEK_ENABLED",
+    "PROVIDER_XAI_ENABLED",
+    "PROVIDER_CLOUDFLARE_ENABLED",
+    "PROVIDER_NVIDIA_ENABLED",
 ]
 
 
@@ -137,7 +165,7 @@ class SettingsUpdate(BaseModel):
 
 
 @router.post("/settings")
-async def update_settings(body: SettingsUpdate):
+async def update_settings(body: SettingsUpdate, admin: dict = Depends(require_admin)):
     allowed = set(SENSITIVE_KEYS + CONFIG_KEYS)
     safe = {k: v for k, v in body.updates.items() if k in allowed}
     if not safe:

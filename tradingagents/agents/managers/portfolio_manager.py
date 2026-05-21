@@ -64,6 +64,11 @@ def create_portfolio_manager(llm):
 - **Underweight**: Reduce exposure, take partial profits
 - **Sell**: Exit position or avoid entry
 
+**Confidence Score Guidelines**:
+- 0.50: Average conviction, significant mixed signals.
+- 0.70: Good conviction, analysts generally agree.
+- 0.85+: Very high conviction, unanimous agreement with strong fundamentals.
+
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
 - Trader's transaction proposal: **{trader_plan}**

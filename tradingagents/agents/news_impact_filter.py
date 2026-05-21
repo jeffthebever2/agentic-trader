@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from typing import List, Tuple
 
 import yfinance as yf
 
-from tradingagents.dataflows.macro_signals import get_sec_edgar_rss
 
 
 class NewsImpactFilter:

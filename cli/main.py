@@ -24,7 +24,6 @@ from rich.rule import Rule
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
-from cli.models import AnalystType
 from cli.utils import *
 from cli.announcements import fetch_announcements, display_announcements
 from cli.stats_handler import StatsCallbackHandler
@@ -1523,7 +1522,7 @@ def scan(
         raise typer.Exit(0)
 
     console.print(
-        f"\n[bold]Tickers queued for AI analysis:[/bold] "
+        "\n[bold]Tickers queued for AI analysis:[/bold] "
         + ", ".join(f"[green]{r.ticker}[/green]" for r in passing)
     )
     confirm = typer.prompt(

@@ -32,9 +32,9 @@ DEFAULT_CONFIG = {
     "fmp_daily_limit": int(os.getenv("TRADINGAGENTS_FMP_DAILY_LIMIT", "250")),
     "fmp_reserve_calls": int(os.getenv("TRADINGAGENTS_FMP_RESERVE_CALLS", "25")),
     # LLM settings
-    "llm_provider": "openai",
-    "deep_think_llm": "gpt-5.4",
-    "quick_think_llm": "gpt-5.4-mini",
+    "llm_provider": os.getenv("LLM_PROVIDER", "cloudflare"),
+    "deep_think_llm": os.getenv("CLOUDFLARE_DEFAULT_DEEP_MODEL", "@cf/openai/gpt-oss-120b"),
+    "quick_think_llm": os.getenv("CLOUDFLARE_DEFAULT_QUICK_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a

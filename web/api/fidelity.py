@@ -10,7 +10,8 @@ Auth flow (WebSocket /ws/fidelity-auth):
 Once authenticated, REST endpoints use the stored browser session.
 """
 import asyncio
-import json
+import hashlib
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -19,16 +20,20 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+
+from web.auth import require_admin, require_step_up
 from pydantic import BaseModel, Field
 
 router = APIRouter()
 
-# Persistent browser state so re-login not required each server restart
-_STORAGE_STATE = ROOT / ".fidelity_session.json"
-_PW_CONTEXT = None   # playwright BrowserContext (shared)
-_PW_INSTANCE = None  # playwright handle
-_PW_BROWSER = None   # browser handle
+# Persistent browser state so re-login not required each server restart.
+# Fidelity sessions are keyed by the authenticated Access email. Never share a
+# browser context between users because the context contains live broker cookies.
+_LEGACY_STORAGE_STATE = ROOT / ".fidelity_session.json"
+_PW_CONTEXTS: dict[str, object] = {}
+_PW_INSTANCES: dict[str, object] = {}
+_PW_BROWSERS: dict[str, object] = {}
 
 LOGIN_URL = "https://digital.fidelity.com/ftgw/digital/login/full-page"
 PORTFOLIO_URL = "https://digital.fidelity.com/ftgw/digital/portfolio/positions"
@@ -36,41 +41,66 @@ SUMMARY_URL = "https://digital.fidelity.com/ftgw/digital/portfolio/summary"
 
 # ── Playwright helpers ─────────────────────────────────────────
 
-async def _reset_browser_state():
-    global _PW_CONTEXT, _PW_BROWSER, _PW_INSTANCE
-    try:
-        if _PW_CONTEXT:
-            await _PW_CONTEXT.close()
-    except Exception:
-        pass
-    try:
-        if _PW_BROWSER:
-            await _PW_BROWSER.close()
-    except Exception:
-        pass
-    try:
-        if _PW_INSTANCE:
-            await _PW_INSTANCE.__aexit__(None, None, None)
-    except Exception:
-        pass
-    _PW_CONTEXT = None
-    _PW_BROWSER = None
-    _PW_INSTANCE = None
+def _user_key(email: str) -> str:
+    return (email or "").strip().lower()
 
 
-async def _ensure_browser():
-    global _PW_INSTANCE, _PW_BROWSER, _PW_CONTEXT
-    if _PW_CONTEXT is not None:
+def _fidelity_state_path(email: str) -> Path:
+    digest = hashlib.sha256(_user_key(email).encode()).hexdigest()[:16]
+    return ROOT / f".fidelity_session_{digest}.json"
+
+
+def _session_owner_hash(email: str) -> str:
+    return hashlib.sha256(_user_key(email).encode()).hexdigest()[:12]
+
+
+def _chmod_private(path: Path):
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
+async def _reset_browser_state(email: str):
+    key = _user_key(email)
+    context = _PW_CONTEXTS.pop(key, None)
+    browser = _PW_BROWSERS.pop(key, None)
+    instance = _PW_INSTANCES.pop(key, None)
+    try:
+        if context:
+            await context.close()
+    except Exception:
+        pass
+    try:
+        if browser:
+            await browser.close()
+    except Exception:
+        pass
+    try:
+        if instance:
+            await instance.__aexit__(None, None, None)
+    except Exception:
+        pass
+
+
+async def _ensure_browser(email: str):
+    key = _user_key(email)
+    if not key:
+        raise RuntimeError("Authenticated user email is required for Fidelity session isolation")
+    context = _PW_CONTEXTS.get(key)
+    browser = _PW_BROWSERS.get(key)
+    if context is not None:
         # Check browser is still alive before returning cached context
         try:
-            if _PW_BROWSER.is_connected():
-                return _PW_CONTEXT
+            if browser and browser.is_connected():
+                return context
         except Exception:
             pass
         # Browser dead — reset and fall through to create a new one
-        await _reset_browser_state()
+        await _reset_browser_state(key)
     from playwright.async_api import async_playwright
-    _PW_INSTANCE = await async_playwright().__aenter__()
+    instance = await async_playwright().__aenter__()
+    _PW_INSTANCES[key] = instance
     launch_args = [
         "--no-sandbox",
         "--disable-blink-features=AutomationControlled",
@@ -83,21 +113,23 @@ async def _ensure_browser():
     ]
     # Try system Edge/Chrome headless first (less detectable than bundled Chromium)
     try:
-        _PW_BROWSER = await _PW_INSTANCE.chromium.launch(
+        browser = await instance.chromium.launch(
             channel="msedge", headless=True, args=launch_args
         )
     except Exception:
         try:
-            _PW_BROWSER = await _PW_INSTANCE.chromium.launch(
+            browser = await instance.chromium.launch(
                 channel="chrome", headless=True, args=launch_args
             )
         except Exception:
             # Bundled Chromium — Fidelity blocks headless, run headed but off-screen
-            _PW_BROWSER = await _PW_INSTANCE.chromium.launch(
+            browser = await instance.chromium.launch(
                 headless=False, args=hidden_args
             )
-    storage = str(_STORAGE_STATE) if _STORAGE_STATE.exists() else None
-    _PW_CONTEXT = await _PW_BROWSER.new_context(
+    _PW_BROWSERS[key] = browser
+    storage_path = _fidelity_state_path(key)
+    storage = str(storage_path) if storage_path.exists() else None
+    context = await browser.new_context(
         storage_state=storage,
         viewport={"width": 1280, "height": 900},
         user_agent=(
@@ -109,29 +141,33 @@ async def _ensure_browser():
         accept_downloads=False,
     )
     # Suppress automation flags
-    await _PW_CONTEXT.add_init_script(
+    await context.add_init_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
     )
-    return _PW_CONTEXT
+    _PW_CONTEXTS[key] = context
+    return context
 
 
-async def _save_storage():
-    global _PW_CONTEXT
-    if _PW_CONTEXT:
-        await _PW_CONTEXT.storage_state(path=str(_STORAGE_STATE))
+async def _save_storage(email: str):
+    key = _user_key(email)
+    context = _PW_CONTEXTS.get(key)
+    if context:
+        path = _fidelity_state_path(key)
+        await context.storage_state(path=str(path))
+        _chmod_private(path)
 
 
-async def _is_logged_in() -> bool:
-    global _PW_CONTEXT
-    if _PW_CONTEXT is None:
-        if not _STORAGE_STATE.exists():
+async def _is_logged_in(email: str) -> bool:
+    key = _user_key(email)
+    if _PW_CONTEXTS.get(key) is None:
+        if not _fidelity_state_path(key).exists():
             return False
         try:
-            await _ensure_browser()
+            await _ensure_browser(key)
         except Exception:
             return False
     try:
-        ctx = await _ensure_browser()
+        ctx = await _ensure_browser(key)
         page = await ctx.new_page()
         await page.goto(PORTFOLIO_URL, wait_until="domcontentloaded", timeout=20_000)
         await asyncio.sleep(2)
@@ -142,10 +178,12 @@ async def _is_logged_in() -> bool:
         return False
 
 
-async def _close_session():
-    await _reset_browser_state()
-    if _STORAGE_STATE.exists():
-        _STORAGE_STATE.unlink()
+async def _close_session(email: str):
+    key = _user_key(email)
+    await _reset_browser_state(key)
+    path = _fidelity_state_path(key)
+    if path.exists():
+        path.unlink()
 
 
 # ── Auth WebSocket ─────────────────────────────────────────────
@@ -201,6 +239,12 @@ async def _detect_page_state(page) -> str:
 async def ws_fidelity_auth(websocket: WebSocket):
     """Drive Fidelity login. Pauses for TOTP when required."""
     await websocket.accept()
+    # ── Admin auth gate (Cloudflare Access JWT verified) ──
+    from web.auth import ws_require_admin
+    _ws_user = await ws_require_admin(websocket)
+    if _ws_user is None:
+        return
+    user_email = _ws_user["email"]
 
     async def send(data: dict):
         try:
@@ -225,7 +269,8 @@ async def ws_fidelity_auth(websocket: WebSocket):
     await send({"step": "logging_in", "message": "Starting browser…"})
 
     try:
-        ctx = await _ensure_browser()
+        await _reset_browser_state(user_email)
+        ctx = await _ensure_browser(user_email)
         page = await ctx.new_page()
 
         await send({"step": "logging_in", "message": "Navigating to Fidelity login…"})
@@ -362,7 +407,7 @@ async def ws_fidelity_auth(websocket: WebSocket):
             await page.close()
             return
 
-        await _save_storage()
+        await _save_storage(user_email)
         await page.close()
 
         await send({"step": "authenticated", "message": "Connected to Fidelity successfully"})
@@ -377,14 +422,22 @@ async def ws_fidelity_auth(websocket: WebSocket):
 # ── REST endpoints (require active session) ────────────────────
 
 @router.get("/fidelity/status")
-async def fidelity_status():
-    connected = await _is_logged_in()
-    return {"connected": connected, "session_file": _STORAGE_STATE.exists()}
+async def fidelity_status(user: dict = Depends(require_admin)):
+    email = user["email"]
+    path = _fidelity_state_path(email)
+    connected = await _is_logged_in(email)
+    return {
+        "connected": connected,
+        "session_file": path.exists(),
+        "session_scope": "per_user",
+        "session_owner_hash": _session_owner_hash(email),
+        "legacy_session_file": _LEGACY_STORAGE_STATE.exists(),
+    }
 
 
 @router.post("/fidelity/logout")
-async def fidelity_logout():
-    await _close_session()
+async def fidelity_logout(admin: dict = Depends(require_admin)):
+    await _close_session(admin["email"])
     return {"success": True}
 
 
@@ -398,9 +451,9 @@ async def _nav(page, url: str, sleep: float = 5.0):
 
 
 @router.get("/fidelity/debug-html")
-async def fidelity_debug_html():
+async def fidelity_debug_html(admin: dict = Depends(require_admin)):
     """Return page URL + first 8000 chars of body text for scraping diagnosis."""
-    ctx = await _ensure_browser()
+    ctx = await _ensure_browser(admin["email"])
     page = await ctx.new_page()
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
@@ -412,9 +465,9 @@ async def fidelity_debug_html():
 
 
 @router.get("/fidelity/debug-grid")
-async def fidelity_debug_grid():
+async def fidelity_debug_grid(admin: dict = Depends(require_admin)):
     """Dump AG-Grid col-id structure to find exact field names."""
-    ctx = await _ensure_browser()
+    ctx = await _ensure_browser(admin["email"])
     page = await ctx.new_page()
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
@@ -447,9 +500,9 @@ async def fidelity_debug_grid():
 
 
 @router.get("/fidelity/positions")
-async def fidelity_positions():
+async def fidelity_positions(admin: dict = Depends(require_admin)):
     from fastapi import HTTPException
-    ctx = await _ensure_browser()
+    ctx = await _ensure_browser(admin["email"])
     page = await ctx.new_page()
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
@@ -535,7 +588,7 @@ async def fidelity_positions():
         }
         """)
 
-        await _save_storage()
+        await _save_storage(admin["email"])
         positions = result.get("positions", [])
         grand = result.get("grandTotals", {})
         return {"positions": positions, "grand_totals": grand, "url": page.url, "count": len(positions)}
@@ -544,10 +597,10 @@ async def fidelity_positions():
 
 
 @router.get("/fidelity/summary")
-async def fidelity_summary():
+async def fidelity_summary(admin: dict = Depends(require_admin)):
     """Pull summary from positions page (grand total row) — no separate navigation."""
     from fastapi import HTTPException
-    ctx = await _ensure_browser()
+    ctx = await _ensure_browser(admin["email"])
     page = await ctx.new_page()
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
@@ -582,17 +635,17 @@ async def fidelity_summary():
         }
         """)
 
-        await _save_storage()
+        await _save_storage(admin["email"])
         return {"summary": summary, "url": page.url}
     finally:
         await page.close()
 
 
 @router.get("/fidelity/screenshot")
-async def fidelity_screenshot():
+async def fidelity_screenshot(admin: dict = Depends(require_admin)):
     """Return base64 screenshot of current Fidelity page (debug)."""
     import base64
-    ctx = await _ensure_browser()
+    ctx = await _ensure_browser(admin["email"])
     page = await ctx.new_page()
     try:
         await page.goto(PORTFOLIO_URL, wait_until="domcontentloaded", timeout=30_000)
@@ -614,9 +667,9 @@ class FidelityTradeRequest(BaseModel):
     execute: bool = False
 
 @router.post("/fidelity/trade")
-async def fidelity_trade(body: FidelityTradeRequest):
+async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(require_step_up)):
     from fastapi import HTTPException
-    ctx = await _ensure_browser()
+    ctx = await _ensure_browser(admin["email"])
     page = await ctx.new_page()
     try:
         # Navigate to Trade Entry
@@ -771,7 +824,7 @@ async def fidelity_trade(body: FidelityTradeRequest):
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Failed to place order: {e}")
 
-        await _save_storage()
+        await _save_storage(admin["email"])
         return {"success": True, "status": order_status, "preview_text_snippet": preview_text[:1000]}
 
     finally:
@@ -779,12 +832,12 @@ async def fidelity_trade(body: FidelityTradeRequest):
 
 
 @router.get("/fidelity/debug-trade")
-async def fidelity_debug_trade():
+async def fidelity_debug_trade(admin: dict = Depends(require_admin)):
     """Navigate to trade entry page and dump all input/button/select elements for selector diagnosis."""
     page = None
     current_url = "n/a"
     try:
-        ctx = await _ensure_browser()
+        ctx = await _ensure_browser(admin["email"])
         page = await ctx.new_page()
         await _nav(page, "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry", sleep=7)
         current_url = page.url

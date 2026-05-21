@@ -26,7 +26,6 @@ is a deterministic replay.
 from __future__ import annotations
 
 import glob
-import json
 import pickle
 import sys
 from pathlib import Path

@@ -127,6 +127,57 @@ def send_sendblue(to: str, message: str) -> dict:
     return result
 
 
+def evaluate_sendblue(number: str) -> dict:
+    """Sendblue contact verification via the evaluate-service endpoint.
+
+    Confirms a number is reachable and reports whether it can receive iMessage
+    or only SMS — without sending a message. Returns the unified shape:
+    {success, service, number, error}. `service` is "iMessage" | "SMS" | None.
+    """
+    load_env_defaults()
+    key_id = os.getenv("SENDBLUE_API_KEY_ID", "").strip()
+    secret = os.getenv("SENDBLUE_API_SECRET", "").strip()
+    if not key_id or not secret:
+        return {
+            "success": False,
+            "error": "Sendblue not configured: set SENDBLUE_API_KEY_ID and SENDBLUE_API_SECRET in .env",
+        }
+    try:
+        response = requests.get(
+            "https://api.sendblue.co/api/evaluate-service",
+            headers={
+                "sb-api-key-id": key_id,
+                "sb-api-secret-key": secret,
+                "Content-Type": "application/json",
+            },
+            params={"number": number},
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return {"success": False, "error": f"Sendblue request failed: {exc}"}
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {"raw": response.text[:500]}
+    service = payload.get("service") or None
+    ok = bool(response.ok and service)
+    result = {
+        "success": ok,
+        "provider": "sendblue",
+        "number": payload.get("number") or number,
+        "service": service,  # "iMessage" | "SMS" | None
+        "response": payload,
+    }
+    if not ok:
+        result["error"] = (
+            payload.get("error_message")
+            or payload.get("message")
+            or payload.get("raw")
+            or f"HTTP {response.status_code}"
+        )
+    return result
+
+
 def send_sms(to: str, message: str, provider: str | None = None) -> dict:
     load_env_defaults()
     # Sendblue is the primary texting service; falls back only if explicitly

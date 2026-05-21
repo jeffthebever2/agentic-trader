@@ -1,7 +1,8 @@
 """Map the true WR/profit frontier with the real simulator. No filters except
 optional rsi44_50. Print full grid so we see the ceiling."""
 import pickle
-import numpy as np, pandas as pd
+import numpy as np
+import pandas as pd
 from resim import run_config, portfolio
 
 S = pd.read_pickle("/tmp/sigtab.pkl")

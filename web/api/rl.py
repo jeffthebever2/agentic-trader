@@ -4,7 +4,6 @@ import concurrent.futures
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent.parent
@@ -79,6 +78,11 @@ async def get_rl_status():
 async def ws_rl_train(websocket: WebSocket):
     """Stream train_rl_agent.py output. Expects JSON config."""
     await websocket.accept()
+    # ── Admin auth gate (Cloudflare Access JWT verified) ──
+    from web.auth import ws_require_admin
+    _ws_user = await ws_require_admin(websocket)
+    if _ws_user is None:
+        return
     queue: asyncio.Queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()
 

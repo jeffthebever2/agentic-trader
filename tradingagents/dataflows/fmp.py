@@ -9,7 +9,6 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from pathlib import Path
-from urllib.parse import urlencode
 
 import requests
 

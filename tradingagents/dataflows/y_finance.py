@@ -3,8 +3,13 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import pandas as pd
 import yfinance as yf
-import os
-from .stockstats_utils import StockstatsUtils, _clean_dataframe, yf_retry, load_ohlcv, filter_financials_by_date
+from .stockstats_utils import (
+    StockstatsUtils,
+    yf_retry,
+    load_ohlcv,
+    filter_financials_by_date,
+    yfinance_timeout,
+)
 
 def get_YFin_data_online(
     symbol: Annotated[str, "ticker symbol of the company"],
@@ -19,10 +24,14 @@ def get_YFin_data_online(
     ticker = yf.Ticker(symbol.upper())
 
     # Fetch historical data for the specified date range
-    data = yf_retry(lambda: ticker.history(start=start_date, end=end_date))
+    data = yf_retry(lambda: ticker.history(
+        start=start_date,
+        end=end_date,
+        timeout=yfinance_timeout(),
+    ))
 
     # Check if data is empty
-    if data.empty:
+    if data is None or data.empty:
         return (
             f"No data found for symbol '{symbol}' between {start_date} and {end_date}"
         )

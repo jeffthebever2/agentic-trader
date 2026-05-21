@@ -1,7 +1,8 @@
 """Find n>=150 & WR>=80 & profit>=1000. Test next_open entry (fills every
 signal -> ~2x trades) + filter loosening around the rsi44_50+cmf winning region."""
-import pickle, itertools
-import numpy as np, pandas as pd
+import pickle
+import numpy as np
+import pandas as pd
 from resim import run_config, portfolio
 
 S = pd.read_pickle("/tmp/sigtab.pkl")

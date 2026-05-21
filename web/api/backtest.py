@@ -12,8 +12,10 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+
+from web.auth import require_admin
 
 router = APIRouter()
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -106,7 +108,7 @@ async def get_backtest_result(filename: str):
 
 
 @router.post("/backtest/screen")
-async def screen_tickers(req: ScreenRequest):
+async def screen_tickers(req: ScreenRequest, admin: dict = Depends(require_admin)):
     """Run technical screener (no LLM calls) on a list of tickers."""
     try:
         if req.mode == "swing":
@@ -157,6 +159,11 @@ async def screen_tickers(req: ScreenRequest):
 async def ws_backtest(websocket: WebSocket):
     """Run LLM-powered backtest: analysis for each ticker/date combo."""
     await websocket.accept()
+    # ── Admin auth gate (Cloudflare Access JWT verified) ──
+    from web.auth import ws_require_admin
+    _ws_user = await ws_require_admin(websocket)
+    if _ws_user is None:
+        return
 
     queue: asyncio.Queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()
@@ -306,6 +313,11 @@ class AlgoBacktestRequest(BaseModel):
 async def ws_algo_backtest(websocket: WebSocket):
     """Run the technical backtest engine (backtest.py) via WebSocket with live stdout streaming."""
     await websocket.accept()
+    # ── Admin auth gate (Cloudflare Access JWT verified) ──
+    from web.auth import ws_require_admin
+    _ws_user = await ws_require_admin(websocket)
+    if _ws_user is None:
+        return
 
     queue: asyncio.Queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()

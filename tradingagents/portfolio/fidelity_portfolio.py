@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 

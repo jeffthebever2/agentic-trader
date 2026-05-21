@@ -1,7 +1,6 @@
 """Performance monitoring and metrics collection."""
 
 import time
-import logging
 from contextlib import contextmanager
 from typing import Dict, Any, Optional
 from collections import defaultdict

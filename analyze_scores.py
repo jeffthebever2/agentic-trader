@@ -6,9 +6,10 @@ grid_search_results + score_bucket_analysis if trades aren't stored.
 Usage:  python analyze_scores.py
         python analyze_scores.py backtest_results_20260505_230429.json
 """
-import sys, json, glob
+import sys
+import json
+import glob
 from pathlib import Path
-import numpy as np
 
 # ── Find results file ─────────────────────────────────────────────────
 if len(sys.argv) > 1:

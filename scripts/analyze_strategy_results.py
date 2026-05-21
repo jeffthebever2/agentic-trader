@@ -13,7 +13,10 @@ Usage:
   python3 scripts/analyze_strategy_results.py [results.json] [--target 0.35]
 """
 from __future__ import annotations
-import json, sys, glob, argparse, datetime as dt
+import json
+import glob
+import argparse
+import datetime as dt
 
 # archetype -> named portfolios it represents
 MAP = {

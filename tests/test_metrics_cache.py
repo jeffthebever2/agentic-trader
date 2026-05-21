@@ -1,7 +1,5 @@
-import json
 from pathlib import Path
 
-import pytest
 
 from tradingagents.dataflows.cache import DataCache
 from tradingagents.dataflows import interface

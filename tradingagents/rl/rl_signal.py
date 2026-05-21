@@ -196,7 +196,6 @@ class RLSignalProvider:
     def _build_obs(self, price_data: Dict, as_of_date: str) -> np.ndarray:
         """Build the TD3 state vector as of a specific date."""
         from tradingagents.rl.environment import (
-            StockTradingEnv,
             LOOKBACK,
             _compute_rsi,
             _compute_macd_hist,
@@ -305,8 +304,8 @@ def _format_context(
     lines = [
         "## RL Policy Signal (TD3 Deep Reinforcement Learning)",
         "",
-        f"The TD3 agent was trained on historical price data using deep reinforcement learning.",
-        f"It outputs a continuous portfolio allocation score independent of fundamental/news analysis.",
+        "The TD3 agent was trained on historical price data using deep reinforcement learning.",
+        "It outputs a continuous portfolio allocation score independent of fundamental/news analysis.",
         "",
         f"- **Ticker**: {ticker}",
         f"- **Allocation score**: {raw_score:+.3f} (range: -1 to +1)",

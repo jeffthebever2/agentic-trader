@@ -46,7 +46,6 @@ def _run_scan(cfg: dict, queue: asyncio.Queue, main_loop: asyncio.AbstractEventL
     emit = lambda msg: _emit(queue, main_loop, msg)
 
     try:
-        import numpy as np
         import pandas as pd
         import yfinance as yf
         from backtest import (
@@ -54,7 +53,6 @@ def _run_scan(cfg: dict, queue: asyncio.Queue, main_loop: asyncio.AbstractEventL
             precompute, score_at, load_tickers,
             build_spy_regime, build_vix_regime,
             build_vix_term_structure, build_sector_breadth,
-            _extract_ticker_dfs,
         )
         from scripts.paper_trade_today import (
             download_daily_history, clean_daily_frame,
@@ -277,6 +275,11 @@ class ScanRequest(BaseModel):
 @router.websocket("/ws/scanner/scan")
 async def ws_scanner(websocket: WebSocket):
     await websocket.accept()
+    # ── Admin auth gate (Cloudflare Access JWT verified) ──
+    from web.auth import ws_require_admin
+    _ws_user = await ws_require_admin(websocket)
+    if _ws_user is None:
+        return
 
     queue: asyncio.Queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()

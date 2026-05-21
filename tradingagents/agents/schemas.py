@@ -196,6 +196,13 @@ class PortfolioDecision(BaseModel):
             "incorporate them; otherwise rely solely on the current analysis."
         ),
     )
+    confidence_score: float = Field(
+        default=0.5,
+        description=(
+            "A float between 0.0 and 1.0 reflecting your conviction in the rating. "
+            "0.50 means average conviction, >0.85 means very high conviction with unanimous evidence."
+        ),
+    )
     price_target: Optional[float] = Field(
         default=None,
         description="Optional target price in the instrument's quote currency.",
@@ -216,6 +223,8 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     """
     parts = [
         f"**Rating**: {decision.rating.value}",
+        "",
+        f"**Confidence**: {decision.confidence_score * 100:.1f}%",
         "",
         f"**Executive Summary**: {decision.executive_summary}",
         "",

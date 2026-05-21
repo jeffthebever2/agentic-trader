@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -7,10 +8,14 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from web.auth import get_current_user
+
 router = APIRouter()
+
+_PORTFOLIO_TABLE = "agentic_portfolios"
 
 
 def _get_config():
@@ -18,20 +23,62 @@ def _get_config():
     return DEFAULT_CONFIG
 
 
-def _load_portfolio() -> dict:
+def _empty_portfolio() -> dict:
     cfg = _get_config()
-    path = Path(cfg["portfolio_state_path"])
+    return {"positions": {}, "cash": cfg.get("starting_cash", 100000.0), "paper_trades": []}
+
+
+def _user_file(email: str) -> Path:
+    """Per-user local fallback path for the manual portfolio."""
+    cfg = _get_config()
+    base = Path(cfg["portfolio_state_path"]).parent
+    digest = hashlib.sha256(email.lower().encode()).hexdigest()[:16]
+    return base / f"positions_{digest}.json"
+
+
+def _remote_store():
+    try:
+        from web import d1_store
+        if d1_store.enabled():
+            return d1_store
+    except Exception:
+        pass
+    try:
+        from web import supabase_store
+        return supabase_store if supabase_store.enabled() else None
+    except Exception:
+        return None
+
+
+def _load_portfolio(email: str) -> dict:
+    """Load the manual portfolio for ONE user (Supabase or per-user file)."""
+    remote_store = _remote_store()
+    if remote_store is not None:
+        try:
+            data = remote_store.blob_get(_PORTFOLIO_TABLE, email)
+            if data:
+                return data
+            return _empty_portfolio()
+        except Exception:
+            pass  # fall back to local file
+    path = _user_file(email)
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {"positions": {}, "cash": cfg.get("starting_cash", 100000.0), "paper_trades": []}
+    return _empty_portfolio()
 
 
-def _save_portfolio(data: dict):
-    cfg = _get_config()
-    path = Path(cfg["portfolio_state_path"])
+def _save_portfolio(email: str, data: dict):
+    remote_store = _remote_store()
+    if remote_store is not None:
+        try:
+            remote_store.blob_put(_PORTFOLIO_TABLE, email, data)
+            return
+        except Exception:
+            pass
+    path = _user_file(email)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
@@ -48,8 +95,8 @@ def _get_price(ticker: str) -> float:
 
 
 @router.get("/portfolio")
-async def get_portfolio():
-    data = _load_portfolio()
+async def get_portfolio(user: dict = Depends(get_current_user)):
+    data = _load_portfolio(user["email"])
     positions = []
     total_invested = 0.0
 
@@ -106,8 +153,8 @@ class AddPositionRequest(BaseModel):
 
 
 @router.post("/portfolio/positions")
-async def add_position(req: AddPositionRequest):
-    data = _load_portfolio()
+async def add_position(req: AddPositionRequest, user: dict = Depends(get_current_user)):
+    data = _load_portfolio(user["email"])
     positions = data.get("positions", {})
     ticker = req.ticker.upper().strip()
 
@@ -128,13 +175,13 @@ async def add_position(req: AddPositionRequest):
     }
     data["positions"] = positions
     data["cash"] = cash - cost
-    _save_portfolio(data)
+    _save_portfolio(user["email"], data)
     return {"success": True, "ticker": ticker}
 
 
 @router.delete("/portfolio/positions/{ticker}")
-async def remove_position(ticker: str):
-    data = _load_portfolio()
+async def remove_position(ticker: str, user: dict = Depends(get_current_user)):
+    data = _load_portfolio(user["email"])
     positions = data.get("positions", {})
     ticker = ticker.upper()
 
@@ -147,12 +194,14 @@ async def remove_position(ticker: str):
     proceeds = shares * current_price
     data["positions"] = positions
     data["cash"] = float(data.get("cash", 0)) + proceeds
-    _save_portfolio(data)
+    _save_portfolio(user["email"], data)
     return {"success": True, "ticker": ticker, "proceeds": round(proceeds, 2)}
 
 
 @router.get("/portfolio/history")
-async def get_portfolio_history():
+async def get_portfolio_history(user: dict = Depends(get_current_user)):
+    # Trade log is currently a single global file; expose as-is for now.
+    # TODO: per-user trade logs once the writer is user-aware.
     cfg = _get_config()
     log_path = Path(cfg["trade_log_path"])
     trades = []
@@ -167,6 +216,6 @@ async def get_portfolio_history():
 
 
 @router.get("/portfolio/paper-trades")
-async def get_paper_trades():
-    data = _load_portfolio()
+async def get_paper_trades(user: dict = Depends(get_current_user)):
+    data = _load_portfolio(user["email"])
     return {"paper_trades": data.get("paper_trades", [])}

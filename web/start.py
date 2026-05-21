@@ -26,12 +26,12 @@ except ImportError:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TradingAgents Web UI")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind (default: 0.0.0.0)")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8001, help="Port to listen on (default: 8001)")
     parser.add_argument("--reload", action="store_true", help="Enable auto-reload for development")
     args = parser.parse_args()
 
-    print(f"\n  TradingAgents Web UI")
+    print("\n  TradingAgents Web UI")
     print(f"  http://localhost:{args.port}\n")
 
     uvicorn.run(

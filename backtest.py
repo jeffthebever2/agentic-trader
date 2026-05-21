@@ -4283,7 +4283,7 @@ def run_backtest(args):
     print("  RESULTS")
     print("=" * 70)
 
-    print(f"\n  By hold period:")
+    print("\n  By hold period:")
     hdr = (f"  {'Hold':>5}  {'Trades':>7}  {'Direction':>10}  {'TargetHit':>10}  "
            f"{'StoppedOut':>11}  {'AvgRet%':>8}  {'ProfFact':>9}  "
            f"{'Sortino':>8}  {'Kelly%':>7}  {'BeatSPY':>8}")
@@ -4390,7 +4390,7 @@ def run_backtest(args):
 
     if ml_analysis:
         ml_settings = ml_analysis.get("settings", {})
-        print(f"\n  ML analysis:")
+        print("\n  ML analysis:")
         if ml_analysis.get("evaluation") == "purged_walk_forward":
             leak = ml_analysis.get("leakage_controls", {})
             print("    Evaluation       : purged walk-forward (honest OOS)")
@@ -4399,7 +4399,7 @@ def run_backtest(args):
             print(f"    Embargo / step   : {leak.get('embargo_days', 'n/a')}d / "
                   f"{leak.get('step_days', 'n/a')}d")
         else:
-            print(f"    Evaluation       : last-period split (legacy diagnostic)")
+            print("    Evaluation       : last-period split (legacy diagnostic)")
             print(f"    Rows used        : {ml_settings.get('rows_used', 0):,} "
                   f"(train={ml_settings.get('train_rows', 0):,}, test={ml_settings.get('test_rows', 0):,})")
             win_rf = ml_analysis.get("trade_win_loss_prediction", {}).get("random_forest", {})
@@ -4449,7 +4449,7 @@ def run_backtest(args):
 
     # Position sizing
     if position_sizing:
-        print(f"\n  Position sizing (Kelly / Half-Kelly):")
+        print("\n  Position sizing (Kelly / Half-Kelly):")
         ps_primary = position_sizing.get(f"{primary_h}d", {})
         if ps_primary:
             print(f"    Kelly% (h={primary_h}d)      : "

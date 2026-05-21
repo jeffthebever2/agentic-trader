@@ -18,7 +18,6 @@ import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pandas as pd
 import yfinance as yf
 from tqdm import tqdm
@@ -34,9 +33,7 @@ except Exception:
 
 import backtest
 from backtest import (
-    BATCH_SIZE,
     MIN_HISTORY,
-    build_spy_regime,
     download_all,
     load_tickers,
     measure_outcome,

@@ -3,6 +3,7 @@ import concurrent.futures
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -27,6 +28,7 @@ _PROVIDER_KEY_ENV = {
     "qwen": ("DASHSCOPE_API_KEY",),
     "glm": ("ZHIPU_API_KEY",),
     "azure": ("AZURE_OPENAI_API_KEY",),
+    "cloudflare": ("CLOUDFLARE_API_TOKEN",),
 }
 
 _PROVIDER_LABEL = {
@@ -40,6 +42,7 @@ _PROVIDER_LABEL = {
     "qwen": "Qwen",
     "glm": "GLM",
     "azure": "Azure OpenAI",
+    "cloudflare": "Cloudflare Workers AI",
     "ollama": "Ollama",
 }
 
@@ -80,6 +83,18 @@ def _validate_provider_auth(req: AnalyzeRequest) -> str | None:
     env_name, key = _configured_provider_key(provider)
     label = _PROVIDER_LABEL.get(provider, provider)
     expected = " or ".join(_PROVIDER_KEY_ENV.get(provider, ()))
+
+    if provider == "cloudflare":
+        has_base = bool(
+            os.environ.get("CLOUDFLARE_AI_GATEWAY_URL", "").strip()
+            or os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        )
+        if not has_base:
+            return (
+                "Cloudflare Workers AI is selected, but no Cloudflare account or gateway is configured. "
+                "Set CLOUDFLARE_ACCOUNT_ID or CLOUDFLARE_AI_GATEWAY_URL in Settings > AI Providers, "
+                "then run the analysis again."
+            )
 
     if not key:
         return (
@@ -256,6 +271,11 @@ def _serialize_final_state(state: dict) -> dict:
 @router.websocket("/ws/analyze")
 async def ws_analyze(websocket: WebSocket):
     await websocket.accept()
+    # ── Admin auth gate (Cloudflare Access JWT verified) ──
+    from web.auth import ws_require_admin
+    _ws_user = await ws_require_admin(websocket)
+    if _ws_user is None:
+        return
 
     queue: asyncio.Queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()
@@ -305,7 +325,7 @@ async def ws_analyze(websocket: WebSocket):
             graph = TradingAgentsGraph(req.analysts, config=config, debug=False)
 
             asyncio.run_coroutine_threadsafe(
-                queue.put({"type": "status", "message": "Starting agent pipeline..."}),
+                queue.put({"type": "status", "message": "Starting agent pipeline and downloading market data..."}),
                 main_loop,
             )
 
@@ -384,9 +404,26 @@ async def ws_analyze(websocket: WebSocket):
 
     future = main_loop.run_in_executor(_executor, run_sync)
 
+    last_heartbeat = time.monotonic()
     try:
         while True:
-            item = await queue.get()
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=12.0)
+            except asyncio.TimeoutError:
+                elapsed = int(time.monotonic() - last_heartbeat)
+                try:
+                    await websocket.send_json({
+                        "type": "status",
+                        "message": (
+                            "Still working: downloading/caching market data or waiting on an AI tool "
+                            f"({elapsed}s since last update)..."
+                        ),
+                    })
+                except Exception:
+                    break
+                continue
+
+            last_heartbeat = time.monotonic()
             if item is None:
                 break
             try:
@@ -396,7 +433,10 @@ async def ws_analyze(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
-        try:
-            await future
-        except Exception:
-            pass
+        if future.done():
+            try:
+                await future
+            except Exception:
+                pass
+        else:
+            future.cancel()

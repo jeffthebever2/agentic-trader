@@ -16,7 +16,7 @@ load_dotenv(ROOT / ".env.enterprise", override=False)
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
@@ -33,6 +33,12 @@ from web.api.webull_portfolio import router as webull_router
 from web.api.fidelity import router as fidelity_router
 from web.api.scanner import router as scanner_router
 from web.api.market import router as market_router
+from web.api.auth_routes import router as auth_router
+from web.api.twofa_routes import router as twofa_router
+from web.api.live_verification import router as live_verification_router
+from web.api.cloudflare_ai import router as cloudflare_ai_router
+from web.api.admin import router as admin_router
+from web.auth import get_optional_user
 
 import datetime as dt
 import json
@@ -45,17 +51,33 @@ _TZ_ET = ZoneInfo("America/New_York")
 
 
 async def _paper_autostart_loop():
-    """Fire paper trading during market hours if auto-start is enabled."""
+    """Ensure the paper runner is running.
+
+    Behavior:
+      - Reads `tmp/paper_autostart.json` (`enabled: true` to participate).
+      - During the configured market window (premarket warmup ... 16:00 ET,
+        weekdays), launches the runner if it is not already up.
+      - Crash-restart: if the process exits during the window, the loop
+        relaunches it on the next tick.
+      - Env `PAPER_AUTOSTART_IGNORE_WINDOW=true` removes the weekday +
+        market-hours gate so the runner is brought up as soon as the
+        server starts and kept up 24/7.
+      - First tick fires after 5s so a restarted server is back online
+        quickly; subsequent ticks every 30s.
+    """
     from web.api.paper import (
         DEFAULT_AUTOSTART_CONFIG,
         _process_status,
         start_paper_runner,
         PaperStartRequest,
     )
-    fired_on: dt.date | None = None
+    SYSTEM_ADMIN = {"email": "system@autostart", "role": "admin"}
+    ignore_window = os.getenv("PAPER_AUTOSTART_IGNORE_WINDOW", "false").lower() == "true"
+    first_tick = True
 
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(5 if first_tick else 30)
+        first_tick = False
         try:
             cfg = DEFAULT_AUTOSTART_CONFIG.copy()
             if _AUTOSTART_CFG.exists():
@@ -63,34 +85,35 @@ async def _paper_autostart_loop():
             if not cfg.get("enabled"):
                 continue
 
-            now = dt.datetime.now(_TZ_ET)
-            today = now.date()
-            if today.weekday() >= 5 or fired_on == today:
-                continue
-
-            market_open = dt.datetime.combine(today, dt.time(9, 30), tzinfo=_TZ_ET)
-            market_close = dt.datetime.combine(today, dt.time(16, 0), tzinfo=_TZ_ET)
-            warmup_mins = int(cfg.get("premarket_warmup_minutes", 30))
-            start_window = market_open - dt.timedelta(minutes=warmup_mins)
-            if not (start_window <= now < market_close):
-                continue
+            if not ignore_window:
+                now = dt.datetime.now(_TZ_ET)
+                today = now.date()
+                if today.weekday() >= 5:
+                    continue
+                market_open = dt.datetime.combine(today, dt.time(9, 30), tzinfo=_TZ_ET)
+                market_close = dt.datetime.combine(today, dt.time(16, 0), tzinfo=_TZ_ET)
+                warmup_mins = int(cfg.get("premarket_warmup_minutes", 30))
+                start_window = market_open - dt.timedelta(minutes=warmup_mins)
+                if not (start_window <= now < market_close):
+                    continue
 
             proc = _process_status()
             if proc["running"]:
-                fired_on = today
+                # Already running (or supervisor sees an external PID); nothing to do.
                 continue
 
             valid_fields = PaperStartRequest.model_fields.keys()
             req_kwargs = {k: v for k, v in cfg.items() if k in valid_fields}
             req = PaperStartRequest(**req_kwargs)
-            await start_paper_runner(req)
-            fired_on = today
-            _autostart_log.info("Auto-started paper trading for %s", today)
+            await start_paper_runner(req, admin=SYSTEM_ADMIN)
+            _autostart_log.info(
+                "Auto-started paper trading (ignore_window=%s)", ignore_window
+            )
         except Exception as exc:
             _autostart_log.warning("Auto-start loop error: %s", exc)
 
 
-app = FastAPI(title="TradingAgents Web UI", version="0.2.4")
+app = FastAPI(title="Agentic Trader Web UI", version="0.2.4")
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
@@ -101,60 +124,42 @@ app.add_middleware(
 )
 
 import os
-import base64
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
 
-class BasicAuthMiddleware(BaseHTTPMiddleware):
+
+class AuthContextMiddleware(BaseHTTPMiddleware):
+    """Attach the verified Cloudflare Access user to request.state.
+
+    Per-route enforcement is done by FastAPI deps (`get_current_user`,
+    `require_admin`). This middleware exists only so handlers that don't
+    declare the dep can still read `request.state.user` when present.
+    Open paths (signed webhooks, magic-token approvals, health) bypass
+    the lookup entirely.
+    """
+
+    OPEN_PATHS = {
+        "/api/paper/sms/inbound",  # signed by SENDBLUE_INBOUND_SECRET
+        "/api/approve",            # signed magic token in query string
+        "/health",
+    }
+
     async def dispatch(self, request: Request, call_next):
-        # 1. Block Dashboard from temporary public tunnels. Do not block every
-        # Cloudflare-proxied request: production custom domains also include
-        # Cloudflare headers such as cf-ray.
-        x_forward = request.headers.get("x-forwarded-host", "")
-        is_tunnel = (
-            x_forward.endswith("trycloudflare.com")
-            or x_forward.endswith("pinggy-free.link")
-            or x_forward.endswith("loca.lt")
-        )
-        if is_tunnel:
-            path = request.url.path
-            allowed_paths = ["/api/approve", "/api/paper/hil/resolve", "/api/paper/sms/inbound"]
-            if path not in allowed_paths:
-                return Response(
-                    content="Dashboard access is blocked from the public tunnel for security. Only direct trade approvals are allowed.",
-                    status_code=403
-                )
-
-        # Sendblue inbound webhook can't send Basic Auth; it is secured by the
-        # SENDBLUE_INBOUND_SECRET shared key checked inside the route handler.
-        if request.url.path == "/api/paper/sms/inbound":
+        if request.url.path in self.OPEN_PATHS:
             return await call_next(request)
-
-        # 2. Enforce HTTP Basic Auth
-        password = os.getenv("DASHBOARD_PASS")
-        if password:
-            auth_header = request.headers.get("Authorization")
-            authenticated = False
-            if auth_header and auth_header.startswith("Basic "):
-                try:
-                    decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
-                    u, p = decoded.split(":", 1)
-                    if u == os.getenv("DASHBOARD_USER", "admin") and p == password:
-                        authenticated = True
-                except Exception:
-                    pass
-            if not authenticated:
-                return Response(
-                    content="Unauthorized. Please set DASHBOARD_USER and DASHBOARD_PASS in .env",
-                    status_code=401,
-                    headers={"WWW-Authenticate": "Basic realm=\"TradingAgents Dashboard\""},
-                )
-
+        # Verifies the JWT signature if a token is present; returns None
+        # otherwise. Routes that require auth must declare
+        # Depends(get_current_user) which will raise 401 there.
+        request.state.user = get_optional_user(request)
         return await call_next(request)
 
-app.add_middleware(BasicAuthMiddleware)
+app.add_middleware(AuthContextMiddleware)
 
+app.include_router(auth_router, prefix="/api")
+app.include_router(twofa_router, prefix="/api")
+app.include_router(live_verification_router, prefix="/api")
+app.include_router(cloudflare_ai_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
 app.include_router(portfolio_router, prefix="/api")
 app.include_router(backtest_router, prefix="/api")

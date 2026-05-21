@@ -5,7 +5,6 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_social_sentiment,
 )
-from tradingagents.dataflows.config import get_config
 
 
 def create_social_media_analyst(llm):

@@ -5,7 +5,8 @@ daily OHLC bars, and replays the EXACT measure_outcome() logic from backtest.py
 for arbitrary target_mult / stop_mult / hold. No re-scan, no inflation: identical
 bar-by-bar same-bar tiebreak rule as the production backtester.
 """
-import glob, pickle, sys
+import glob
+import pickle
 import numpy as np
 import pandas as pd
 

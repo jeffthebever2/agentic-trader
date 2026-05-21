@@ -62,6 +62,7 @@ def _runtime_args(**overrides):
         "take_profit_pct": 0.0,
         "stop_loss_pct": 0.0,
         "max_entry_extension_atr": 0.7,
+        "hold_overnight": True,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -313,3 +314,51 @@ def test_scale_in_requires_real_ml_probability(tmp_path):
     ]
     assert account.positions["TEST"].shares == 10
     assert not any(event.get("type") == "SCALE_IN" for event in events)
+
+
+@pytest.mark.unit
+def test_hold_overnight_keeps_position_near_close(tmp_path):
+    now = dt.datetime(2026, 5, 13, 15, 59, tzinfo=ZoneInfo("America/New_York"))
+    account = _paper_account(tmp_path)
+    account.buy(_candidate(), price=100.0, shares=10, now=now.replace(hour=12, minute=0))
+
+    result = scan_account_once(
+        account,
+        "algorithm",
+        [],
+        {"TEST": 101.0},
+        _runtime_args(hold_overnight=True),
+        now,
+        now.replace(hour=16, minute=0),
+        market_breadth=0.8,
+        spy_regime="bull",
+    )
+    account.close()
+
+    assert result["sold"] == 0
+    assert "TEST" in account.positions
+    assert account.trades == []
+
+
+@pytest.mark.unit
+def test_no_hold_overnight_restores_eod_flatten(tmp_path):
+    now = dt.datetime(2026, 5, 13, 15, 59, tzinfo=ZoneInfo("America/New_York"))
+    account = _paper_account(tmp_path)
+    account.buy(_candidate(), price=100.0, shares=10, now=now.replace(hour=12, minute=0))
+
+    result = scan_account_once(
+        account,
+        "algorithm",
+        [],
+        {"TEST": 101.0},
+        _runtime_args(hold_overnight=False),
+        now,
+        now.replace(hour=16, minute=0),
+        market_breadth=0.8,
+        spy_regime="bull",
+    )
+    account.close()
+
+    assert result["sold"] == 1
+    assert account.positions == {}
+    assert account.trades[-1]["exit_reason"] == "EOD_FLATTEN"

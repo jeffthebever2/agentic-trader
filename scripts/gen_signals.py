@@ -15,12 +15,10 @@ Reproducible:
       --start 2019-01-01 --end 2026-05-07 --out tmp/ob_signals.csv
 """
 import argparse
-import glob
 import pickle
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

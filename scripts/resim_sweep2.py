@@ -3,7 +3,8 @@
 Breakeven WR for (tgt,stop): WR* = stop/(tgt+stop). Profit needs WR>WR*.
 Focus where WR* is reachable AND high WR is plausible (tiny tgt, long hold).
 """
-import pickle, itertools
+import pickle
+import itertools
 import numpy as np
 import pandas as pd
 from resim import run_config, portfolio
@@ -65,7 +66,7 @@ for combo in combos:
                 goal.append(rec)
 
 best.sort(key=lambda r:(-r[0],-r[3]))
-print(f"\nTop 30 by WR (raw n>=150, WR>=78):", flush=True)
+print("\nTop 30 by WR (raw n>=150, WR>=78):", flush=True)
 print(f"{'WR%':>5}{'rawN':>6}{'pfN':>5}{'prof$':>8}{'WR*':>6}  cfg", flush=True)
 for wr,rn,pn,pr,ws,tag,mo in best[:30]:
     flag = '  <==GOAL' if (wr>=80 and pn>=150 and pr>=1000) else ''

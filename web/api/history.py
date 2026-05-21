@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -9,6 +10,24 @@ if str(ROOT) not in sys.path:
 from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter()
+
+# Path-component allowlists. Reject anything that could escape results_dir.
+_TICKER_RE = re.compile(r"^[A-Z0-9.\-_]{1,16}$")
+_DATE_RE = re.compile(r"^[A-Za-z0-9._\-]{1,32}$")
+
+
+def _safe_join(base: Path, *parts: str) -> Path:
+    """Join under `base` and verify the resolved path stays inside `base`.
+
+    Raises HTTPException(400) on traversal attempts.
+    """
+    joined = (base / Path(*parts)).resolve()
+    base_resolved = base.resolve()
+    try:
+        joined.relative_to(base_resolved)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return joined
 
 
 def _results_dir() -> Path:
@@ -123,8 +142,12 @@ async def get_history_stats():
 
 @router.get("/history/{ticker}/{date}")
 async def get_history_entry(ticker: str, date: str):
+    # Whitelist path components so /history/../../etc/passwd can't escape
+    # results_dir. Tickers are uppercase symbols; dates are short tokens.
+    if not _TICKER_RE.match(ticker) or not _DATE_RE.match(date):
+        raise HTTPException(status_code=400, detail="Invalid ticker or date")
     results_dir = _results_dir()
-    entry_dir = results_dir / ticker / date
+    entry_dir = _safe_join(results_dir, ticker, date)
     if not entry_dir.exists():
         raise HTTPException(status_code=404, detail="Entry not found")
 

@@ -21,6 +21,8 @@ _API_KEY_ENV_VARS = (
     "ZHIPU_API_KEY",
     "OPENROUTER_API_KEY",
     "AZURE_OPENAI_API_KEY",
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_ACCOUNT_ID",
     "ALPHA_VANTAGE_API_KEY",
     "FMP_API_KEY",
 )
@@ -30,6 +32,25 @@ _API_KEY_ENV_VARS = (
 def _dummy_api_keys(monkeypatch):
     for env_var in _API_KEY_ENV_VARS:
         monkeypatch.setenv(env_var, os.environ.get(env_var, "placeholder"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_supabase(monkeypatch):
+    """Never let unit tests hit the real Supabase project.
+
+    web/app.py loads .env with override=True at import time, which can
+    re-inject live SUPABASE_* creds even after we delete them. Patch the
+    backend's `enabled()` to False so the user/portfolio stores always use
+    their local JSON fallback. Tests that want Supabase behavior re-patch
+    `enabled` themselves.
+    """
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    try:
+        from web import supabase_store
+        monkeypatch.setattr(supabase_store, "enabled", lambda: False)
+    except Exception:
+        pass
 
 
 @pytest.fixture()

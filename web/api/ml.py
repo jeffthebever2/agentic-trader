@@ -108,6 +108,11 @@ async def get_ml_status():
 async def ws_ml_train(websocket: WebSocket):
     """Run train_ml_models.py and stream stdout. Expects JSON: {input_file, output_dir?, hold?}"""
     await websocket.accept()
+    # ── Admin auth gate (Cloudflare Access JWT verified) ──
+    from web.auth import ws_require_admin
+    _ws_user = await ws_require_admin(websocket)
+    if _ws_user is None:
+        return
     queue: asyncio.Queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()
 

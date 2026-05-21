@@ -423,6 +423,7 @@ class PaperAccount:
         strategy: str = "paper",
         webhook_url: str = "",
         sms_number: str = "",
+        sms_on_fills: bool = False,
     ) -> None:
         self.state_path = state_path
         self.event_log_path = event_log_path
@@ -435,6 +436,9 @@ class PaperAccount:
         self.strategy = strategy
         self.webhook_url = webhook_url
         self.sms_number = sms_number
+        # Per-fill BUY/SELL texts. Off by default — paper fills would flood SMS.
+        # HIL approval texts use a separate path and are unaffected.
+        self.sms_on_fills = bool(sms_on_fills)
 
         self.settled_cash: float = float(starting_cash)
         self.unsettled_cash: float = 0.0
@@ -728,7 +732,7 @@ class PaperAccount:
                 "stop": candidate.stop, "target": candidate.target,
                 "ml_prob": candidate.ml_probability,
             })
-        if self.sms_number:
+        if self.sms_number and self.sms_on_fills:
             fire_sms(self.sms_number, f"BUY {candidate.ticker} x{shares} @ ${round(price,2)} [{self.strategy}] stop=${candidate.stop} target=${candidate.target}")
 
     def add_to_position(self, candidate: Candidate, price: float, shares: int, now: dt.datetime) -> None:
@@ -1040,7 +1044,7 @@ class PaperAccount:
                 "shares": position.shares, "exit_price": round(price, 4),
                 "pnl": round(pnl, 2), "pnl_pct": f"{pnl_pct*100:.2f}%", "reason": reason,
             })
-        if self.sms_number:
+        if self.sms_number and self.sms_on_fills:
             sign = "+" if pnl >= 0 else ""
             fire_sms(self.sms_number, f"SELL {ticker} x{position.shares} @ ${round(price,2)} P/L:{sign}${round(pnl,2)} ({reason}) [{self.strategy}]")
 
@@ -1052,6 +1056,7 @@ def create_strategy_accounts(
     reset: bool,
     webhook_url: str = "",
     sms_number: str = "",
+    sms_on_fills: bool = False,
 ) -> dict[str, PaperAccount]:
     accounts: dict[str, PaperAccount] = {}
     previous_dir = None if reset else latest_previous_account_dir(output_dir)
@@ -1074,6 +1079,7 @@ def create_strategy_accounts(
             strategy=strategy,
             webhook_url=webhook_url,
             sms_number=sms_number,
+            sms_on_fills=sms_on_fills,
         )
         if should_carry_forward and previous_state_path:
             previous_state = json.loads(previous_state_path.read_text(encoding="utf-8") or "{}")
@@ -1168,6 +1174,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-hold-days", type=int, default=14,
                         help="Time-stop: exit confirmed_pullback positions after this many "
                              "calendar days (~10 trading days). Validated optimum.")
+    parser.add_argument("--hold-overnight", action=argparse.BooleanOptionalAction, default=True,
+                        help="Carry paper positions overnight instead of end-of-day flattening. "
+                             "Default true to avoid day-trade/PDT churn; use --no-hold-overnight "
+                             "to restore intraday-only behavior.")
     parser.add_argument("--position-cap-pct", type=float, default=25.0, help="Max account %% per position at high confidence.")
     parser.add_argument("--position-cap-min-pct", type=float, default=10.0, help="Min account %% per position at ML threshold confidence.")
     parser.add_argument("--position-high-confidence-threshold", type=float, default=0.80, help="ML probability at which position reaches full size (position-cap-pct).")
@@ -1208,6 +1218,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--daily-loss-limit-pct", type=float, default=2.0,
         help="Stop new entries if today realized PnL lost this %% of starting cash. 0=disabled.")
     parser.add_argument("--max-positions", type=int, default=5)
+    parser.add_argument("--sms-on-fills", dest="sms_on_fills", action="store_true", default=False,
+                        help="Text every paper BUY/SELL fill. Off by default (would flood SMS).")
+    parser.add_argument("--hil-timeout-minutes", type=int, default=15,
+                        help="Minutes to wait for SMS HIL approval before timing out.")
+    parser.add_argument("--hil-auto-reject", dest="hil_auto_reject", action="store_true", default=True,
+                        help="On HIL timeout, reject the trade (default, safe).")
+    parser.add_argument("--hil-auto-approve", dest="hil_auto_reject", action="store_false",
+                        help="On HIL timeout, auto-approve the trade instead of rejecting.")
     parser.add_argument("--commission", type=float, default=0.0)
     parser.add_argument("--max-entry-extension-atr", type=float, default=0.7, help="Skip entries extended this many ATR above signal close.")
     parser.add_argument("--breadth-threshold", type=float, default=0.40, help="Skip new entries when market breadth (fraction above 50d SMA) is below this.")
@@ -1521,6 +1539,24 @@ def predict_ml(row: dict[str, Any], bundle: dict[str, Any],
         "ml_pass": not failed,
         "decision_reason": "rule_pass_and_ml_pass" if not failed else "ml_gate_failed:" + ",".join(failed),
     }
+
+
+# ML Old runs the stock_universe model, whose live win-prob scale tops out
+# ~0.52 — a different calibration from the latest model. It needs its own low
+# bar or it never trades. Kept separate from the latest-model regime scheme.
+ML_OLD_THRESHOLD = 0.51
+
+
+def regime_ml_threshold(spy_regime: str | None, vix_regime: str | None) -> float:
+    """Regime-aware ML gate for the *latest* model. Its live win-prob maxes
+    ~0.69, so the old 0.72 bar was unreachable. Use 0.63 in bull/calm tape
+    (top ~10%, high precision) and relax to 0.58 in bear/neutral or high-vol so
+    ML still trades when the tape is weaker."""
+    spy = (spy_regime or "").lower()
+    vix = (vix_regime or "").lower()
+    if spy == "bull" and vix in ("low_vol", "normal"):
+        return 0.63
+    return 0.58
 
 
 def ai_shortlist_sort_key(candidate: Candidate) -> tuple:
@@ -2014,10 +2050,11 @@ def build_candidates(
             "ml_pass": True,
             "decision_reason": "rule_pass_no_ml",
         }
+        eff_ml_threshold = regime_ml_threshold(regime, vix_reg)
         if bundle is not None:
             ml = predict_ml(
                 row, bundle,
-                ml_prob_threshold=getattr(args, "ml_probability_threshold", None),
+                ml_prob_threshold=ML_OLD_THRESHOLD,
                 ml_large_loss_max=getattr(args, "ml_large_loss_max", None),
                 ml_expected_return_min=getattr(args, "ml_expected_return_min", None),
             )
@@ -2056,7 +2093,7 @@ def build_candidates(
         if new_bundle is not None:
             new_ml = predict_ml(
                 row, new_bundle,
-                ml_prob_threshold=getattr(args, "ml_probability_threshold", None),
+                ml_prob_threshold=eff_ml_threshold,
                 ml_large_loss_max=getattr(args, "ml_large_loss_max", None),
                 ml_expected_return_min=getattr(args, "ml_expected_return_min", None),
             )
@@ -2345,6 +2382,21 @@ def chart_link(ticker: str) -> str:
 
 
 _TUNNEL_URL_FILE = Path("tmp/tunnel_url.txt")
+
+
+def public_dashboard_url() -> str:
+    """Stable dashboard URL used in notifications.
+
+    Keep this as one link so users do not need one-off approval URLs or SMS
+    reply workflows. The dashboard's HIL panel reads the pending approval from
+    server state after the user signs in through Cloudflare Access.
+    """
+    return (
+        os.getenv("PUBLIC_DASHBOARD_URL")
+        or os.getenv("DASHBOARD_URL")
+        or os.getenv("APP_URL")
+        or "https://app.agentictrader.org"
+    ).strip().rstrip("/")
 
 
 def _tunnel_proc_alive() -> bool:
@@ -3233,8 +3285,13 @@ def scan_account_once(
                         f"{strategy_label(strategy)} sold {ticker} at {price:.2f}: max hold {held_days}d"
                     )
 
-    # EOD flatten — long_hold carries positions overnight
-    flatten_now = now >= (market_close - dt.timedelta(minutes=1)) and strategy != "long_hold"
+    # EOD flatten is optional. Holding overnight keeps the paper runner closer
+    # to swing-trade behavior and avoids creating day trades by default.
+    flatten_now = (
+        now >= (market_close - dt.timedelta(minutes=1))
+        and strategy != "long_hold"
+        and not getattr(args, "hold_overnight", True)
+    )
     if flatten_now:
         for ticker, position in list(account.positions.items()):
             price = prices.get(ticker, position.entry_price)
@@ -3840,6 +3897,93 @@ def strategy_statistics(
     }
 
 
+def write_end_of_day_positions(
+    output_dir: Path,
+    accounts: dict[str, PaperAccount],
+    prices: dict[str, float],
+    now: dt.datetime,
+    dashboard: TerminalDashboard | None = None,
+) -> list[dict[str, Any]]:
+    """Significant per-position end-of-day log for every strategy account.
+
+    Captures each open position with live price, unrealized P/L, distance to
+    stop/target and hold age so positions can be reviewed and adjusted.
+    Writes a dated snapshot (today's output dir) and appends one row per
+    position to a persistent history JSONL at the runner root for trend review.
+    """
+    records: list[dict[str, Any]] = []
+    stamp = now.isoformat()
+    for strategy, account in accounts.items():
+        label = STRATEGY_LABELS.get(strategy, strategy)
+        for ticker, p in sorted(account.positions.items()):
+            price = prices.get(ticker, p.entry_price)
+            cost = p.entry_price * p.shares
+            mv = p.shares * price
+            upnl = (price - p.entry_price) * p.shares
+            upnl_pct = ((price / p.entry_price) - 1.0) * 100.0 if p.entry_price else 0.0
+            to_stop = ((price - p.stop) / price * 100.0) if (price and p.stop) else None
+            to_target = ((p.target - price) / price * 100.0) if (price and p.target) else None
+            records.append({
+                "timestamp": stamp,
+                "date": now.date().isoformat(),
+                "strategy": strategy,
+                "strategy_label": label,
+                "ticker": ticker,
+                "shares": p.shares,
+                "entry_price": round(p.entry_price, 4),
+                "current_price": round(price, 4),
+                "cost_basis": round(cost, 2),
+                "market_value": round(mv, 2),
+                "unrealized_pnl": round(upnl, 2),
+                "unrealized_pnl_pct": round(upnl_pct, 2),
+                "stop": round(p.stop, 4),
+                "target": round(p.target, 4),
+                "pct_to_stop": round(to_stop, 2) if to_stop is not None else None,
+                "pct_to_target": round(to_target, 2) if to_target is not None else None,
+                "peak_price": round(p.peak_price, 4) if p.peak_price else None,
+                "scans_held": p.scans_held,
+                "entry_date": p.entry_date,
+                "signal_date": p.signal_date,
+                "sector": p.sector,
+                "score": round(p.score, 3) if p.score is not None else None,
+                "ml_probability": round(p.ml_probability, 4) if p.ml_probability is not None else None,
+                "breakeven_moved": p.breakeven_moved,
+                "partial_sold": p.partial_sold,
+            })
+
+    # Dated snapshot for today.
+    snap_path = output_dir / "end_of_day_positions.json"
+    snap_path.write_text(json.dumps(_jsonable({"timestamp": stamp, "positions": records}), indent=2), encoding="utf-8")
+
+    # Per-position CSV for quick spreadsheet review.
+    if records:
+        csv_path = output_dir / "end_of_day_positions.csv"
+        with csv_path.open("w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(records[0].keys()))
+            w.writeheader()
+            for r in records:
+                w.writerow(r)
+
+    # Persistent append-only history across all days (for trend review / changes).
+    hist_path = Path(output_dir).parent / "positions_eod_log.jsonl"
+    try:
+        with hist_path.open("a", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(_jsonable(r)) + "\n")
+    except Exception as e:
+        print(f"[EOD] Could not append position history: {e}")
+
+    msg = f"End-of-day positions logged: {len(records)} open across {len(accounts)} accounts → {snap_path}"
+    print(msg)
+    for r in records:
+        print(f"  [{r['strategy_label']}] {r['ticker']} x{r['shares']} @ ${r['entry_price']} "
+              f"now ${r['current_price']} P/L ${r['unrealized_pnl']} ({r['unrealized_pnl_pct']}%) "
+              f"stop ${r['stop']} target ${r['target']} held {r['scans_held']} scans")
+    if dashboard:
+        dashboard.event(msg)
+    return records
+
+
 def write_end_of_day_statistics(
     output_dir: Path,
     accounts: dict[str, PaperAccount],
@@ -3905,6 +4049,9 @@ def write_end_of_day_statistics(
         dashboard.event(message)
         for line in lines:
             dashboard.event(line)
+
+    # Significant per-position EOD log across all portfolios.
+    write_end_of_day_positions(output_dir, accounts, prices, now, dashboard)
     return payload
 
 
@@ -3926,6 +4073,7 @@ def run() -> None:
         reset=args.reset,
         webhook_url=getattr(args, "webhook_url", ""),
         sms_number=getattr(args, "sms_number", ""),
+        sms_on_fills=getattr(args, "sms_on_fills", False),
     )
 
     dashboard = TerminalDashboard(enabled=not args.no_dashboard)
@@ -4024,70 +4172,9 @@ def run() -> None:
                         import json
                         import time
                         import secrets
-                        import re
-                        import subprocess
                         
-                        # Reuse a persistent public tunnel (started once, kept
-                        # alive across trades) so approval links are real URLs
-                        # and the page survives approve/reject.
-                        print(f"\n[HIL] Securing public tunnel...")
-                        tunnel_url = ensure_public_tunnel()
-
+                        dashboard_url = public_dashboard_url()
                         hil_token = secrets.token_urlsafe(50)
-                        approval_link = f"{tunnel_url}/api/approve?t={hil_token}"
-                            
-                        msg = (
-                            f"🚨 <b>Trade Proposal: {candidate.ticker}</b>\n"
-                            f"<b>Action:</b> BUY\n"
-                            f"<b>Shares:</b> {shares}\n"
-                            f"<b>Limit Price:</b> ${payload['limit_price']:.2f}\n\n"
-                            f"🔐 <a href=\"{approval_link}\">Click to Securely Approve/Reject</a>\n\n"
-                            f"<i>Expires in 15 minutes</i>"
-                        )
-
-                        # Primary HIL sender: TextBelt SMS (plain text, no HTML).
-                        # The approval link goes straight in the message body.
-                        _lp = float(payload['limit_price'])
-                        _cost = _lp * shares
-                        sms_msg = (
-                            f"📈 TRADE PROPOSAL\n"
-                            f"\n"
-                            f"{candidate.ticker} · BUY\n"
-                            f"{shares} share{'s' if shares != 1 else ''} @ ${_lp:,.2f} limit\n"
-                            f"Est. cost  ${_cost:,.2f}\n"
-                            f"\n"
-                            f"Reply  YES  → approve\n"
-                            f"Reply  NO   → reject\n"
-                            f"Auto-rejects in 15 min\n"
-                            f"\n"
-                            f"Details: {approval_link}"
-                        )
-                        print(f"\n[HIL] Sending approval link via TextBelt SMS...")
-                        sms_ok = False
-                        try:
-                            _hil_sms_to = (
-                                getattr(args, "sms_number", "")
-                                or os.getenv("PAPER_SMS_NUMBER")
-                                or os.getenv("SMS_NUMBER")
-                                or ""
-                            ).strip()
-                            if _hil_sms_to:
-                                _r = send_sms(_hil_sms_to, sms_msg, provider="textbelt")
-                                sms_ok = bool(_r.get("success"))
-                                if not sms_ok:
-                                    print(f"[HIL] TextBelt send failed: {_r.get('error') or _r}")
-                            else:
-                                print("[HIL] No SMS number set (PAPER_SMS_NUMBER) — cannot send HIL link via TextBelt.")
-                        except Exception as _e:
-                            print(f"[HIL] TextBelt error: {_e}")
-                        # Telegram kept as best-effort backup only.
-                        if not sms_ok:
-                            print("[HIL] Falling back to Telegram notification...")
-                            try:
-                                send_telegram_notification(msg)
-                            except Exception:
-                                pass
-                        
                         hil_id = str(uuid.uuid4())
                         hil_file = Path("tmp/hil_state.json")
                         hil_file.parent.mkdir(exist_ok=True)
@@ -4099,12 +4186,67 @@ def run() -> None:
                             "status": "pending",
                             "token": hil_token
                         }))
-                        
-                        print(f"\n[HIL] Waiting for response via secure link (15m timeout)...")
-                        approval = "n"
+                            
+                        msg = (
+                            f"🚨 <b>Trade Proposal: {candidate.ticker}</b>\n"
+                            f"<b>Action:</b> BUY\n"
+                            f"<b>Shares:</b> {shares}\n"
+                            f"<b>Limit Price:</b> ${payload['limit_price']:.2f}\n\n"
+                            f"🔐 <a href=\"{dashboard_url}\">Open Dashboard to Approve/Reject</a>\n\n"
+                            f"<i>Expires in 15 minutes</i>"
+                        )
+
+                        # Primary HIL sender: Sendblue/default SMS provider.
+                        # Users approve/reject inside the dashboard, not by
+                        # replying to the text, so the link is stable every time.
+                        _lp = float(payload['limit_price'])
+                        _cost = _lp * shares
+                        sms_msg = (
+                            f"📈 TRADE PROPOSAL\n"
+                            f"\n"
+                            f"{candidate.ticker} · BUY\n"
+                            f"{shares} share{'s' if shares != 1 else ''} @ ${_lp:,.2f} limit\n"
+                            f"Est. cost  ${_cost:,.2f}\n"
+                            f"\n"
+                            f"Open the dashboard to approve or reject:\n"
+                            f"{dashboard_url}\n"
+                            f"\n"
+                            f"Auto-rejects in 15 min\n"
+                        )
+                        print("\n[HIL] Sending dashboard approval link via SMS...")
+                        sms_ok = False
+                        try:
+                            _hil_sms_to = (
+                                getattr(args, "sms_number", "")
+                                or os.getenv("PAPER_SMS_NUMBER")
+                                or os.getenv("SMS_NUMBER")
+                                or ""
+                            ).strip()
+                            if _hil_sms_to:
+                                _r = send_sms(_hil_sms_to, sms_msg)
+                                sms_ok = bool(_r.get("success"))
+                                if not sms_ok:
+                                    print(f"[HIL] SMS send failed: {_r.get('error') or _r}")
+                            else:
+                                print("[HIL] No SMS number set (PAPER_SMS_NUMBER) — cannot send dashboard approval link.")
+                        except Exception as _e:
+                            print(f"[HIL] SMS error: {_e}")
+                        # Telegram kept as best-effort backup only.
+                        if not sms_ok:
+                            print("[HIL] Falling back to Telegram notification...")
+                            try:
+                                send_telegram_notification(msg)
+                            except Exception:
+                                pass
+
+                        _hil_timeout_s = max(60, int(getattr(args, "hil_timeout_minutes", 15)) * 60)
+                        _hil_on_timeout = "n" if getattr(args, "hil_auto_reject", True) else "y"
+                        print(f"\n[HIL] Waiting for dashboard approval ({_hil_timeout_s // 60}m timeout, "
+                              f"on timeout: {'reject' if _hil_on_timeout == 'n' else 'auto-approve'})...")
+                        approval = _hil_on_timeout
                         wait_start = time.time()
-                        
-                        while time.time() - wait_start < 900: # 15 minute timeout
+
+                        while time.time() - wait_start < _hil_timeout_s:
                             try:
                                 state = json.loads(hil_file.read_text())
                                 if state.get("status") == "approved":
@@ -4116,10 +4258,10 @@ def run() -> None:
                             except Exception:
                                 pass
                             time.sleep(2)
-                            
-                        if time.time() - wait_start >= 900:
-                            print("[HIL] Timeout reached. Auto-rejecting.")
-                            approval = "n"
+
+                        if time.time() - wait_start >= _hil_timeout_s:
+                            print(f"[HIL] Timeout reached. Auto-{'rejecting' if _hil_on_timeout=='n' else 'approving'}.")
+                            approval = _hil_on_timeout
                             
                         # clear the file
                         if hil_file.exists():
@@ -4128,7 +4270,7 @@ def run() -> None:
                         # Tunnel is persistent — do NOT tear it down here, or the
                         # approval page and dashboard die the moment the user
                         # taps approve/reject. It stays up for the next trade.
-                        print(f"\n[HIL] Action recorded. Tunnel kept alive.")
+                        print("\n[HIL] Action recorded. Tunnel kept alive.")
 
                         dashboard.start() # Resume dashboard
                         
@@ -4191,8 +4333,8 @@ def run() -> None:
                     final_prices = latest_prices(held, args.price_batch_size, dashboard=dashboard)
                     for strategy, account in accounts.items():
                         for ticker, position in list(account.positions.items()):
-                            if strategy == "long_hold":
-                                continue  # long_hold carries positions overnight
+                            if strategy == "long_hold" or getattr(args, "hold_overnight", True):
+                                continue  # carry positions overnight
                             exit_price = final_prices.get(ticker, position.entry_price)
                             account.sell(ticker, exit_price, "EOD_FLATTEN_AFTER_CLOSE", now)
                             dashboard.event(

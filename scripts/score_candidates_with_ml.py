@@ -13,7 +13,6 @@ import sys
 from pathlib import Path
 
 import joblib
-import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,7 +66,7 @@ def main():
     scored = score_with_bundle(df, bundle)
     scored["_win"] = pd.to_numeric(scored[ret_col], errors="coerce") > 0
 
-    print(f"\n--- Win rate by threshold ---")
+    print("\n--- Win rate by threshold ---")
     for t in [0.50, 0.55, 0.60, 0.63, 0.65, 0.67, 0.70, 0.72, 0.75, 0.80]:
         sub = scored[scored["ml_win_prob"] >= t]
         if len(sub) < 5:

@@ -1,6 +1,5 @@
 # TradingAgents/graph/trading_graph.py
 
-import logging
 import os
 from pathlib import Path
 import json
@@ -20,11 +19,6 @@ from tradingagents.llm_clients import create_llm_client
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
-from tradingagents.agents.utils.agent_states import (
-    AgentState,
-    InvestDebateState,
-    RiskDebateState,
-)
 from tradingagents.dataflows.config import set_config
 from tradingagents.metrics import get_metrics, timed_operation
 from tradingagents.portfolio import (
