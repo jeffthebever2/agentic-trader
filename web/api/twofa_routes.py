@@ -118,7 +118,7 @@ async def step_up_totp(body: CodeBody, user: dict[str, Any] = Depends(get_curren
 async def step_up_email_send(user: dict[str, Any] = Depends(get_current_user)):
     result = twofa.send_email_code(user["email"], purpose="trade")
     if not result.get("success"):
-        raise HTTPException(status_code=429, detail=result.get("error") or "Email code failed")
+        raise HTTPException(status_code=429, detail="Email code failed to send")
     return {
         "ok": True,
         "sent_to": user["email"],

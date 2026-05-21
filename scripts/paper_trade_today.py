@@ -2341,7 +2341,9 @@ def fire_webhook(url: str, payload: dict) -> None:
     if not url:
         return
     try:
-        if "discord.com" in url or "discordapp.com" in url:
+        from urllib.parse import urlparse
+        hostname = urlparse(url).hostname or ""
+        if hostname.endswith("discord.com") or hostname.endswith("discordapp.com"):
             fields = [{"name": k, "value": str(v), "inline": True} for k, v in payload.items() if k not in ("type",)]
             body = {"embeds": [{"title": payload.get("type", "TRADE"), "fields": fields[:10], "color": 0x22d3ee}]}
         else:

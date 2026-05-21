@@ -1,9 +1,11 @@
-# TradingAgents Command Sheet
+# TradingAgents Command Sheet (v1.0.0)
 
 Run these from the project root:
 
 ```bash
-cd "/Users/williamscott/Downloads/TradingAgents-0.2.4 2/TradingAgents-0.2.4 2/TradingAgents-0.2.4"
+cd /path/to/TradingAgents
+# or if cloned from GitHub:
+cd ~/projects/agentic-trader
 ```
 
 ## Start The Web App

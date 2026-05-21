@@ -230,7 +230,9 @@ async def _detect_page_state(page) -> str:
     if any(k in html for k in ("incorrect", "invalid", "failed", "error")):
         return "login_error"
     # Landed somewhere else — could be home/dashboard
-    if "fidelity.com" in url and "login" not in url:
+    from urllib.parse import urlparse
+    hostname = urlparse(url).hostname or ""
+    if hostname.endswith("fidelity.com") and "login" not in url:
         return "authenticated"
     return "unknown"
 

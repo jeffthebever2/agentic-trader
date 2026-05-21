@@ -63,7 +63,7 @@ def test_cloudflare_prefers_gateway_url(monkeypatch):
     OpenAIClient("@cf/meta/llama-3.3-70b-instruct-fp8-fast", provider="cloudflare").get_llm()
     # `/compat` is auto-appended for OpenAI compatibility.
     assert captured["base_url"].endswith("/compat")
-    assert "gateway.ai.cloudflare.com" in captured["base_url"]
+    assert captured["base_url"].startswith("https://gateway.ai.cloudflare.com/")
 
 
 def test_cloudflare_missing_creds_raises(monkeypatch):

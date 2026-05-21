@@ -113,7 +113,7 @@ async def _paper_autostart_loop():
             _autostart_log.warning("Auto-start loop error: %s", exc)
 
 
-app = FastAPI(title="Agentic Trader Web UI", version="0.2.4")
+app = FastAPI(title="Agentic Trader Web UI", version="1.0.0")
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(
@@ -197,7 +197,7 @@ async def health_check():
         return {
             "status": "healthy",
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "version": "0.2.4",
+            "version": "1.0.0",
             "system": system_info,
             "metrics": metrics,
         }

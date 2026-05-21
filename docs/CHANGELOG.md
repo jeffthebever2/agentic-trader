@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [1.0.0] — 2026-05-21
+
+### Added
+
+- **First official release** of TradingAgents as a complete, production-ready
+  multi-agent LLM trading framework. Represents the culmination of full-stack
+  development covering core agent orchestration, data integration, paper trading
+  simulation, live trading verification, web dashboard, API, and comprehensive
+  documentation.
+- All features from v0.2.4 and prior versions now stable and integrated.
+
 ## [0.2.4] — 2026-04-25
 
 ### Added
@@ -257,6 +268,7 @@ PRs from late 2025 also landed here.
   portfolio manager. LangGraph orchestration, yfinance data, per-agent
   BM25 memory, single-provider OpenAI integration, interactive CLI.
 
+[1.0.0]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.4...v1.0.0
 [0.2.4]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/TauricResearch/TradingAgents/compare/v0.2.1...v0.2.2

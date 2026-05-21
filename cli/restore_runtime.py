@@ -161,11 +161,13 @@ def restore_data(args: argparse.Namespace) -> None:
 
 def safe_extract(tar: tarfile.TarFile, destination: Path) -> None:
     dest = destination.resolve()
-    for member in tar.getmembers():
-        target = (dest / member.name).resolve()
-        if not str(target).startswith(str(dest)):
-            fail(f"refusing unsafe tar member path: {member.name}")
-    tar.extractall(dest)
+    def safe_members():
+        for member in tar.getmembers():
+            target = (dest / member.name).resolve()
+            if not str(target).startswith(str(dest)):
+                fail(f"refusing unsafe tar member path: {member.name}")
+            yield member
+    tar.extractall(dest, members=safe_members())
 
 
 def make_artifact_bundle(args: argparse.Namespace) -> None:

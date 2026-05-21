@@ -1,10 +1,11 @@
 # TradingAgents Codebase Report
 
 Generated from two subagent codebase passes plus a local verification pass on 2026-05-04.
+Updated for v1.0.0 release on 2026-05-21.
 
 ## Project Shape
 
-- `pyproject.toml` defines the `tradingagents` Python package at version `0.2.4` with Python `>=3.10`.
+- `pyproject.toml` defines the `tradingagents` Python package at version `1.0.0` with Python `>=3.10`.
 - `tradingagents/` contains the core framework.
 - `cli/` contains the Typer/Rich command-line app exposed as the `tradingagents` console script.
 - `tests/` contains pytest tests for memory logging, checkpoint resume, model validation, structured agents, signal processing, and ticker handling.
@@ -45,7 +46,7 @@ Generated from two subagent codebase passes plus a local verification pass on 20
 
 ## Remaining Fix Candidates
 
-1. Regenerate `uv.lock`; it appears stale against `pyproject.toml` and records package metadata that does not match version `0.2.4`.
+1. Regenerate `uv.lock`; it appears stale against `pyproject.toml` and records package metadata that does not match version `1.0.0`.
 2. Review the Docker Ollama profile. `docker-compose.yml` sets `LLM_PROVIDER=ollama`, but the code path found during exploration does not appear to read `LLM_PROVIDER`.
 3. Review README enterprise-provider wording. The README mentions AWS Bedrock, while the inspected LLM factory supports Azure but not Bedrock.
 4. Consider whether the CLI should call the same `TradingAgentsGraph.propagate` path as programmatic usage, or intentionally keep its direct streaming path with equivalent memory-log and checkpoint behavior.

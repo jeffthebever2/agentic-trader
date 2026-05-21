@@ -80,9 +80,8 @@ async def list_backtest_results():
 @router.get("/backtest/results/{filename}")
 async def get_backtest_result(filename: str):
     """Load a specific backtest result file (capped at 50 MB)."""
-    if ".." in filename or "/" in filename or "\\" in filename:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Invalid filename")
+    import os
+    filename = os.path.basename(filename)
     path = ROOT / filename
     if not path.exists() or not path.name.startswith("backtest_results_"):
         from fastapi import HTTPException

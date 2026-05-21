@@ -175,5 +175,7 @@ async def update_settings(body: SettingsUpdate, admin: dict = Depends(require_ad
         from dotenv import load_dotenv
         load_dotenv(ROOT / ".env", override=True)
         return {"success": True, "updated": list(safe.keys())}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    except Exception:
+        import logging
+        logging.exception("Error saving settings")
+        return {"success": False, "error": "An internal error occurred"}

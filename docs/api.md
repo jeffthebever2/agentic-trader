@@ -1,4 +1,4 @@
-# TradingAgents API Documentation
+# TradingAgents API Documentation (v1.0.0)
 
 ## Core Classes
 
