@@ -24,6 +24,101 @@ If the port is already busy, either stop the old server with `Ctrl+C`, or use an
 python3 web/start.py --port 8002
 ```
 
+## Restore A Fresh Computer And Start Everything
+
+After cloning the repo on another computer, run the restore command from the
+project root. It checks dependencies, restores optional local ML/data artifacts,
+starts the web app, starts Cloudflare Tunnel, and prints troubleshooting logs.
+
+First install the command:
+
+```bash
+uv sync --extra web --extra dev
+```
+
+If you do not have `uv` yet:
+
+```bash
+python3 -m pip install -e ".[web,dev]"
+```
+
+Run diagnostics:
+
+```bash
+agentic-restore doctor
+```
+
+Start the app and named Cloudflare tunnel:
+
+```bash
+agentic-restore start --restart
+```
+
+If Cloudflare named tunnel is not set up yet, use a temporary Quick Tunnel:
+
+```bash
+agentic-restore start --restart --quick-tunnel
+```
+
+Check status and logs:
+
+```bash
+agentic-restore status
+```
+
+Stop the local web server and tunnel screen sessions:
+
+```bash
+agentic-restore stop
+```
+
+### Restore ML / Data Artifacts
+
+Git intentionally does not include large local folders like `ml_models`,
+`rl_models`, `.backtest_cache`, and generated DB/cache files.
+
+On the old computer, bundle local ML/data artifacts:
+
+```bash
+agentic-restore bundle-data --output ~/Desktop/agentic-trader-artifacts.tar.gz
+```
+
+Move that tarball to the new computer, then restore and start everything:
+
+```bash
+agentic-restore all \
+  --artifact-tar ~/Desktop/agentic-trader-artifacts.tar.gz \
+  --install \
+  --restart
+```
+
+If you copied a folder instead of a tarball:
+
+```bash
+agentic-restore all \
+  --artifact-dir /path/to/agentic-trader-artifacts \
+  --install \
+  --restart
+```
+
+The restore command expects these artifact paths when present:
+
+```text
+ml_models/
+rl_models/
+.backtest_cache/
+backtest_index.db
+```
+
+Useful tunnel troubleshooting:
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel info dsadsa
+tail -n 80 tmp/cloudflared.screen.log
+tail -n 80 tmp/web.screen.log
+```
+
 ## Stop Running Jobs
 
 In the terminal running the job:
@@ -257,4 +352,3 @@ Check paper status API:
 ```bash
 curl -s http://localhost:8001/api/paper/status | head -c 500
 ```
-

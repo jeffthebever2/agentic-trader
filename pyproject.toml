@@ -65,6 +65,7 @@ web = [
 
 [project.scripts]
 tradingagents = "cli.main:app"
+agentic-restore = "cli.restore_runtime:main"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*"]
