@@ -1,0 +1,308 @@
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║            CodeQL Advanced Security Workflow                    ║
+# ║  Auto-suggests fixes via GitHub Copilot Autofix on alerts       ║
+# ║  Covers: Actions, Python | Extended security + quality queries  ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+name: "CodeQL Advanced + Copilot Autofix"
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+    paths-ignore:
+      - '**/*.md'
+      - '**/*.txt'
+      - '.github/ISSUE_TEMPLATE/**'
+      - 'docs/**'
+  pull_request:
+    branches: [ "main", "master", "develop" ]
+    # Run on ALL PR types including forks (Copilot Autofix comments on PRs)
+    types: [opened, synchronize, reopened]
+  schedule:
+    # Weekly full scan — Monday 14:23 UTC (staggered to avoid GitHub load spikes)
+    - cron: '23 14 * * 1'
+  workflow_dispatch:
+    inputs:
+      languages:
+        description: 'Comma-separated languages to scan (leave blank for all)'
+        required: false
+        default: ''
+      query_suite:
+        description: 'Query suite to run'
+        required: false
+        default: 'security-and-quality'
+        type: choice
+        options:
+          - security-extended
+          - security-and-quality
+          - security-experimental
+
+# Cancel in-progress runs on new push to same branch (saves CI minutes)
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────
+  # 1. DETECT — Auto-detect languages present in the repository
+  # ──────────────────────────────────────────────────────────────────
+  detect-languages:
+    name: Detect Languages
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Full history for better analysis accuracy
+
+      - name: Auto-detect CodeQL-supported languages
+        id: detect
+        run: |
+          LANGUAGES=()
+
+          # Map file extensions → CodeQL language identifiers
+          if git ls-files | grep -qE '\.(py|pyw)$'; then
+            LANGUAGES+=('{"language":"python","build-mode":"none"}')
+          fi
+          if git ls-files | grep -qE '\.(js|mjs|cjs|ts|tsx|jsx)$'; then
+            LANGUAGES+=('{"language":"javascript-typescript","build-mode":"none"}')
+          fi
+          if git ls-files | grep -qE '\.rb$'; then
+            LANGUAGES+=('{"language":"ruby","build-mode":"none"}')
+          fi
+          if git ls-files | grep -qE '\.go$'; then
+            LANGUAGES+=('{"language":"go","build-mode":"autobuild"}')
+          fi
+          if git ls-files | grep -qE '\.(java|kt|kts)$'; then
+            LANGUAGES+=('{"language":"java-kotlin","build-mode":"autobuild"}')
+          fi
+          if git ls-files | grep -qE '\.(c|cpp|cc|cxx|h|hpp)$'; then
+            LANGUAGES+=('{"language":"c-cpp","build-mode":"autobuild"}')
+          fi
+          if git ls-files | grep -qE '\.rs$'; then
+            LANGUAGES+=('{"language":"rust","build-mode":"none"}')
+          fi
+          if git ls-files | grep -qE '\.(swift)$'; then
+            LANGUAGES+=('{"language":"swift","build-mode":"autobuild"}')
+          fi
+          if git ls-files | grep -qE '\.(cs|csx)$'; then
+            LANGUAGES+=('{"language":"csharp","build-mode":"autobuild"}')
+          fi
+          # Always scan GitHub Actions workflows for injection/permission issues
+          if git ls-files | grep -qE '\.github/workflows/.*\.ya?ml$'; then
+            LANGUAGES+=('{"language":"actions","build-mode":"none"}')
+          fi
+
+          # Build matrix JSON
+          if [ ${#LANGUAGES[@]} -eq 0 ]; then
+            # Fallback: scan python + actions at minimum
+            MATRIX='{"include":[{"language":"python","build-mode":"none"},{"language":"actions","build-mode":"none"}]}'
+          else
+            JOINED=$(IFS=,; echo "${LANGUAGES[*]}")
+            MATRIX="{\"include\":[$JOINED]}"
+          fi
+
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "Detected languages matrix: $MATRIX"
+
+  # ──────────────────────────────────────────────────────────────────
+  # 2. ANALYZE — CodeQL scan with extended security + quality queries
+  # ──────────────────────────────────────────────────────────────────
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    needs: detect-languages
+    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+    timeout-minutes: 120
+    permissions:
+      security-events: write   # Upload SARIF results
+      packages: read            # Pull private CodeQL packs
+      actions: read             # Read workflow metadata
+      contents: read            # Checkout the code
+      # Required for Copilot Autofix to post fix suggestions on PRs:
+      pull-requests: write
+
+    strategy:
+      fail-fast: false          # Let all languages complete even if one fails
+      matrix: ${{ fromJson(needs.detect-languages.outputs.matrix) }}
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2        # Enough for diff-based PR analysis
+
+      # ── Runtime setup (language-specific) ─────────────────────────
+      - name: Set up Python
+        if: matrix.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          cache: 'pip'
+
+      - name: Install Python dependencies (for better taint analysis)
+        if: matrix.language == 'python'
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          if [ -f pyproject.toml ]; then pip install -e . 2>/dev/null || true; fi
+
+      - name: Set up Node.js
+        if: matrix.language == 'javascript-typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      - name: Install Node dependencies (for better taint analysis)
+        if: matrix.language == 'javascript-typescript'
+        run: |
+          if [ -f package-lock.json ]; then npm ci --ignore-scripts; fi
+          if [ -f yarn.lock ]; then yarn install --frozen-lockfile --ignore-scripts; fi
+
+      # ── CodeQL Init ───────────────────────────────────────────────
+      - name: Initialize CodeQL
+        id: init
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-and-quality = security-extended + code quality queries
+          # Covers: CWE-79 (XSS), CWE-89 (SQLi), CWE-78 (command injection),
+          #         CWE-22 (path traversal), CWE-502 (deserialization), and more.
+          # For maximum coverage use 'security-extended' or 'security-experimental'.
+          queries: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.query_suite || 'security-and-quality' }}
+          # CodeQL config file (optional — create .github/codeql/codeql-config.yml
+          # to add custom queries, path filters, or packs):
+          config: |
+            paths-ignore:
+              - node_modules
+              - vendor
+              - .venv
+              - venv
+              - dist
+              - build
+              - "**/*.min.js"
+              - "**/*.bundle.js"
+              - "**/*-lock.*"
+            query-filters:
+              - exclude:
+                  problem.severity: recommendation  # Suppress low-noise notes
+            threat-models:
+              - remote  # remote input is an attack surface
+              - environment  # env vars treated as untrusted where applicable
+
+      # ── Autobuild (compiled languages) ────────────────────────────
+      - name: Autobuild
+        if: matrix.build-mode == 'autobuild'
+        uses: github/codeql-action/autobuild@v4
+
+      # ── Manual build override ──────────────────────────────────────
+      # Uncomment and replace the echo commands if autobuild fails for
+      # a compiled language:
+      # - name: Manual build
+      #   if: matrix.build-mode == 'manual'
+      #   run: |
+      #     make bootstrap
+      #     make release
+
+      # ── Perform Analysis ──────────────────────────────────────────
+      - name: Perform CodeQL Analysis
+        id: analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
+          # Upload SARIF for Copilot Autofix to read and generate fix suggestions
+          upload: always
+          # Add extra debug info visible in the Actions summary
+          add-snippet-info: true
+
+      # ── SARIF summary in Actions tab ──────────────────────────────
+      - name: Generate scan summary
+        if: always()
+        run: |
+          echo "## CodeQL Scan — ${{ matrix.language }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Language | \`${{ matrix.language }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build mode | \`${{ matrix.build-mode }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Query suite | \`security-and-quality\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | \`${{ github.event_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runner | \`${{ runner.os }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔍 View alerts in the [Security tab](https://github.com/${{ github.repository }}/security/code-scanning)" >> $GITHUB_STEP_SUMMARY
+          echo "🤖 Copilot Autofix suggestions will appear on any open PRs with findings." >> $GITHUB_STEP_SUMMARY
+
+  # ──────────────────────────────────────────────────────────────────
+  # 3. GATE — Fail the build if HIGH or CRITICAL alerts are introduced
+  #    (only runs on PRs so scheduled scans don't block merges)
+  # ──────────────────────────────────────────────────────────────────
+  security-gate:
+    name: Security Gate (Block High/Critical)
+    needs: analyze
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: read
+      pull-requests: write
+    steps:
+      - name: Check for new HIGH/CRITICAL alerts introduced by this PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const alerts = await github.rest.codeScanning.listAlertsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              severity: 'high',
+              per_page: 100,
+              ref: context.payload.pull_request.head.sha
+            });
+
+            const criticals = alerts.data.filter(a =>
+              ['high', 'critical', 'error'].includes(
+                (a.rule?.security_severity_level || a.rule?.severity || '').toLowerCase()
+              )
+            );
+
+            if (criticals.length > 0) {
+              const list = criticals.slice(0, 10).map(a =>
+                `- **${a.rule?.description || a.rule?.id}** at \`${a.most_recent_instance?.location?.path}:${a.most_recent_instance?.location?.start_line}\``
+              ).join('\n');
+
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                body: `## ⛔ CodeQL Security Gate — ${criticals.length} High/Critical Alert(s)\n\nThis PR introduces or exposes the following high/critical severity vulnerabilities:\n\n${list}\n\n👉 Check the [Security tab](https://github.com/${context.repo.owner}/${context.repo.repo}/security/code-scanning) for Copilot Autofix suggestions to resolve these.\n\nPlease fix or dismiss all high/critical alerts before merging.`
+              });
+
+              core.setFailed(`Security gate blocked: ${criticals.length} high/critical CodeQL alert(s) detected.`);
+            } else {
+              core.info('Security gate passed — no new high/critical alerts.');
+            }
+
+  # ──────────────────────────────────────────────────────────────────
+  # 4. NOTIFY — Post a Slack/Teams notification on scheduled scan failures
+  #    (optional — remove if you don't use Slack/Teams webhooks)
+  # ──────────────────────────────────────────────────────────────────
+  notify-on-failure:
+    name: Notify on Scan Failure
+    needs: analyze
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post failure notification
+        run: |
+          echo "CodeQL scheduled scan FAILED for ${{ github.repository }}."
+          echo "Configure SLACK_WEBHOOK_URL or TEAMS_WEBHOOK_URL in repo secrets"
+          echo "and replace this step with your webhook call."
+          # Example Slack notification (uncomment + add SLACK_WEBHOOK_URL secret):
+          # curl -X POST "${{ secrets.SLACK_WEBHOOK_URL }}" \
+          #   -H 'Content-type: application/json' \
+          #   --data '{"text":"⚠️ CodeQL scan failed for *${{ github.repository }}*. Check the Actions tab."}'
