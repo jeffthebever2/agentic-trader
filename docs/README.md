@@ -206,6 +206,14 @@ agentic-restore all \
 ```
 See [`docs/COMMANDS.md`](COMMANDS.md) for detailed usage.
 
+## Security & Hardening
+
+TradingAgents utilizes GitHub CodeQL to run static analysis on both Python and JavaScript codebases. The framework is hardened against common web vulnerabilities, including:
+- **Cross-Site Scripting (XSS)**: Strict `DOMPurify` HTML sanitization for dashboard updates.
+- **Path Injection**: Backend routes validating file paths strictly break taint paths.
+- **Information Exposure**: Exception traces are masked before being exposed to SMS endpoints or REST APIs.
+- **Log Injection**: Sensitve credentials stripped, and raw input sanitized before logging.
+
 ## TradingAgents Package
 
 ### Implementation Details

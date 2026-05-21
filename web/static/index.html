@@ -19,7 +19,7 @@ function safeHtml(html) {
   if (typeof DOMPurify !== 'undefined') {
     return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
   }
-  return html;
+  throw new Error("DOMPurify not loaded!");
 }
 
 /* Global Chart.js theming — lifts every chart at once, no per-config edits.
@@ -1577,7 +1577,7 @@ a[onclick], button.text-xs, .text-xs[onclick], [onclick].underline {
   }
 }
 </style>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js" integrity="sha384-vdScihEZCfbPnBQf+lc7LgXUdJVYyhC3yWHUW5C5P5GpHRqVnaM6HJELJxT6IqwM" crossorigin="anonymous"></script>
 </head>
 <body class="bg-slate-50 text-slate-950 flex overflow-hidden" style="height:100dvh">
 <a href="#main-content" class="sr-only focus:not-sr-only focus:absolute focus:p-4 focus:bg-surface focus:text-ink focus:z-[9999] focus:outline-none focus:ring-2 focus:ring-accent">Skip to main content</a>
@@ -9946,7 +9946,8 @@ async function testAdminWebhook() {
   if (!url) { res.innerHTML = '<span class="text-yellow-400">Enter webhook URL first.</span>'; return; }
   res.innerHTML = 'Sending…';
   try {
-    const isDiscord = url.includes('discord.com');
+    const parsed = new URL(url);
+    const isDiscord = parsed.hostname === 'discord.com' || parsed.hostname.endsWith('.discord.com');
     const body = isDiscord ? JSON.stringify({ content: msg }) : JSON.stringify({ text: msg });
     const r = await fetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body });
     if (r.ok) { res.innerHTML = '<span class="text-green-400">✓ Sent successfully</span>'; }
@@ -10376,7 +10377,7 @@ function startLiveScan() {
       _sc2Done();
     } else if (msg.type === 'error') {
       _sc2AppendLog('ERROR: ' + msg.message);
-      if (msg.traceback) console.error(msg.traceback);
+      if (msg.traceback) console.error("Traceback received from server");
       _sc2Done();
     }
   };
@@ -10563,7 +10564,7 @@ function fiStartLogin() {
       fiLoadAll();
     } else if (msg.step === 'error') {
       _fiLogMsg('Error: ' + escHtml(msg.message), '#ef4444');
-      if (msg.traceback) console.error(msg.traceback);
+      if (msg.traceback) console.error("Traceback received from server");
       document.getElementById('fi-login-btn').disabled = false;
       _fiWaitingTotp = false;
       document.getElementById('fi-totp-form').classList.add('hidden');

@@ -293,7 +293,8 @@ async def paper_mms_test(req: MmsTestRequest, admin: dict = Depends(require_admi
         result = send_gmail_mms(req.to, "TradingAgents Test", req.message)
         return result
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        import logging; logging.error(f"MMS Test Error: {e}")
+        return {"success": False, "error": "An internal error occurred."}
 
 
 @router.post("/paper/email/test")
@@ -303,7 +304,8 @@ async def paper_email_test(req: EmailTestRequest, admin: dict = Depends(require_
 
         return send_email(req.to, req.subject, req.message)
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        import logging; logging.error(f"Email Test Error: {e}")
+        return {"success": False, "error": "An internal error occurred."}
 
 HIL_STATE_FILE = ROOT / "tmp" / "hil_state.json"
 
@@ -713,7 +715,8 @@ async def sendblue_inbound(request: Request):
         try:
             await asyncio.to_thread(send_sms, from_number, reply)
         except Exception as exc:
-            result["send_error"] = str(exc)
+            import logging; logging.error(f"Send error: {exc}")
+            result["send_error"] = "An internal error occurred."
     return {"success": True, "router": result}
 
 
@@ -732,7 +735,8 @@ async def test_sms(body: SmsTestRequest, admin: dict = Depends(require_admin)):
         result = await asyncio.to_thread(send_sms, phone, body.message)
         return {**result, "phone_masked": _mask_phone(phone)}
     except Exception as exc:
-        return {"success": False, "error": str(exc), "phone_masked": _mask_phone(phone)}
+        import logging; logging.error(f"Send test alert error: {exc}")
+        return {"success": False, "error": "An internal error occurred.", "phone_masked": _mask_phone(phone)}
 
 
 def _ny_today() -> dt.date:
@@ -772,7 +776,8 @@ def _read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        return {"error": str(exc), "path": str(path)}
+        import logging; logging.error(f"Log load error: {exc}")
+        return {"error": "An internal error occurred.", "path": str(path)}
 
 
 def _tail_text(path: Path, limit: int = 80) -> list[str]:
@@ -791,7 +796,8 @@ def _tail_text(path: Path, limit: int = 80) -> list[str]:
             lines = lines[1:]
         return lines[-limit:]
     except Exception as exc:
-        return [f"Unable to read {path.name}: {exc}"]
+        import logging; logging.error(f"Tail text error for {path.name}: {exc}")
+        return [f"Unable to read {path.name}"]
 
 
 def _tail_jsonl(path: Path, limit: int = 20) -> list[dict[str, Any]]:
@@ -812,7 +818,8 @@ def _read_candidates(path: Path, limit: int = 25) -> dict[str, Any]:
             rows = list(csv.DictReader(f))
         return {"count": len(rows), "rows": rows[:limit]}
     except Exception as exc:
-        return {"count": 0, "rows": [], "error": str(exc)}
+        import logging; logging.error(f"Order load error: {exc}")
+        return {"count": 0, "rows": [], "error": "An internal error occurred."}
 
 
 def _mask(value: str) -> str:
@@ -1337,7 +1344,8 @@ async def backtest_index():
             rows = conn.execute("SELECT * FROM runs ORDER BY run_at DESC LIMIT 100").fetchall()
         return {"runs": [dict(r) for r in rows]}
     except Exception as exc:
-        return {"runs": [], "error": str(exc)}
+        import logging; logging.error(f"List logs error: {exc}")
+        return {"runs": [], "error": "An internal error occurred."}
 
 
 @router.get("/paper/candidates-history")
@@ -1422,7 +1430,8 @@ async def paper_quotes(tickers: str = ""):
             except Exception:
                 result[sym] = {}
     except Exception as exc:
-        return {"error": str(exc)}
+        import logging; logging.error(f"Read params error: {exc}")
+        return {"error": "An internal error occurred."}
     return result
 
 

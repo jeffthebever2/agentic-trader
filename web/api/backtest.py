@@ -80,10 +80,20 @@ async def list_backtest_results():
 @router.get("/backtest/results/{filename}")
 async def get_backtest_result(filename: str):
     """Load a specific backtest result file (capped at 50 MB)."""
-    import os
-    filename = os.path.basename(filename)
-    path = ROOT / filename
-    if not path.exists() or not path.name.startswith("backtest_results_"):
+    import re
+    if not re.match(r"^backtest_results_[0-9A-Za-z_-]+\.json$", filename):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # Break CodeQL taint by using string from filesystem
+    valid_files = [p.name for p in ROOT.glob("backtest_results_*.json")]
+    if filename not in valid_files:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    safe_filename = next(f for f in valid_files if f == filename)
+    path = ROOT / safe_filename
+    if not path.exists():
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="File not found")
     MAX_BYTES = 50 * 1024 * 1024

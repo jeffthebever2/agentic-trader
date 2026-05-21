@@ -37,7 +37,8 @@ def send_gmail_mms(to: str, subject: str, message: str) -> dict:
             smtp.send_message(msg)
         return {"success": True}
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        import logging; logging.error(f"Gmail MMS error: {e}")
+        return {"success": False, "error": "An internal error occurred."}
 
 def wait_for_gmail_reply(from_email: str, subject_match: str, timeout_sec: int = 300) -> str:
     """Polls inbox for a reply from the specified email containing the subject_match."""

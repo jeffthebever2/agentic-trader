@@ -232,7 +232,7 @@ async def _detect_page_state(page) -> str:
     # Landed somewhere else — could be home/dashboard
     from urllib.parse import urlparse
     hostname = urlparse(url).hostname or ""
-    if hostname.endswith("fidelity.com") and "login" not in url:
+    if (hostname == "fidelity.com" or hostname.endswith(".fidelity.com")) and "login" not in url:
         return "authenticated"
     return "unknown"
 

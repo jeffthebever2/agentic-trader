@@ -48,17 +48,12 @@ def send_email(to: str | Iterable[str], subject: str, message: str) -> dict:
     reply_to = os.getenv("EMAIL_REPLY_TO", "").strip()
     recipients = _split_recipients(to)
 
-    missing = [
-        name
-        for name, value in {
-            "SMTP_HOST": host,
-            "SMTP_PORT": str(port),
-            "SMTP_USERNAME": username,
-            "SMTP_PASSWORD": password,
-            "EMAIL_FROM": sender,
-        }.items()
-        if not value
-    ]
+    missing = []
+    if not host: missing.append("SMTP_HOST")
+    if not port: missing.append("SMTP_PORT")
+    if not username: missing.append("SMTP_USERNAME")
+    if not password: missing.append("SMTP_PASSWORD")
+    if not sender: missing.append("EMAIL_FROM")
     if missing:
         return {"success": False, "error": "Missing " + ", ".join(missing)}
     if not recipients:
@@ -81,7 +76,8 @@ def send_email(to: str | Iterable[str], subject: str, message: str) -> dict:
             smtp.send_message(msg)
         return {"success": True, "from": sender, "reply_to": reply_to, "to_count": len(recipients)}
     except Exception as exc:
-        return {"success": False, "error": str(exc), "from": sender, "to_count": len(recipients)}
+        import logging; logging.error(f"Email sending error: {exc}")
+        return {"success": False, "error": "An internal error occurred.", "from": sender, "to_count": len(recipients)}
 
 
 if __name__ == "__main__":

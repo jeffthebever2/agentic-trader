@@ -106,7 +106,8 @@ def send_sendblue(to: str, message: str) -> dict:
             timeout=20,
         )
     except requests.RequestException as exc:
-        return {"success": False, "error": f"Sendblue request failed: {exc}"}
+        import logging; logging.error(f"Sendblue request failed: {exc}")
+        return {"success": False, "error": "Sendblue request failed due to an internal error."}
     try:
         payload = response.json()
     except Exception:
@@ -154,7 +155,8 @@ def evaluate_sendblue(number: str) -> dict:
             timeout=20,
         )
     except requests.RequestException as exc:
-        return {"success": False, "error": f"Sendblue request failed: {exc}"}
+        import logging; logging.error(f"Sendblue request failed: {exc}")
+        return {"success": False, "error": "Sendblue request failed due to an internal error."}
     try:
         payload = response.json()
     except Exception:

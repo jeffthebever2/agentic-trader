@@ -233,5 +233,5 @@ def dispatch(from_number: str, text: str) -> dict[str, Any]:
     try:
         reply = handler(user, args)
     except Exception as exc:
-        reply = f"Command error: {exc}"
+        reply = "Command error: An internal error occurred."
     return {"reply": reply, "matched": cmd, "user": user["email"]}
