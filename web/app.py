@@ -202,9 +202,11 @@ async def health_check():
             "metrics": metrics,
         }
     except Exception as e:
+        import logging
+        logging.exception("Health check failed")
         return {
             "status": "unhealthy",
-            "error": str(e),
+            "error": "An internal error occurred",
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
 

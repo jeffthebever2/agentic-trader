@@ -150,14 +150,6 @@ def filter_by_price(data: dict, min_price: float = MIN_PRICE,
         "Min/max price is enforced at each scan date."
     )
     return kept
-    kept, removed = {}, 0
-    for ticker, df in data.items():
-        med = float(df["Close"].median())
-        if med < min_price:
-            removed += 1
-            continue
-        if max_price is not None and med > max_price:
-            removed += 1
             continue
         kept[ticker] = df
     label = f"${min_price:.0f}"
@@ -972,10 +964,6 @@ def score_at(pc: dict, df: pd.DataFrame, pos: int,
     sig["regime_adj"]      = round(regime_adj, 1)
     sig["vix_ts"]          = round(vix_ts, 3) if vix_ts is not None else None
     sig["sector_breadth"]  = round(sector_breadth, 3) if sector_breadth is not None else None
-
-    # Price > $100 penalty (price bucket analysis: $100+ pf=0.984, negative edge)
-    if score_penalty_100:
-        score = max(0.0, score - 8.0)
 
     # ── Price targets ──────────────────────────────────────────────────────
     sig["entry"]       = round(price, 2)

@@ -725,7 +725,7 @@ class TestLegacyRemoval:
         mock_llm = MagicMock()
         create_portfolio_manager(mock_llm)
         with pytest.raises(TypeError):
-            create_portfolio_manager(mock_llm, memory=MagicMock())
+            create_portfolio_manager(mock_llm, **{'memory': MagicMock()})
 
     def test_full_pipeline_no_regression(self, tmp_path):
         """propagate() completes and stores the decision after the redesign."""

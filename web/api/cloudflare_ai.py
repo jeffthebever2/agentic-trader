@@ -81,4 +81,4 @@ async def cloudflare_ai_test(admin: dict = Depends(require_admin)):
         )
         return {"success": True, "model": model, "response": text}
     except Exception as exc:
-        return {"success": False, "error": str(exc), "model": model}
+        import logging; logging.exception("Cloudflare AI test failed"); return {"success": False, "error": "An internal error occurred", "model": model}

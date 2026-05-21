@@ -756,7 +756,8 @@ def run_leveraged_etf_tactical(refresh: bool = False) -> list[CandidateResult]:
 
 
 def run_stock_panel_refine() -> list[CandidateResult]:
-    px = pickle.load(open(P.PX_PKL, "rb"))
+    with open(P.PX_PKL, "rb") as _f:
+        px = pickle.load(_f)
     p = P.build_panel()
     rsi14 = pd.to_numeric(p["rsi14"], errors="coerce")
     mfi14 = pd.to_numeric(p["mfi14"], errors="coerce")
@@ -878,8 +879,10 @@ def run_stock_panel_refine() -> list[CandidateResult]:
 
 
 def run_lowfreq_stock(max_tickers: int = 600) -> list[CandidateResult]:
-    px = pickle.load(open(LF.PX_PKL, "rb"))
-    want = [line.strip() for line in open(ROOT / LF.LIQUID) if line.strip()]
+    with open(LF.PX_PKL, "rb") as _f:
+        px = pickle.load(_f)
+    with open(ROOT / LF.LIQUID) as _f:
+        want = [line.strip() for line in _f if line.strip()]
     tickers = [t for t in want if t in px][:max_tickers]
     grid = []
     for strat, plist in {

@@ -107,8 +107,8 @@ def _score_ticker(ticker):
                 spy_close = float(spy_df["Close"].iloc[sg])
                 spy_sma50 = float(spy_df["Close"].iloc[sg - 49:sg + 1].mean())
                 spy_sma200 = float(spy_df["Close"].iloc[sg - 199:sg + 1].mean())
-                spy_ret5 = float(spy_close / spy_df["Close"].iloc[sg - 5] - 1) if sg >= 5 else None
-                spy_ret20 = float(spy_close / spy_df["Close"].iloc[sg - 20] - 1) if sg >= 20 else None
+                spy_ret5 = float(spy_close / spy_df["Close"].iloc[sg - 5] - 1) 
+                spy_ret20 = float(spy_close / spy_df["Close"].iloc[sg - 20] - 1) 
 
         try:
             score, sig = bt.score_at(
@@ -153,13 +153,15 @@ def main():
     si, sn = (int(x) for x in a.shard.split("/"))
 
     print("loading px (once, shared via fork)...", flush=True)
-    px = pickle.load(open(PX_PKL, "rb"))
+    with open(PX_PKL, "rb") as _f:
+        px = pickle.load(_f)
     all_tickers = sorted(px.keys())
     spy_df = px.get("SPY")
     if spy_df is None:
         sys.exit("SPY not in px cache")
     if a.tickers_file:
-        want = {ln.strip() for ln in open(a.tickers_file) if ln.strip()}
+        with open(a.tickers_file) as _f:
+            want = {ln.strip() for ln in _f if ln.strip()}
         universe = [t for t in all_tickers if t in want]
     else:
         universe = [t for t in all_tickers if t != "SPY"]

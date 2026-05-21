@@ -23,7 +23,8 @@ TEST_START = pd.Timestamp("2023-07-01")
 
 
 def main():
-    px = pickle.load(open(P.PX_PKL, "rb"))
+    with open(P.PX_PKL, "rb") as _f:
+        px = pickle.load(_f)
     p = P.build_panel()
     # Reduce to the oversold-uptrend candidate envelope so build_sig stays
     # light, then rebuild masks on the reduced frame.

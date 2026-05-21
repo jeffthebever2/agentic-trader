@@ -291,8 +291,10 @@ def fmt(tag, p):
 
 
 def main():
-    px = pickle.load(open(PX_PKL, "rb"))
-    want = [l.strip() for l in open(LIQUID) if l.strip()]
+    with open(PX_PKL, "rb") as _f:
+        px = pickle.load(_f)
+    with open(LIQUID) as _f:
+        want = [l.strip() for l in _f if l.strip()]
     tickers = [t for t in want if t in px][:600]
     print(f"liquid tickers in cache: {len(tickers)}", flush=True)
 

@@ -1,3 +1,4 @@
+import sys
 import questionary
 from typing import List, Tuple
 
@@ -33,7 +34,7 @@ def get_ticker() -> str:
 
     if not ticker:
         console.print("\n[red]No ticker symbol provided. Exiting...[/red]")
-        exit(1)
+        sys.exit(1)
 
     return normalize_ticker_symbol(ticker)
 
@@ -71,7 +72,7 @@ def get_analysis_date() -> str:
 
     if not date:
         console.print("\n[red]No date provided. Exiting...[/red]")
-        exit(1)
+        sys.exit(1)
 
     return date.strip()
 
@@ -97,7 +98,7 @@ def select_analysts() -> List[AnalystType]:
 
     if not choices:
         console.print("\n[red]No analysts selected. Exiting...[/red]")
-        exit(1)
+        sys.exit(1)
 
     return choices
 
@@ -129,7 +130,7 @@ def select_research_depth() -> int:
 
     if choice is None:
         console.print("\n[red]No research depth selected. Exiting...[/red]")
-        exit(1)
+        sys.exit(1)
 
     return choice
 
@@ -211,7 +212,7 @@ def _select_model(provider: str, mode: str) -> str:
 
     if choice is None:
         console.print(f"\n[red]No {mode} thinking llm engine selected. Exiting...[/red]")
-        exit(1)
+        sys.exit(1)
 
     if choice == "custom":
         return _prompt_custom_model_id()
@@ -262,7 +263,7 @@ def select_llm_provider() -> tuple[str, str | None]:
     
     if choice is None:
         console.print("\n[red]No LLM provider selected. Exiting...[/red]")
-        exit(1)
+        sys.exit(1)
 
     provider, url = choice
     return provider, url

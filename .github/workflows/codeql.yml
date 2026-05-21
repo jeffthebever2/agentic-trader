@@ -311,6 +311,8 @@ jobs:
     needs: analyze
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Post failure notification
         run: |

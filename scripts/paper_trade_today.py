@@ -1339,7 +1339,9 @@ def _yf_download_with_retry(max_retries: int = 3, **kwargs):
                 raise RuntimeError(f"yfinance circuit breaker opened after {_CB_THRESHOLD} failures: {exc}") from exc
             wait = 2 ** attempt
             time.sleep(wait)
-    raise last_exc  # type: ignore[misc]
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError('Unknown error')
 
 
 def download_daily_history(
@@ -1451,9 +1453,9 @@ def spy_gate_values(spy_df: pd.DataFrame | None, as_of: pd.Timestamp) -> dict[st
     values["spy_close"] = close
     values["spy_sma50"] = float(spy_df["Close"].iloc[pos - 49 : pos + 1].mean())
     values["spy_sma200"] = float(spy_df["Close"].iloc[pos - 199 : pos + 1].mean())
-    values["spy_ret1"] = float(close / spy_df["Close"].iloc[pos - 1] - 1) if pos >= 1 else None
-    values["spy_ret5"] = float(close / spy_df["Close"].iloc[pos - 5] - 1) if pos >= 5 else None
-    values["spy_ret20"] = float(close / spy_df["Close"].iloc[pos - 20] - 1) if pos >= 20 else None
+    values["spy_ret1"] = float(close / spy_df["Close"].iloc[pos - 1] - 1) 
+    values["spy_ret5"] = float(close / spy_df["Close"].iloc[pos - 5] - 1) 
+    values["spy_ret20"] = float(close / spy_df["Close"].iloc[pos - 20] - 1) 
     return values
 
 

@@ -17,7 +17,8 @@ LINE = re.compile(
 def parse(path):
     rows = []
     stage = ""
-    for ln in open(path):
+    with open(path) as _f: _lines = _f.readlines()
+    for ln in _lines:
         ln = ln.rstrip("\n")
         if ln.startswith("==="):
             stage = ln.strip("= ").strip()

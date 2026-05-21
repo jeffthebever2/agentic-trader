@@ -18,7 +18,8 @@ def load_cache():
     px = {}
     for f in glob.glob(".backtest_cache/batch_2017-11-07_2026-05-20_bs100_*.pkl"):
         try:
-            d = pickle.load(open(f, "rb"))
+            with open(f, "rb") as _f:
+                d = pickle.load(_f)
         except Exception:
             continue
         for k, v in d.items():
@@ -191,5 +192,6 @@ if __name__ == "__main__":
     print(f"window gate-pass signals located in cache: {len(sigtab)}", flush=True)
     sigtab.to_pickle("/tmp/sigtab.pkl")
     import pickle as _p
-    _p.dump(px, open("/tmp/px.pkl", "wb"))
+    with open("/tmp/px.pkl", "wb") as _f:
+        _p.dump(px, _f)
     print("saved /tmp/sigtab.pkl /tmp/px.pkl", flush=True)

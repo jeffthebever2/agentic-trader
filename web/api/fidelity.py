@@ -874,7 +874,7 @@ async def fidelity_debug_trade(admin: dict = Depends(require_admin)):
         body_text = await page.evaluate("() => { try { return document.body.innerText.slice(0, 3000); } catch(e) { return ''; } }")
         return {"url": current_url, "elements": elements, "body_snippet": body_text}
     except Exception as e:
-        return {"error": str(e), "url": current_url, "elements": [], "body_snippet": ""}
+        import logging; logging.exception("Fidelity snapshot failed"); return {"error": "An internal error occurred", "url": current_url, "elements": [], "body_snippet": ""}
     finally:
         if page:
             try:

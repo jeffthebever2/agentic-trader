@@ -181,6 +181,31 @@ An interface will appear showing results as they load, letting you track the age
   <img src="assets/cli/cli_transaction.png" width="100%" style="display: inline-block; margin: 0 2%;">
 </p>
 
+### Runtime Management and Migration
+
+Use the `agentic-restore` command to manage the background web app, cloudflare tunnel, and efficiently migrate your environment (ML models, caches, DBs) between machines.
+
+```bash
+agentic-restore start --restart --quick-tunnel  # Start the dashboard and tunnel
+agentic-restore status                          # Check health of services
+agentic-restore doctor                          # Diagnose missing deps/models
+agentic-restore stop                            # Stop background services
+```
+
+**Migrating to a new machine:**
+Bundle your models and cache:
+```bash
+agentic-restore bundle-data --output ~/Desktop/agentic-trader-artifacts.tar.gz
+```
+Restore on the new machine:
+```bash
+agentic-restore all \
+  --artifact-tar ~/Desktop/agentic-trader-artifacts.tar.gz \
+  --install \
+  --restart
+```
+See [`docs/COMMANDS.md`](COMMANDS.md) for detailed usage.
+
 ## TradingAgents Package
 
 ### Implementation Details

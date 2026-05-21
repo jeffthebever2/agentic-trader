@@ -45,7 +45,8 @@ def main():
     a = ap.parse_args()
 
     path = a.path or sorted(glob.glob("backtest_results_*.json"))[-1]
-    d = json.load(open(path))
+    with open(path) as _f:
+        d = json.load(_f)
     ml = d.get("ml_analysis", {})
     meta = d.get("meta", {})
     print(f"file: {path}")

@@ -275,7 +275,7 @@ async def set_my_phone(
             )
             verified = bool(test_result and test_result.get("success"))
         except Exception as exc:
-            test_result = {"success": False, "error": f"send failed: {exc}"}
+            import logging; logging.exception("Test send failed"); test_result = {"success": False, "error": "An internal error occurred"}
 
     saved = user_store.set_phone(user["email"], phone, verified=verified)
     return {
@@ -312,7 +312,7 @@ async def verify_my_phone(
     try:
         res = _load_sms_alerts().evaluate_sendblue(phone)
     except Exception as exc:
-        res = {"success": False, "error": f"verify failed: {exc}"}
+        import logging; logging.exception("Verify failed"); res = {"success": False, "error": "An internal error occurred"}
     reachable = bool(res.get("success"))
     service = res.get("service")
     saved = user_store.set_phone(user["email"], phone, verified=reachable)

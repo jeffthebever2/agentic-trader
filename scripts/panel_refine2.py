@@ -21,7 +21,8 @@ TEST_START = pd.Timestamp("2023-07-01")
 
 
 def main():
-    px = pickle.load(open(P.PX_PKL, "rb"))
+    with open(P.PX_PKL, "rb") as _f:
+        px = pickle.load(_f)
     p = P.build_panel()
     rsi14 = pd.to_numeric(p["rsi14"], errors="coerce")
     mfi14 = pd.to_numeric(p["mfi14"], errors="coerce")

@@ -14,6 +14,14 @@
 <script src="/static/chartjs-financial.min.js"></script>
 <script src="https://s3.tradingview.com/tv.js"></script>
 <script>
+
+function safeHtml(html) {
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+  }
+  return html;
+}
+
 /* Global Chart.js theming — lifts every chart at once, no per-config edits.
    Defaults read at chart-creation time, so set before app logic runs. */
 (function(){
@@ -1569,6 +1577,7 @@ a[onclick], button.text-xs, .text-xs[onclick], [onclick].underline {
   }
 }
 </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js"></script>
 </head>
 <body class="bg-slate-50 text-slate-950 flex overflow-hidden" style="height:100dvh">
 <a href="#main-content" class="sr-only focus:not-sr-only focus:absolute focus:p-4 focus:bg-surface focus:text-ink focus:z-[9999] focus:outline-none focus:ring-2 focus:ring-accent">Skip to main content</a>
@@ -6289,7 +6298,7 @@ function appendMessage(msg) {
   }
   html += '</div>';
 
-  container.insertAdjacentHTML('beforeend', html);
+  container.insertAdjacentHTML('beforeend', safeHtml(html));
   container.scrollTop = container.scrollHeight;
 }
 
@@ -6409,7 +6418,7 @@ function startAnalysis() {
       const verdictCard = renderVerdictCard(finalText, ticker);
       if (verdictCard && reportEl) {
         const existing = reportEl.innerHTML;
-        reportEl.innerHTML = verdictCard + (existing.includes('agents finish') ? '' : existing);
+        reportEl.innerHTML = safeHtml(verdictCard + (existing.includes('agents finish') ? '' : existing));
       }
 
       for (const k of Object.keys(agentStatus)) agentStatus[k] = 'completed';
@@ -6589,7 +6598,7 @@ function renderAlgorithmAnalysisResults(ticker, results, modeMeta) {
       <td class="px-4 py-3 text-right font-mono">${r.row && row.ml_win_prob != null ? fmtPct01(row.ml_win_prob) : '-'}</td>
       <td class="px-4 py-3 text-right">${status}</td>
     </tr>`;
-  }).join('');
+  }).join(''));
   const best = results
     .filter(r => r.row && (!modeMeta.requiresMl || r.row.ml_win_prob != null))
     .sort((a,b) => Number(b.row.score || 0) - Number(a.row.score || 0))[0];
@@ -6662,7 +6671,7 @@ function showFullReport() {
     const isFinal = s.key === 'final_trade_decision';
     const ticker = document.getElementById('a-ticker')?.value?.trim()?.toUpperCase() || '';
     const verdictCard = isFinal ? renderVerdictCard(content||'', ticker) : null;
-    body.innerHTML = (verdictCard || '') + renderMd(content||'');
+    body.innerHTML = safeHtml((verdictCard || '') + renderMd(content||''));
     tabs.querySelectorAll('.report-tab').forEach((t,i)=>t.classList.toggle('active',i===idx));
   }
 
@@ -6920,7 +6929,7 @@ function appendAlgoLog(text, colorClass) {
 
 function colorAlgoLine(txt) {
   if (txt.includes('ERROR') || txt.includes('FAILED') || txt.includes('failed')) return 'text-red-400';
-  if (txt.includes('WARNING') || txt.includes('WARNING')) return 'text-amber-400';
+  if (txt.includes('WARNING')) return 'text-amber-400';
   if (txt.includes('saved') || txt.includes('Results') || txt.includes('complete')) return 'text-emerald-400';
   if (txt.includes('===') || txt.startsWith('  TradingAgents')) return 'text-orange-600 font-semibold';
   return '';
@@ -7036,7 +7045,7 @@ function renderAlgoResults(summary) {
       <td class="px-4 py-2.5 text-right text-violet-400">${so}</td>
       <td class="px-4 py-2.5 text-right text-amber-400">${kl}</td>
     </tr>`;
-  }).join('');
+  }).join(''));
 
   // Per-ticker table
   const tickerStats = s.per_ticker_stats || {};
@@ -7058,7 +7067,7 @@ function renderAlgoResults(summary) {
       <td class="px-4 py-2 text-right text-cyan-400">${pf}</td>
       <td class="px-4 py-2 text-right text-slate-400">${score}</td>
     </tr>`;
-  }).join('');
+  }).join(''));
 }
 
 function populateBtModels() {
@@ -7173,7 +7182,7 @@ function startBacktest() {
       const tbody = document.getElementById('bt-trades-tbody');
       const row = document.createElement('tr');
       row.className = 'tr-hover border-b border-slate-800/50';
-      row.innerHTML = `<td class="px-4 py-2.5 font-mono font-bold text-slate-200">${escHtml(msg.ticker)}</td><td class="px-4 py-2.5 text-slate-400">${escHtml(msg.date)}</td><td class="px-4 py-2.5 text-center">${decisionBadge(msg.decision)}</td>`;
+      row.innerHTML = safeHtml(`<td class="px-4 py-2.5 font-mono font-bold text-slate-200">${escHtml(msg.ticker)}</td><td class="px-4 py-2.5 text-slate-400">${escHtml(msg.date)}</td><td class="px-4 py-2.5 text-center">${decisionBadge(msg.decision)}</td>`);
       tbody.appendChild(row);
       document.getElementById('bt-results-card').classList.remove('hidden');
     }
@@ -7589,7 +7598,7 @@ function _candRenderTable() {
       <td class="px-4 py-2 text-slate-500 max-w-xs truncate" title="${escHtml(row.decision_reason || row.gate_status || '')}">${escHtml(row.decision_reason || row.gate_status || '')}</td>
       <td class="px-4 py-2 text-slate-400 max-w-sm" style="white-space:normal;min-width:180px">${escHtml(row.ai_reason || '')}</td>
     </tr>`;
-  }).join('');
+  }).join(''));
   scheduleCandidateQuotes();
 }
 
@@ -7942,7 +7951,7 @@ function renderPaperPositions(accounts) {
       <td class="px-4 py-2 text-slate-400 text-xs">${escHtml(sector)}</td>
       <td class="px-4 py-2 text-xs" style="white-space:nowrap">${flags || '—'}</td>
     </tr>`;
-  }).join('');
+  }).join(''));
 }
 
 function renderPaperStats(endOfDay) {
@@ -9943,7 +9952,7 @@ async function testAdminWebhook() {
     if (r.ok) { res.innerHTML = '<span class="text-green-400">✓ Sent successfully</span>'; }
     else { res.innerHTML = `<span class="text-red-400">HTTP ${r.status}</span>`; }
   } catch(e) {
-    res.innerHTML = `<span class="text-red-400">Error: ${escHtml(e.message)}</span>`;
+    res.innerHTML = safeHtml(`<span class="text-red-400">Error: ${escHtml(e.message)}</span>`);
   }
 }
 
@@ -10071,7 +10080,7 @@ async function testAdminSms() {
     }
     await loadAdminSmsStatus();
   } catch(e) {
-    res.innerHTML = `<span class="text-red-400">Error: ${escHtml(e.message)}</span>`;
+    res.innerHTML = safeHtml(`<span class="text-red-400">Error: ${escHtml(e.message)}</span>`);
   }
 }
 
@@ -10093,7 +10102,7 @@ async function testAdminMms() {
       res.innerHTML = `<span class="text-red-400">${escHtml(result.error || 'Email failed')}</span>`;
     }
   } catch(e) {
-    res.innerHTML = `<span class="text-red-400">Error: ${escHtml(e.message)}</span>`;
+    res.innerHTML = safeHtml(`<span class="text-red-400">Error: ${escHtml(e.message)}</span>`);
   }
 }
 
@@ -10351,19 +10360,19 @@ function startLiveScan() {
       _sc2RenderTable(_sc2Results);
       document.getElementById('sc2-results-count').textContent = `(${_sc2Results.length} signals)`;
       document.getElementById('sc2-stat-passed').textContent = _sc2Results.length;
-      document.getElementById('sc2-stat-ml-pass').textContent = _sc2Results.filter(r=>r.ml_pass).length;
+      document.getElementById('sc2-stat-ml-pass').textContent = String(_sc2Results.filter(r=>r.ml_pass).length);
     } else if (msg.type === 'complete') {
       _sc2Results = msg.results || _sc2Results;
       _sc2Results.sort((a,b) => (b.ml_pass - a.ml_pass) || (b.score - a.score));
       _sc2RenderTable(_sc2Results);
       document.getElementById('sc2-stat-scanned').textContent = msg.scanned?.toLocaleString() || '—';
       document.getElementById('sc2-stat-passed').textContent = msg.passed || _sc2Results.length;
-      document.getElementById('sc2-stat-ml-pass').textContent = _sc2Results.filter(r=>r.ml_pass).length;
+      document.getElementById('sc2-stat-ml-pass').textContent = String(_sc2Results.filter(r=>r.ml_pass).length);
       document.getElementById('sc2-stat-date').textContent = msg.trade_date || '—';
       document.getElementById('sc2-results-count').textContent = `(${_sc2Results.length} signals from ${msg.scanned?.toLocaleString()||'?'} tickers)`;
       document.getElementById('sc2-progress-bar').style.width = '100%';
       document.getElementById('sc2-status-text').textContent = `Complete — ${_sc2Results.length} signals found`;
-      _sc2AppendLog(`Scan complete: ${_sc2Results.length} signals from ${msg.scanned} tickers`);
+      _sc2AppendLog(`Scan complete: ${_sc2Results.length} signals from ${escHtml(String(msg.scanned))} tickers`);
       _sc2Done();
     } else if (msg.type === 'error') {
       _sc2AppendLog('ERROR: ' + msg.message);
@@ -10406,7 +10415,7 @@ function _sc2RenderTable(results) {
     tbody.innerHTML = '<tr><td colspan="14" class="px-4 py-6 text-center text-slate-600 text-xs">No signals above threshold</td></tr>';
     return;
   }
-  tbody.innerHTML = rows.map(r => {
+  tbody.innerHTML = safeHtml(rows.map(r => {
     const mlBadge = r.ml_win_prob != null
       ? `<span class="${r.ml_pass ? 'text-emerald-400' : 'text-slate-500'}">${r.ml_pass ? '✓' : '✗'} ${r.ml_win_prob}%</span>`
       : '<span class="text-slate-600">—</span>';
@@ -10434,7 +10443,7 @@ function _sc2RenderTable(results) {
         <button class="text-xs text-cyan-500 hover:text-cyan-300" onclick="openTVChart('${safeSym(r.ticker)}')">Chart</button>
       </td>
     </tr>`;
-  }).join('');
+  }).join(''));
 }
 
 function sc2ExportCsv() {
@@ -10553,7 +10562,7 @@ function fiStartLogin() {
       _fiShowConnected();
       fiLoadAll();
     } else if (msg.step === 'error') {
-      _fiLogMsg('Error: ' + msg.message, '#ef4444');
+      _fiLogMsg('Error: ' + escHtml(msg.message), '#ef4444');
       if (msg.traceback) console.error(msg.traceback);
       document.getElementById('fi-login-btn').disabled = false;
       _fiWaitingTotp = false;
@@ -10949,7 +10958,7 @@ async function wbLoadOrders(status) {
     const r = await apiFetch('/webull/orders?status=' + encodeURIComponent(status));
     const orders = r.orders || [];
     if (!orders.length) {
-      tbody.innerHTML = `<tr><td colspan="10" class="px-4 py-8 text-center text-slate-600">No ${status.toLowerCase()} orders</td></tr>`;
+      tbody.innerHTML = safeHtml(`<tr><td colspan="10" class="px-4 py-8 text-center text-slate-600">No ${status.toLowerCase()} orders</td></tr>`);
       return;
     }
     const STATUS_CLS = {Working:'text-cyan-400', Filled:'text-emerald-400', Cancelled:'text-slate-500', Failed:'text-red-400'};
@@ -11907,7 +11916,7 @@ async function secSetMethod(method) {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({method}),
     });
-    msg.innerHTML = `<span style="color:#22c55e">Trade 2FA set to ${method}.</span>`;
+    msg.innerHTML = safeHtml(`<span style="color:#22c55e">Trade 2FA set to ${method}.</span>`);
     renderSecuritySettings();
   } catch(e) {
     msg.innerHTML = `<span style="color:#ef4444">${escHtml(e.message)}</span>`;
@@ -12686,13 +12695,13 @@ function showToast(msg, type='info', title='', ms=4000) {
     info:   `<svg class="ta-toast-icon" fill="none" viewBox="0 0 24 24" stroke="var(--accent)" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
   };
   const titles = {success:'Done',error:'Error',warning:'Warning',info:'Info'};
-  t.innerHTML = `${icons[type]||icons.info}
+  t.innerHTML = safeHtml(`${icons[type]||icons.info}
     <div class="ta-toast-body">
       <div class="ta-toast-title">${title||titles[type]||''}</div>
       <div class="ta-toast-msg">${msg}</div>
     </div>
     <button class="ta-toast-x" onclick="taDismiss(this.parentElement)">×</button>
-    <div class="ta-bar" style="animation-duration:${ms}ms"></div>`;
+    <div class="ta-bar" style="animation-duration:${ms}ms"></div>`);
   region.appendChild(t);
   t._tmr = setTimeout(() => taDismiss(t), ms);
 }
@@ -13057,7 +13066,6 @@ async function fiRunTest() {
   }
 
   // Step 2 — summary (only if connected)
-  let summaryOk = false;
   if (statusOk) {
     fiLog('Fetching account summary (loads Fidelity portfolio page)…');
     try {
@@ -13069,7 +13077,6 @@ async function fiRunTest() {
       const up = sm.daily_change && !sm.daily_change.startsWith('-');
       glEl.style.color = sm.daily_change ? (up ? '#34d399' : '#f87171') : '#94a3b8';
       fiLog(`Summary: value=${sm.total_value||'?'}, gl=${sm.daily_change||'?'}`, true);
-      summaryOk = true;
     } catch(e) {
       fiLog(`Summary error: ${e.message || e}`, false);
       document.getElementById('fi-res-value').textContent = 'Error';

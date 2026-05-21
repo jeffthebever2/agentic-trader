@@ -11,7 +11,8 @@ import pandas as pd
 from resim import run_config, portfolio
 
 S = pd.read_pickle("/tmp/sigtab.pkl")
-px = pickle.load(open("/tmp/px.pkl","rb"))
+with open("/tmp/px.pkl", "rb") as _f:
+    px = pickle.load(_f)
 COST_PCT = 0.0010  # 0.05% slippage each side, round trip ~0.10%
 
 fil = {

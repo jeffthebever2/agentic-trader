@@ -6,7 +6,8 @@ import pandas as pd
 from resim import run_config, portfolio
 
 S = pd.read_pickle("/tmp/sigtab.pkl")
-px = pickle.load(open("/tmp/px.pkl","rb"))
+with open("/tmp/px.pkl", "rb") as _f:
+    px = pickle.load(_f)
 
 masks = {
  "ALL": np.ones(len(S),bool),

@@ -47,7 +47,8 @@ def rules(p):
 
 
 def main():
-    px = pickle.load(open(P.PX_PKL, "rb"))
+    with open(P.PX_PKL, "rb") as _f:
+        px = pickle.load(_f)
     p = P.build_panel()
     print(f"panel rows={len(p)} "
           f"{p['scan_date'].min().date()}->{p['scan_date'].max().date()} "

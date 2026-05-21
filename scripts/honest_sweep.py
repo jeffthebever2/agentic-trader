@@ -57,7 +57,8 @@ def load_cache() -> dict:
     px: dict = {}
     for f in glob.glob(CACHE_GLOB):
         try:
-            d = pickle.load(open(f, "rb"))
+            with open(f, "rb") as _f:
+                d = pickle.load(_f)
         except Exception:
             continue
         for k, v in d.items():
@@ -141,7 +142,8 @@ def get_data_csv(csv_path: str, sig_pkl: str, rebuild: bool = False):
     shared price cache pickle so it stays consistent and fast)."""
     if not Path(PX_PKL).exists():
         raise SystemExit("run honest_sweep build first to create the px cache")
-    px = pickle.load(open(PX_PKL, "rb"))
+    with open(PX_PKL, "rb") as _f:
+        px = pickle.load(_f)
     if not rebuild and Path(sig_pkl).exists():
         sig = pd.read_pickle(sig_pkl)
         return sig, px
@@ -159,7 +161,8 @@ def get_data(rebuild: bool = False):
         sig = pd.read_pickle(SIG_PKL)
         if "_pdf" in sig.columns and "pdf_key" not in sig.columns:
             sig = sig.rename(columns={"_pdf": "pdf_key"})
-        px = pickle.load(open(PX_PKL, "rb"))
+        with open(PX_PKL, "rb") as _f:
+            px = pickle.load(_f)
         return sig, px
     print("loading price cache...", flush=True)
     px = load_cache()
@@ -170,7 +173,8 @@ def get_data(rebuild: bool = False):
           f"({sig['scan_date'].min().date()} -> {sig['scan_date'].max().date()})",
           flush=True)
     sig.to_pickle(SIG_PKL)
-    pickle.dump(px, open(PX_PKL, "wb"))
+    with open(PX_PKL, "wb") as _f:
+        pickle.dump(px, _f)
     return sig, px
 
 

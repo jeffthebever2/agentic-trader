@@ -52,7 +52,8 @@ _RANK = ["rsi9", "rsi14", "mfi14", "atr_pct", "dollar_vol20",
 def build_panel(rebuild=False):
     if not rebuild and Path(PANEL_PKL).exists():
         return pd.read_pickle(PANEL_PKL)
-    want = {l.strip() for l in open(LIQUID) if l.strip()}
+    with open(LIQUID) as _f:
+        want = {l.strip() for l in _f if l.strip()}
     head = pd.read_csv(ENRICHED, nrows=1)
     cols = [c for c in PANEL_COLS if c in head.columns]
     parts = []

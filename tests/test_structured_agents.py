@@ -77,7 +77,7 @@ class TestRenderResearchPlan:
         assert "**Strategic Actions**: Build position" in md
 
     def test_all_5_tier_ratings_render(self):
-        for rating in PortfolioRating:
+        for rating in list(PortfolioRating):
             p = ResearchPlan(
                 recommendation=rating,
                 rationale="r",
