@@ -233,7 +233,7 @@ async def root():
     return Response(
         content=_INDEX_CACHE,
         media_type="text/html",
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 
 
@@ -248,5 +248,5 @@ async def catch_all(full_path: str):
     return Response(
         content=_INDEX_CACHE,
         media_type="text/html",
-        headers={"Cache-Control": "no-cache"},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )

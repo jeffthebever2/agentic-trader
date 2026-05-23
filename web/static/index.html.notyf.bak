@@ -4,17 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agentic Trader</title>
-<link rel="icon" type="image/png" href="/static/agentic-trader-icon.png">
-<link rel="apple-touch-icon" href="/static/agentic-trader-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=optional" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/tailwind.min.css">
-<link rel="dns-prefetch" href="https://s3.tradingview.com">
-<script defer src="/static/marked.min.js"></script>
-<script defer src="/static/chart.umd.min.js"></script>
-<script defer src="/static/chartjs-adapter-date-fns.min.js"></script>
-<script defer src="/static/chartjs-financial.min.js"></script>
+<script src="/static/marked.min.js"></script>
+<script src="/static/chart.umd.min.js"></script>
+<script src="/static/chartjs-adapter-date-fns.min.js"></script>
+<script src="/static/chartjs-financial.min.js"></script>
+<script src="https://s3.tradingview.com/tv.js"></script>
 <script>
 
 function safeHtml(html) {
@@ -26,10 +24,8 @@ function safeHtml(html) {
 
 /* Global Chart.js theming — lifts every chart at once, no per-config edits.
    Defaults read at chart-creation time, so set before app logic runs. */
-(function taChartTheme(){
-  // chart.umd is deferred: if Chart isn't ready at parse-time, retry once the
-  // deferred scripts have executed (DOMContentLoaded fires after deferred JS).
-  if(!window.Chart){ document.addEventListener('DOMContentLoaded', taChartTheme); return; }
+(function(){
+  if(!window.Chart) return;
   var C = window.Chart;
   var cs = function(v,f){ try{ var x=getComputedStyle(document.documentElement).getPropertyValue(v).trim(); return x||f; }catch(e){ return f; } };
   function rgba(hex,a){ try{ var h=hex.replace('#',''); if(h.length===3)h=h.split('').map(c=>c+c).join('');
@@ -185,22 +181,6 @@ function safeHtml(html) {
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
   --radius: 0.5rem;
-  /* Opt-in design tokens (Phase 6) — never applied via broad selectors; use explicitly */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 24px;
-  --space-6: 32px;
-  --radius-sm: 0.25rem;
-  --radius-lg: 0.75rem;
-  --radius-full: 9999px;
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-  --success: #16a34a;
-  --danger: #ef4444;
-  --warning: #f59e0b;
-  --info: #3b82f6;
 }
 * { box-sizing: border-box; }
 body { font-family: var(--font-sans); font-variant-numeric: tabular-nums; font-size: .875rem; -webkit-font-smoothing: antialiased; font-kerning: normal; }
@@ -942,7 +922,7 @@ aside > div:first-child > div:first-child { transition: transform .25s var(--eas
 /* ── shader-style ambient field.
    Canvas owns the motion; CSS keeps it behind the product chrome. */
 @media (prefers-reduced-motion: reduce) {
-  #ta-shader-field { display:none; }
+  #ta-shader-field { opacity:.28; }
 }
 
 /* ── industrial-brutalist-ui: restrained tactical-telemetry accents ──
@@ -1587,802 +1567,25 @@ a[onclick], button.text-xs, .text-xs[onclick], [onclick].underline {
   }
 }
 </style>
-  <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com">
-  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js" integrity="sha384-vdScihEZCfbPnBQf+lc7LgXUdJVYyhC3yWHUW5C5P5GpHRqVnaM6HJELJxT6IqwM" crossorigin="anonymous"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js" integrity="sha384-vdScihEZCfbPnBQf+lc7LgXUdJVYyhC3yWHUW5C5P5GpHRqVnaM6HJELJxT6IqwM" crossorigin="anonymous"></script>
 
-<!-- TradingAgents premium static UI vendor CSS — toast/tooltip styles aren't needed
-     for first paint, so load async (media=print flip) to avoid blocking render. -->
-<link rel="stylesheet" href="/static/vendor/css/notyf.min.css" media="print" onload="this.media='all'">
-<link rel="stylesheet" href="/static/vendor/css/tippy.css" media="print" onload="this.media='all'">
-<noscript><link rel="stylesheet" href="/static/vendor/css/notyf.min.css"><link rel="stylesheet" href="/static/vendor/css/tippy.css"></noscript>
-<style id="ta-shell-stable">
-  /* Critical app-shell sizing hoisted to <head> so the header is stable at first
-     paint. The redesign layers later in <body> re-declare identical values; this
-     just prevents the pre-CSS reflow (CLS) before those late <style> blocks parse. */
-  .ta-app-header { gap: 18px; }
-  .ta-title-block { min-width: 178px; }
-  .ta-commandbar { width: min(440px, 38vw); min-width: 250px; height: 38px; }
-  .ta-header-actions { flex-shrink: 0; }
-  /* Title size matches the late redesign so the text doesn't grow 15px->18px and
-     reflow the header on first paint. */
-  #page-title { font-size: 18px; font-weight: 700; letter-spacing: -.02em; }
-  /* Reserve datetime width so it doesn't widen header-actions when JS fills it */
-  #current-datetime { display: inline-block; min-width: 152px; text-align: right; }
-</style>
-<style id="ta-polish">
-/* Keyboard-nav focus rings — visible only for keyboard users, accent-matched */
-a:focus-visible, button:focus-visible, input:focus-visible,
-select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible,
-.nav-item:focus-visible, .report-tab:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 5px;
-}
-:focus:not(:focus-visible) { outline: none; }
+<!-- TradingAgents premium static UI vendor CSS -->
 
-/* Smooth in-page jumps */
-html { scroll-behavior: smooth; }
 
-/* Respect reduced-motion: kill non-essential animation/transition */
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: .001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: .001ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-</style>
-<style id="ta-redesign">
-/* ════════════════════════════════════════════════════════════════
-   Design pass — product register.
-   Skills: design-taste-frontend (tinted neutrals, type hierarchy,
-   anti-card-overuse), impeccable (never flat #fff, scene-driven),
-   high-end-visual-design (macro whitespace, refined chrome),
-   emil-design-eng (ease-out motion, press feedback).
-   Accent is warm (#E03E00) so every neutral is tinted warm.
-   ════════════════════════════════════════════════════════════════ */
-:root{
-  --canvas:#F5F4F1;          /* warm paper, not slate-50 flat */
-  --surface:#FCFBFA;         /* sidebar / chrome */
-  --surface-soft:#F2F1ED;
-  --surface-raised:#EBE9E4;
-  --surface-rule:#E2DFD8;    /* warm hairline */
-  --ink:#1A1714;             /* warm near-black, not #0E1118 */
-  --ink-muted:#534E47;       /* ~8:1 on white */
-  --ink-faint:#736C61;       /* ~4.7:1 — passes WCAG AA body (was 3.4:1 fail) */
-  --accent:#D63A00;
-  --accent-hover:#B83100;
-  --accent-subtle:rgba(214,58,0,.09);
-  --shadow-card:0 1px 2px rgba(26,23,20,.04),0 4px 14px -6px rgba(26,23,20,.08);
-}
-body{background:var(--canvas)!important;color:var(--ink)!important;letter-spacing:-.005em;}
-body>aside,
-body>.flex-1.flex.flex-col.overflow-hidden{
-  position:relative;
-  z-index:1;
-}
-.ta-app-header{
-  gap:18px;
-  backdrop-filter:saturate(1.08);
-}
-.ta-title-block{min-width:178px;}
-.ta-page-kicker{
-  margin-top:2px;
-  font-size:10px;
-  line-height:1;
-  color:var(--ink-faint);
-  font-weight:700;
-  letter-spacing:.11em;
-  text-transform:uppercase;
-}
-.ta-commandbar{
-  width:min(440px, 38vw);
-  min-width:250px;
-  height:38px;
-  display:flex;
-  align-items:center;
-  gap:9px;
-  padding:0 10px 0 12px;
-  border:1px solid var(--surface-rule);
-  border-radius:8px;
-  background:var(--surface-soft);
-  color:var(--ink-faint);
-  box-shadow:none;
-}
-body.theme-dark .ta-commandbar{
-  background:var(--surface-soft);
-  box-shadow:none;
-}
-.ta-commandbar:focus-within{
-  border-color:var(--accent);
-  box-shadow:0 0 0 2px rgba(214,58,0,.14);
-}
-.ta-commandbar input{
-  width:100%;
-  height:100%;
-  border:0;
-  outline:0;
-  background:transparent;
-  color:var(--ink);
-  font:600 12.5px/1 var(--font-sans);
-}
-.ta-commandbar input::placeholder{color:var(--ink-faint);}
-.ta-commandbar kbd{
-  min-width:20px;
-  height:20px;
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-  border:1px solid var(--surface-rule);
-  border-radius:5px;
-  background:var(--surface);
-  color:var(--ink-faint);
-  font:700 10px/1 var(--font-mono);
-}
-.ta-header-actions{flex-shrink:0;}
-.ta-market-chip{
-  min-height:32px;
-  display:inline-flex;
-  align-items:center;
-  gap:7px;
-  padding:0 10px;
-  border:1px solid var(--surface-rule);
-  border-radius:999px;
-  background:var(--surface-soft);
-  color:var(--ink-muted);
-  font-size:11px;
-  font-weight:750;
-  white-space:nowrap;
-}
-.ta-market-pulse,
-.ta-status-dot{
-  width:7px;
-  height:7px;
-  border-radius:999px;
-  background:#8890A4;
-  flex:0 0 auto;
-}
-.ta-market-pulse{background:var(--accent);}
-.ta-connection-card{
-  min-height:42px;
-  display:flex;
-  align-items:center;
-  gap:9px;
-  padding:8px 10px;
-  border:1px solid var(--surface-rule);
-  border-radius:8px;
-  background:var(--surface-soft);
-  color:var(--ink-faint);
-}
-.ta-status-copy{display:flex;flex-direction:column;gap:1px;min-width:0;}
-.ta-status-label{
-  font-size:9px;
-  font-weight:800;
-  letter-spacing:.1em;
-  text-transform:uppercase;
-  color:var(--ink-faint);
-}
-.ta-status-value{
-  font-size:12px;
-  font-weight:750;
-  color:var(--ink-muted);
-}
-.ta-connection-card[data-state="connected"]{
-  border-color:rgba(4,120,87,.24);
-  background:rgba(52,211,153,.09);
-}
-.ta-connection-card[data-state="connected"] .ta-status-dot{background:#047857;}
-.ta-connection-card[data-state="connected"] .ta-status-value{color:#047857;}
-.ta-connection-card[data-state="disconnected"]{
-  border-color:rgba(185,28,28,.24);
-  background:rgba(248,113,113,.09);
-}
-.ta-connection-card[data-state="disconnected"] .ta-status-dot{background:#b91c1c;}
-.ta-connection-card[data-state="disconnected"] .ta-status-value{color:#b91c1c;}
-.dash-stat-cell{
-  position:relative;
-  background:var(--surface);
-}
-.dash-stat-cell::after{
-  display:none;
-}
-.dash-stat-num{font-size:22px!important;line-height:1.12!important;}
-#dash-main-grid{
-  min-height:0;
-  background:var(--canvas);
-}
-#dash-main-grid>div{
-  backdrop-filter:none;
-}
-.dash-chart-btn,
-.dash-opp-btn,
-.dlf-tab{
-  white-space:nowrap;
-}
-#dash-market-canvas{
-  position:relative;
-  z-index:1;
-}
-#dash-chart-loading{
-  z-index:2;
-}
-@media (max-width:980px){
-  .ta-app-header{gap:10px;flex-wrap:wrap;padding-top:8px!important;padding-bottom:8px!important;}
-  .ta-commandbar{order:3;width:100%;min-width:0;}
-  .ta-header-actions{margin-left:auto;}
-  .ta-market-chip{display:none;}
-}
-@media (max-width:640px){
-  .ta-header-actions #current-datetime{display:none;}
-  .ta-commandbar{height:40px;}
-  .dash-stat-num{font-size:21px!important;}
-}
-
-/* Sidebar — distinct calm surface, generous rhythm */
-body>aside{
-  width:236px!important;
-  background:var(--surface)!important;
-  border-right:1px solid var(--surface-rule)!important;
-}
-body>aside>div:first-child{padding:18px 18px 16px!important;border-bottom:1px solid var(--surface-rule)!important;}
-body>aside nav{padding:14px 12px!important;gap:3px!important;}
-
-/* Brand lockup */
-body>aside>div:first-child>div:last-child>div:first-child{
-  font-size:15px!important;font-weight:700!important;letter-spacing:-.02em!important;
-}
-body>aside>div:first-child>div:last-child>div:last-child{
-  font-size:10px!important;text-transform:uppercase!important;letter-spacing:.13em!important;
-  font-weight:600!important;color:var(--ink-faint)!important;
-}
-
-/* Nav — calmer idle, decisive active. No side-stripe (impeccable ban). */
-.nav-item{
-  padding:9px 12px!important;font-size:13px!important;font-weight:500!important;
-  border-radius:8px!important;color:var(--ink-muted)!important;
-  transition:color .15s var(--ease-out),background-color .15s var(--ease-out)!important;
-}
-.nav-item svg{width:17px!important;height:17px!important;opacity:.7;}
-.nav-item:hover{background:var(--surface-raised)!important;color:var(--ink)!important;}
-.nav-item:hover svg{opacity:1;}
-.nav-item.active{
-  background:var(--accent-subtle)!important;color:var(--accent)!important;font-weight:600!important;
-}
-.nav-item.active svg{color:var(--accent)!important;opacity:1;}
-
-/* Header — taller, real H1 type scale (design-taste deterministic type) */
-.flex-1.flex.flex-col.overflow-hidden>header{
-  height:60px!important;padding:0 28px!important;
-  background:var(--surface)!important;border-bottom:1px solid var(--surface-rule)!important;
-}
-/* Product register: calmer scale ratio than brand. 18px not 21. */
-#page-title{
-  font-size:18px!important;font-weight:700!important;
-  letter-spacing:-.02em!important;color:var(--ink)!important;
-}
-
-/* Cards — tighter radius, warm hairline, tinted depth, motion on hover */
-.card{
-  background:#FFFFFF!important;border:1px solid var(--surface-rule)!important;
-  border-radius:10px!important;box-shadow:var(--shadow-card)!important;
-  transition:box-shadow .2s var(--ease-out),transform .2s var(--ease-out);
-}
-.card:hover{
-  box-shadow:0 2px 4px rgba(26,23,20,.05),0 10px 28px -10px rgba(26,23,20,.13)!important;
-}
-
-/* Eyebrow labels — uppercase micro tracking (impeccable/high-end) */
-.label{
-  text-transform:uppercase!important;letter-spacing:.11em!important;
-  font-size:10.5px!important;font-weight:600!important;color:var(--ink-faint)!important;
-}
-
-/* Ticker tape + content blend into warm canvas, no slate seam */
-#panel-dashboard>div:first-child,
-.flex-1.flex.flex-col.overflow-hidden>header{backdrop-filter:none;}
-
-/* Scrollbar — warm, recessive */
-::-webkit-scrollbar-track{background:var(--surface-soft)!important;}
-::-webkit-scrollbar-thumb{background:#C9C3B8!important;border-radius:3px!important;}
-::-webkit-scrollbar-thumb:hover{background:#A89F8F!important;}
-
-/* Inputs pick up warm calibration + ease-out focus */
-.input{border-color:#D2CCC0!important;border-radius:7px!important;}
-.input::placeholder{color:#8C857A!important;} /* was #A0A7B8 — failed WCAG */
-.input:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px rgba(214,58,0,.10)!important;}
-
-/* Primary CTA — confident, press feedback (emil) */
-.btn-primary{border-radius:7px!important;letter-spacing:0!important;}
-.btn-primary:active{transform:scale(.97)!important;}
-
-/* ── impeccable typography.md: rendering polish + a11y ── */
-h1,h2,h3,#page-title{text-wrap:balance;}
-.prose-dark p,.prose-dark li{text-wrap:pretty;}
-.prose-dark code,pre,code,kbd,samp{font-variant-ligatures:none;}
-.prose-dark p{max-width:72ch;}            /* readable measure for report prose */
-/* All-caps eyebrows need tracking compensation (typography.md) */
-.label{letter-spacing:.11em!important;}
-
-/* Touch targets — primary controls meet mobile target sizing */
-.nav-item{min-height:46px!important;}
-.btn-primary,.btn-secondary,.btn-danger,
-.report-tab,.dash-chart-btn,.dash-opp-btn,.dlf-tab,.admin-tab,
-.a-analyst-pill,.ta-pre,.ta-exp,#ta-sz-btn,
-button.text-xs,a[onclick],button[onclick],[role="button"]{
-  min-height:46px!important;
-  display:inline-flex;
-  align-items:center;
-  justify-content:center;
-}
-button.text-xs,a[onclick],button[onclick],[role="button"]{ min-width:46px; }
-.input,select.input,textarea.input{ min-height:46px; }
-label.flex:has(input[type="checkbox"]),
-label.flex:has(input[type="radio"]),
-.a-analyst-pill{ min-height:46px; }
-input[type="checkbox"],input[type="radio"]{ min-width:18px; min-height:18px; }
-
-/* State vocabulary completeness (product.md: ship all states) */
-.btn-primary:disabled,.btn-secondary:disabled,.btn-danger:disabled{opacity:.55;cursor:not-allowed;transform:none!important;}
-.btn-secondary:focus-visible,.btn-danger:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
-
-/* Tables: tabular figures + calmer zebra on warm canvas */
-table td,table th{font-variant-numeric:tabular-nums;}
-
-/* ── Responsive: ≤980px uses mobile drawer (see main <style>).
-   The 860px icon-rail is removed — drawer replaces it. ── */
-@media (max-width:980px){
-  body>aside{
-    width:100%!important;position:fixed!important;
-    top:0!important;left:0!important;right:0!important;
-    border-right:0!important;
-  }
-  .nav-item{font-size:14px!important;width:100%!important;}
-}
-@media (max-width:560px){
-  .flex-1.flex.flex-col.overflow-hidden>header{min-height:52px!important;height:auto!important;}
-  #page-title{font-size:16px!important;}
-}
-
-/* Theme: light is the default (docs/DESIGN.md scene), dark is opt-in via the
-   Settings → Appearance toggle. Light uses the warm `#ta-redesign :root`
-   tokens; dark uses the pre-existing `.theme-dark` token set. No
-   single-mode override — the toggle flips both ways. */
-input[type=checkbox], input[type=radio], input[type=range],
-input[type=date], progress{ accent-color:var(--accent); }
-</style>
-<style id="ta-emil">
-/* ════════════════════════════════════════════════════════════════
-   emil-design-eng pass — motion correctness.
-   1. Kill wildcard transitions → explicit props only (browser
-      can't GPU-skip unknown props; `all` also animates layout).
-   2. Strong custom ease-out everywhere (built-in easings lack punch).
-   3. Press feedback on every pressable pill/tab (scale .97) — the
-      interface must feel like it heard the click.
-   4. Perceived performance: faster spinner reads as faster load.
-   Later source order → wins specificity ties over the base rules.
-   ════════════════════════════════════════════════════════════════ */
-
-/* report tabs / settings tabs — color+bg+border, no `all` */
-.report-tab,.admin-tab{
-  transition:color .15s var(--ease-out),background-color .15s var(--ease-out),
-             border-color .15s var(--ease-out),transform .12s var(--ease-out)!important;
-}
-.dlf-tab{
-  transition:color .15s var(--ease-out),border-color .15s var(--ease-out),
-             transform .12s var(--ease-out)!important;
-}
-.dash-chart-btn,.dash-opp-btn,.a-analyst-pill,
-.ta-pre,.ta-exp,#ta-sz-btn{
-  transition:color .12s var(--ease-out),background-color .12s var(--ease-out),
-             border-color .12s var(--ease-out),transform .12s var(--ease-out)!important;
-}
-/* status pill — read-only, no press; just drop `all` */
-.a-agent-step{
-  transition:color .2s var(--ease-out),background-color .2s var(--ease-out),
-             border-color .2s var(--ease-out)!important;
-}
-
-/* Press feedback — subtle scale, instant ease-out. Buttons must
-   feel responsive to press (emil: 0.95–0.98 range). */
-.report-tab:active,.admin-tab:active,.dlf-tab:active,
-.dash-chart-btn:active,.dash-opp-btn:active,.a-analyst-pill:active,
-.ta-pre:active,.ta-exp:active,#ta-sz-btn:active{ transform:scale(.97); }
-
-/* Perceived performance — a faster spinner makes the app feel
-   like it loads faster even at identical load time (emil). */
-.spin{ animation-duration:.7s!important; }
-
-/* prefers-reduced-motion already neutralised globally in #ta-polish:
-   motion here degrades to instant, comprehension unaffected. */
-</style>
-<style id="ta-no-gradient-repair">
-:root,
-body.theme-dark{
-  --canvas:#090A0D;
-  --surface:#0D0E12;
-  --surface-soft:#08090C;
-  --surface-raised:#14161B;
-  --surface-rule:#252832;
-  --ink:#F2F3F5;
-  --ink-muted:#B5BAC6;
-  --ink-faint:#7C8493;
-  --accent:#E24312;
-  --accent-hover:#F04A18;
-  --accent-subtle:rgba(226,67,18,.14);
-  --shadow-card:none;
-}
-body,
-body.theme-dark{
-  background:var(--canvas)!important;
-  color:var(--ink)!important;
-}
-#ta-shader-field,
-.ta-panel-shader,
-.theme-dark main::after,
-#dash-ticker-wrap::after,
-#dash-main-grid::before,
-#nav-progress,
-#nav-curtain,
-.dash-section-label::before,
-.dash-section-label::after,
-.nav-item::after,
-.dash-chart-btn::after,
-.report-tab::after,
-.btn-secondary::after{
-  display:none!important;
-}
-body>aside,
-.ta-app-header,
-#panel-dashboard,
-#panel-dashboard>div,
-#dash-main-grid,
-#dash-main-grid>div,
-.card,
-.dash-opp-card,
-.dash-chart-btn,
-.dash-opp-btn,
-.ta-commandbar,
-.ta-market-chip,
-.ta-connection-card,
-.nav-item,
-.btn-secondary{
-  background-image:none!important;
-  backdrop-filter:none!important;
-}
-.ta-app-header{
-  min-height:56px!important;
-  height:auto!important;
-  background:var(--surface)!important;
-  border-bottom:1px solid var(--surface-rule)!important;
-}
-body>aside{
-  background:var(--surface)!important;
-  border-right:1px solid var(--surface-rule)!important;
-}
-.ta-title-block h1{
-  font-size:15px!important;
-  font-weight:700!important;
-}
-.ta-page-kicker,
-.dash-section-label{
-  color:var(--ink-faint)!important;
-  letter-spacing:.14em!important;
-}
-.dash-section-label{
-  font-size:10px!important;
-  margin-bottom:12px!important;
-}
-.ta-commandbar{
-  height:34px!important;
-  border-radius:7px!important;
-  background:var(--surface-soft)!important;
-  border-color:var(--surface-rule)!important;
-  box-shadow:none!important;
-}
-.ta-commandbar:focus-within{
-  border-color:rgba(226,67,18,.68)!important;
-  box-shadow:0 0 0 2px rgba(226,67,18,.14)!important;
-}
-.ta-commandbar kbd,
-.ta-market-chip,
-.btn-secondary{
-  background:var(--surface-soft)!important;
-  border-color:var(--surface-rule)!important;
-  color:var(--ink-muted)!important;
-  box-shadow:none!important;
-}
-.nav-item{
-  min-height:42px!important;
-  border:1px solid transparent!important;
-  border-radius:7px!important;
-  background:transparent!important;
-  box-shadow:none!important;
-}
-.nav-item:hover{
-  background:var(--surface-raised)!important;
-  border-color:var(--surface-rule)!important;
-}
-.nav-item.active{
-  background:var(--accent-subtle)!important;
-  border-color:rgba(226,67,18,.36)!important;
-  color:var(--accent)!important;
-}
-#panel-dashboard{
-  background:var(--canvas)!important;
-}
-#panel-dashboard>div:first-child,
-#panel-dashboard>div:nth-child(2){
-  background:var(--surface)!important;
-  border-color:var(--surface-rule)!important;
-}
-.dash-stat-cell{
-  padding:15px 22px!important;
-  background:var(--surface)!important;
-}
-.dash-stat-cell::after{
-  display:none!important;
-}
-.dash-stat-num{
-  font-size:22px!important;
-  line-height:1.1!important;
-  letter-spacing:-.02em!important;
-}
-.dash-stat-label{
-  color:var(--ink-faint)!important;
-}
-.dash-stat-sub{
-  color:var(--ink-faint)!important;
-}
-#dash-main-grid{
-  background:var(--canvas)!important;
-}
-#dash-main-grid>div{
-  background:var(--surface)!important;
-}
-#dash-main-grid>div:first-child>div,
-#dash-main-grid>div:nth-child(2)>div{
-  background:var(--surface)!important;
-  border-color:var(--surface-rule)!important;
-}
-#dash-market-canvas{
-  background:var(--surface-soft)!important;
-}
-.dash-chart-btn,
-.dash-opp-btn,
-.dlf-tab,
-.admin-tab,
-.report-tab{
-  min-height:32px!important;
-  border:1px solid var(--surface-rule)!important;
-  border-radius:6px!important;
-  background:var(--surface-soft)!important;
-  color:var(--ink-muted)!important;
-  box-shadow:none!important;
-  text-shadow:none!important;
-}
-.dash-chart-btn.active,
-.dash-opp-btn.active,
-.dlf-tab-active,
-.admin-tab.active,
-.report-tab.active{
-  background:var(--accent-subtle)!important;
-  border-color:rgba(226,67,18,.44)!important;
-  color:var(--accent)!important;
-  box-shadow:none!important;
-}
-.dash-opp-card{
-  border-radius:6px!important;
-  border-color:var(--surface-rule)!important;
-  background:var(--surface-soft)!important;
-  box-shadow:none!important;
-  padding:9px 12px!important;
-}
-.dash-opp-card:hover{
-  background:var(--surface-raised)!important;
-  border-color:rgba(226,67,18,.42)!important;
-}
-.card{
-  background:var(--surface)!important;
-  border-color:var(--surface-rule)!important;
-  border-radius:8px!important;
-  box-shadow:none!important;
-}
-.ta-connection-card[data-state="connected"]{
-  background:rgba(16,185,129,.10)!important;
-  border-color:rgba(16,185,129,.32)!important;
-}
-#ta-mobile-search-btn{
-  display:none;
-}
-.ta-brand-mark{
-  width:36px;
-  height:36px;
-  flex:0 0 auto;
-  display:block;
-  border-radius:9px;
-  object-fit:cover;
-  background:var(--surface-soft);
-  border:1px solid var(--surface-rule);
-}
-.ta-mobile-logo{
-  display:none;
-}
-@media (max-width:760px){
-  html,
-  body{
-    width:100%!important;
-    max-width:100%!important;
-    overflow-x:hidden!important;
-  }
-  body{
-    display:block!important;
-    height:auto!important;
-    min-height:100dvh!important;
-  }
-  body>.flex-1.flex.flex-col.overflow-hidden{
-    width:100%!important;
-    min-width:0!important;
-    overflow:visible!important;
-  }
-  .ta-app-header{
-    position:sticky!important;
-    top:0!important;
-    z-index:50!important;
-    display:flex!important;
-    align-items:center!important;
-    justify-content:flex-start!important;
-    gap:10px!important;
-    padding:8px 12px!important;
-    min-height:0!important;
-    height:64px!important;
-    background:var(--surface)!important;
-  }
-  .ta-title-block{
-    flex:1 1 0!important;
-    min-width:0!important;
-    display:flex!important;
-    align-items:center!important;
-    gap:10px!important;
-  }
-  #mobile-menu-btn{
-    order:0!important;
-    width:44px!important;
-    height:44px!important;
-    min-width:44px!important;
-    border-radius:8px!important;
-    background:var(--surface-soft)!important;
-  }
-  .ta-title-block>div{
-    flex:1 1 auto!important;
-    min-width:0!important;
-  }
-  .ta-mobile-logo{
-    display:block!important;
-    width:32px!important;
-    height:32px!important;
-    border-radius:8px!important;
-    object-fit:cover!important;
-    border:1px solid var(--surface-rule)!important;
-    background:var(--surface-soft)!important;
-  }
-  #page-title{
-    font-size:17px!important;
-    line-height:1.15!important;
-  }
-  .ta-page-kicker{
-    margin-top:3px!important;
-    font-size:9px!important;
-    letter-spacing:.16em!important;
-  }
-  .ta-header-actions,
-  #ta-mkt-chip,
-  #ta-sz-btn,
-  .ta-market-chip,
-  #current-datetime,
-  .ta-commandbar{
-    display:none!important;
-  }
-  #ta-mobile-search-btn{
-    display:inline-flex!important;
-    align-items:center!important;
-    justify-content:center!important;
-    width:42px!important;
-    height:42px!important;
-    min-width:42px!important;
-    border:1px solid var(--surface-rule)!important;
-    border-radius:8px!important;
-    background:var(--surface-soft)!important;
-    color:var(--ink-muted)!important;
-    box-shadow:none!important;
-  }
-  #ta-mobile-search-btn:active{
-    transform:scale(.97)!important;
-  }
-  #main-content{
-    width:100%!important;
-    overflow:visible!important;
-  }
-  #panel-dashboard.active{
-    height:auto!important;
-    min-height:100dvh!important;
-    overflow:visible!important;
-  }
-  #panel-dashboard>div:first-child{
-    display:none!important;
-  }
-  .ticker-item{
-    height:36px!important;
-    padding:0 18px!important;
-    font-size:11px!important;
-  }
-  #panel-dashboard>div:nth-child(2){
-    grid-template-columns:1fr 1fr!important;
-  }
-  .dash-stat-cell{
-    padding:13px 16px!important;
-    min-width:0!important;
-  }
-  .dash-stat-num{
-    font-size:clamp(18px,5.4vw,22px)!important;
-    line-height:1.05!important;
-    white-space:nowrap!important;
-    overflow-wrap:normal!important;
-  }
-  #dash-main-grid{
-    display:block!important;
-    overflow:visible!important;
-  }
-  #dash-main-grid>div{
-    border-right:0!important;
-    overflow:visible!important;
-  }
-  #dash-main-grid>div:first-child>div,
-  #dash-main-grid>div:nth-child(2)>div{
-    padding:16px!important;
-  }
-  #dash-main-grid [style*="justify-content:space-between"]{
-    align-items:flex-start!important;
-    gap:12px!important;
-    flex-wrap:wrap!important;
-  }
-  #dash-main-grid [style*="display:flex;gap:4px"],
-  #dash-main-grid [style*="display:flex;gap:6px"]{
-    width:100%!important;
-    display:grid!important;
-    grid-template-columns:repeat(4,minmax(0,1fr))!important;
-    gap:8px!important;
-  }
-  .dash-chart-btn,
-  .dash-opp-btn{
-    width:100%!important;
-    min-width:0!important;
-    min-height:42px!important;
-    padding:0 8px!important;
-  }
-  #dash-main-grid canvas,
-  #dash-market-canvas{
-    max-width:100%!important;
-  }
-  #dash-opportunities{
-    grid-template-columns:1fr!important;
-  }
-  .dash-opp-card,
-  .dash-watch-row,
-  .dash-watch-item,
-  .dash-signal-row{
-    min-width:0!important;
-  }
-}
-</style>
 </head>
 <body class="bg-slate-50 text-slate-950 flex overflow-hidden" style="height:100dvh">
+<canvas id="ta-shader-field" aria-hidden="true"></canvas>
 <a href="#main-content" class="sr-only focus:not-sr-only focus:absolute focus:p-4 focus:bg-surface focus:text-ink focus:z-[9999] focus:outline-none focus:ring-2 focus:ring-accent">Skip to main content</a>
 
 <!-- Sidebar -->
 <aside style="width:220px;flex-shrink:0;display:flex;flex-direction:column;z-index:20;background:var(--surface);border-right:1px solid var(--surface-rule)">
   <div style="padding:16px;border-bottom:1px solid var(--surface-rule);display:flex;align-items:center;gap:10px">
-    <img class="ta-brand-mark" src="/static/agentic-trader-icon.png" alt="Agentic Trader">
+    <div style="width:34px;height:34px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
+        <polyline points="16 7 22 7 22 13"/>
+      </svg>
+    </div>
     <div>
       <div style="font-weight:700;color:var(--ink);font-size:14px;line-height:1.2;letter-spacing:-.01em">Agentic Trader</div>
       <div style="font-size:10.5px;color:var(--ink-faint);margin-top:1px;font-weight:500">Personal Trading Suite</div>
@@ -2469,30 +1672,26 @@ body>aside{
   <!-- Header -->
   <header class="ta-app-header" style="background:var(--surface);border-bottom:1px solid var(--surface-rule);padding:0 24px;min-height:52px;height:auto;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
     <div class="ta-title-block" style="display:flex;align-items:center;gap:12px">
-      <button id="mobile-menu-btn" onclick="toggleMobileMenu()" aria-label="Toggle menu" data-tippy-content="Toggle navigation menu" style="position:relative">
+      <button id="mobile-menu-btn" onclick="toggleMobileMenu()" aria-label="Toggle menu" style="position:relative">
         <span class="bar"></span><span class="bar"></span><span class="bar"></span>
       </button>
-      <img class="ta-mobile-logo" src="/static/agentic-trader-icon.png" alt="">
       <div>
         <h1 id="page-title" style="font-size:15px;font-weight:600;color:var(--ink);letter-spacing:-.01em">Dashboard</h1>
-        <div class="ta-page-kicker">Live cockpit</div>
+        <div class="ta-page-kicker">Live local cockpit</div>
       </div>
     </div>
-    <button id="ta-mobile-search-btn" type="button" aria-label="Search actions" onclick="typeof taCmd === 'function' ? taCmd(true) : document.getElementById('global-command')?.focus()">
-      <i data-lucide="search" width="18" height="18" aria-hidden="true"></i>
-    </button>
     <div class="ta-commandbar" role="search">
-      <i data-lucide="search" width="14" height="14" aria-hidden="true"></i>
+      <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="global-command" placeholder="Search action or ticker" aria-label="Search action or ticker">
       <kbd>/</kbd>
     </div>
     <div class="ta-header-actions" style="display:flex;align-items:center;gap:12px">
-      <div class="ta-market-chip" data-tippy-content="Connection context for this dashboard">
+      <div class="ta-market-chip">
         <span class="ta-market-pulse"></span>
-        <span id="ta-preview-label">Preview</span>
+        <span>Local preview</span>
       </div>
-      <button class="btn-secondary" data-tippy-content="Open an interactive TradingView chart for the current ticker" style="font-size:12px;display:flex;align-items:center;gap:6px;padding:6px 12px" onclick="openTVChart(document.getElementById('global-command')?.value || document.getElementById('a-ticker')?.value || 'SPY')">
-        <i data-lucide="trending-up" width="13" height="13" style="color:var(--accent)" aria-hidden="true"></i>
+      <button class="btn-secondary" style="font-size:12px;display:flex;align-items:center;gap:6px;padding:6px 12px" onclick="openTVChart(document.getElementById('global-command')?.value || document.getElementById('a-ticker')?.value || 'SPY')">
+        <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="color:var(--accent)"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg>
         Chart
       </button>
       <span id="current-datetime" style="font-size:12px;color:var(--ink-faint);font-weight:500"></span>
@@ -2517,8 +1716,8 @@ body>aside{
         <div id="dash-ticker-wrap" style="overflow:hidden;height:100%;position:relative">
           <div id="dash-ticker-track" class="ticker-track"></div>
         </div>
-        <div style="position:absolute;right:0;top:0;height:100%;width:18px;background:var(--surface);pointer-events:none;z-index:2"></div>
-        <div style="position:absolute;left:0;top:0;height:100%;width:18px;background:var(--surface);pointer-events:none;z-index:2"></div>
+        <div style="position:absolute;right:0;top:0;height:100%;width:40px;background:linear-gradient(to left,var(--surface),transparent);pointer-events:none;z-index:2"></div>
+        <div style="position:absolute;left:0;top:0;height:100%;width:40px;background:linear-gradient(to right,var(--surface),transparent);pointer-events:none;z-index:2"></div>
       </div>
 
       <!-- Stat row -->
@@ -2540,7 +1739,7 @@ body>aside{
         </div>
         <div class="dash-stat-cell">
           <div class="dash-stat-label">Cash Available</div>
-          <div id="stat-cash" class="dash-stat-num">—</div>
+          <div id="stat-cash" class="dash-stat-num" style="color:#34d399">—</div>
           <div class="dash-stat-sub"><span id="stat-tickers">—</span> tickers analyzed</div>
         </div>
       </div>
@@ -2563,6 +1762,7 @@ body>aside{
               </div>
             </div>
             <div style="position:relative;height:200px">
+              <canvas class="ta-panel-shader" id="dash-market-shader" aria-hidden="true"></canvas>
               <canvas id="dash-market-canvas"></canvas>
               <div id="dash-chart-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--ink-faint)">Loading chart…</div>
             </div>
@@ -2997,10 +2197,10 @@ body>aside{
         </div>
         <div class="card p-4">
           <div class="flex items-center gap-2 mb-2">
-            <svg class="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            <svg class="w-3.5 h-3.5 text-cyan-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
             <div class="text-xs text-slate-500">Cash</div>
           </div>
-          <div class="text-xl font-bold text-slate-100" id="p-cash">—</div>
+          <div class="text-xl font-bold text-cyan-400" id="p-cash">—</div>
         </div>
         <div class="card p-4">
           <div class="flex items-center gap-2 mb-2">
@@ -3573,7 +2773,7 @@ body>aside{
         </div>
         <div class="card p-4 text-center">
           <div class="text-xs text-slate-500 mb-1">Tickers Covered</div>
-          <div class="text-2xl font-bold text-slate-100" id="h-stat-tickers">—</div>
+          <div class="text-2xl font-bold text-cyan-400" id="h-stat-tickers">—</div>
         </div>
         <div class="card p-4 col-span-2">
           <div class="text-xs text-slate-500 mb-2">Decision Breakdown</div>
@@ -5132,7 +4332,6 @@ body>aside{
           <button id="admin-tab-analytics" class="admin-tab" onclick="switchAdminTab('analytics')">Performance</button>
           <button id="admin-tab-models" class="admin-tab" onclick="switchAdminTab('models')">Models</button>
           <button id="admin-tab-providers" class="admin-tab" onclick="switchAdminTab('providers')">Providers</button>
-          <button id="admin-tab-runtime" class="admin-tab" onclick="switchAdminTab('runtime')">Runtime</button>
           <button id="admin-tab-health" class="admin-tab" onclick="switchAdminTab('health')">System Health</button>
           <button id="admin-tab-logs" class="admin-tab" onclick="switchAdminTab('logs')">Logs &amp; Activity</button>
           <button id="admin-tab-history" class="admin-tab" onclick="switchAdminTab('history')">Backtests</button>
@@ -5180,11 +4379,6 @@ body>aside{
         <!-- System Health tab -->
         <div id="admin-panel-health" class="admin-panel-content hidden">
           <div id="admin-health-body" class="text-xs text-slate-400">Loading…</div>
-        </div>
-
-        <!-- Runtime tab -->
-        <div id="admin-panel-runtime" class="admin-panel-content hidden">
-          <div id="admin-runtime-body" class="text-xs text-slate-400">Loading…</div>
         </div>
 
         <!-- Security tab -->
@@ -9231,10 +8425,7 @@ function _pdRenderChart() {
       note.innerHTML = `Total return: <span style="color:${finalColor};font-weight:700">${sign}${finalPct.toFixed(2)}%</span>
         &nbsp;·&nbsp; ${pts.length} data points &nbsp;·&nbsp; start: ${fmt$(v0)} → now: ${fmt$(pts[pts.length-1].v)}`;
     }
-    // Phase 7: break-even drawn via chartjs-plugin-annotation when available,
-    // with graceful fallback to a dashed dataset if the plugin failed to load.
-    const _annotationLoaded = !!(window.Chart && Chart.registry && Chart.registry.plugins && Chart.registry.plugins.get && Chart.registry.plugins.get('annotation'));
-    const beRef = (!_annotationLoaded && labels.length >= 2) ? [{ x: labels[0], y: 0 }, { x: labels[labels.length - 1], y: 0 }] : [];
+    const beRef = labels.length >= 2 ? [{ x: labels[0], y: 0 }, { x: labels[labels.length - 1], y: 0 }] : [];
     _pdChart = new Chart(canvas, {
       type: 'line',
       data: {
@@ -9270,27 +8461,6 @@ function _pdRenderChart() {
         interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: { display: false },
-          annotation: _annotationLoaded ? {
-            annotations: {
-              breakEven: {
-                type: 'line',
-                yMin: 0,
-                yMax: 0,
-                borderColor: 'rgba(136,144,164,.55)',
-                borderWidth: 1,
-                borderDash: [4, 4],
-                label: {
-                  display: true,
-                  content: 'Break-even',
-                  position: 'start',
-                  backgroundColor: 'rgba(15,17,21,.78)',
-                  color: 'rgba(226,232,240,.9)',
-                  font: { size: 10 },
-                  padding: { top: 2, bottom: 2, left: 5, right: 5 },
-                },
-              },
-            },
-          } : undefined,
           tooltip: {
             callbacks: {
               label: ctx => {
@@ -9822,7 +8992,7 @@ let _adminActiveTab = 'overview';
 
 const ADMIN_TABS = [
   'overview','users','security','approvals','runner','analytics','models','providers',
-  'runtime','health','logs','history','integrations','cloudflare','flags','backup'
+  'health','logs','history','integrations','cloudflare','flags','backup'
 ];
 function switchAdminTab(tab) {
   _adminActiveTab = tab;
@@ -9836,8 +9006,7 @@ function switchAdminTab(tab) {
   const loaders = {
     overview: loadAdminOverview, users: loadAdminUsers, security: loadAdminSecurity,
     approvals: loadAdminApprovals, runner: loadAdminRunner, analytics: loadAdminAnalytics,
-    models: loadAdminModels, providers: loadAdminProviders, runtime: loadAdminRuntime,
-    health: loadAdminHealth, logs: loadAdminLogs,
+    models: loadAdminModels, providers: loadAdminProviders, health: loadAdminHealth, logs: loadAdminLogs,
     history: loadAdminHistory, integrations: loadAdminIntegrations,
     cloudflare: loadAdminCloudflare, flags: loadAdminFlags, backup: loadAdminBackup,
   };
@@ -9852,7 +9021,7 @@ async function loadAdminPanel() {
   const loaders = {
     users: loadAdminUsers, security: loadAdminSecurity, approvals: loadAdminApprovals,
     runner: loadAdminRunner, analytics: loadAdminAnalytics, models: loadAdminModels,
-    runtime: loadAdminRuntime, health: loadAdminHealth, logs: loadAdminLogs, history: loadAdminHistory,
+    health: loadAdminHealth, logs: loadAdminLogs, history: loadAdminHistory,
     integrations: loadAdminIntegrations, cloudflare: loadAdminCloudflare,
     flags: loadAdminFlags, backup: loadAdminBackup,
   };
@@ -9957,101 +9126,6 @@ async function loadAdminHealth() {
   } catch(e) {
     el.innerHTML = `<span class="text-red-400">Error: ${escHtml(e.message)}</span>`;
   }
-}
-
-async function loadAdminRuntime() {
-  const el = document.getElementById('admin-runtime-body');
-  if (!el) return;
-  el.innerHTML = 'Loading runtime diagnostics...';
-  try {
-    const d = await apiFetch('/admin/runtime/diagnostics');
-    const r = d.runtime || {};
-    const env = d.env || {};
-    const logs = d.log_tail || {};
-    const commands = r.commands || {};
-    const commandRows = Object.entries(commands).map(([name, path]) =>
-      `<tr><td>${escHtml(name)}</td><td>${path ? _adminPill('pass','found') : _adminPill('warn','missing')}</td><td class="font-mono">${escHtml(path || '—')}</td></tr>`
-    ).join('');
-    const dirtyRows = (d.git?.status_short || []).map(line => `<div class="font-mono">${escHtml(line)}</div>`).join('');
-    el.innerHTML = `
-      <div class="admin-card-grid mb-5">
-        <div class="admin-mini-card">
-          <div class="admin-section-title">Server</div>
-          <div class="admin-stat-grid" style="margin-bottom:0">
-            ${_adminStat('Web', _adminPill((r.web_pids||[]).length ? 'pass' : 'fail', (r.web_pids||[]).length ? 'running' : 'offline'), 'port '+(r.port || 8001))}
-            ${_adminStat('Tunnel', _adminPill((r.cloudflared_pids||[]).length ? 'pass' : 'warn', (r.cloudflared_pids||[]).length ? 'running' : 'offline'), (r.cloudflared_pids||[]).join(', ') || 'no pid')}
-            ${_adminStat('Python', escHtml((r.python || '').split('/').pop() || '—'))}
-            ${_adminStat('Branch', escHtml(d.git?.branch || '—'))}
-          </div>
-          <div class="admin-actions" style="margin-top:14px">
-            <button class="btn-secondary text-xs" onclick="loadAdminRuntime()">Refresh</button>
-            <button class="btn-secondary text-xs" onclick="adminRuntimeTunnelStart()">Start tunnel</button>
-            <button class="btn-secondary text-xs" onclick="adminRuntimeTunnelStop()">Stop tunnel</button>
-            <button class="btn-danger text-xs" onclick="adminRuntimeWebRestart()">Restart web</button>
-          </div>
-        </div>
-        <div class="admin-mini-card">
-          <div class="admin-section-title">Environment</div>
-          <div class="admin-stat-grid" style="margin-bottom:0">
-            ${_adminStat('.env', _adminPill(env.env_file_present ? 'pass' : 'warn', env.env_file_present ? 'present' : 'missing'))}
-            ${_adminStat('Access', _adminPill(env.cloudflare_access ? 'pass' : 'warn', env.cloudflare_access ? 'configured' : 'missing'))}
-            ${_adminStat('Workers AI', _adminPill(env.cloudflare_ai ? 'pass' : 'warn', env.cloudflare_ai ? 'configured' : 'missing'))}
-            ${_adminStat('SMTP', _adminPill(env.smtp ? 'pass' : 'warn', env.smtp ? 'configured' : 'missing'))}
-          </div>
-        </div>
-        <div class="admin-mini-card">
-          <div class="admin-section-title">Git working tree</div>
-          <div class="text-xs text-slate-500 mb-2">${dirtyRows ? 'Uncommitted changes detected.' : 'Working tree is clean.'}</div>
-          <div style="max-height:130px;overflow:auto">${dirtyRows || '<span class="text-slate-500">No local changes.</span>'}</div>
-        </div>
-      </div>
-      <div class="admin-card-grid mb-5">
-        <div class="admin-mini-card">
-          <div class="admin-section-title">Required commands</div>
-          <div style="overflow-x:auto"><table class="admin-table"><thead><tr><th>Command</th><th>Status</th><th>Path</th></tr></thead><tbody>${commandRows}</tbody></table></div>
-        </div>
-        <div class="admin-mini-card">
-          <div class="admin-section-title">Screen sessions</div>
-          <pre style="white-space:pre-wrap;font-size:11px;color:var(--ink-muted);margin:0">${escHtml((r.screen_sessions || []).join('\\n') || 'No screen sessions reported.')}</pre>
-        </div>
-      </div>
-      <div class="admin-card-grid">
-        <div class="admin-mini-card">
-          <div class="admin-section-title">Web log tail</div>
-          <pre style="white-space:pre-wrap;font-size:11px;color:var(--ink-muted);max-height:240px;overflow:auto;margin:0">${escHtml((logs.web || []).join('\\n') || 'No web log yet.')}</pre>
-        </div>
-        <div class="admin-mini-card">
-          <div class="admin-section-title">Tunnel log tail</div>
-          <pre style="white-space:pre-wrap;font-size:11px;color:var(--ink-muted);max-height:240px;overflow:auto;margin:0">${escHtml((logs.cloudflared || []).join('\\n') || 'No tunnel log yet.')}</pre>
-        </div>
-      </div>`;
-  } catch (e) {
-    el.innerHTML = `<div class="text-xs text-red-400">Runtime diagnostics failed: ${escHtml(e.message || 'request failed')}</div>`;
-  }
-}
-
-async function adminRuntimeTunnelStart() {
-  try {
-    const r = await apiFetch('/admin/runtime/tunnel/start', {method:'POST', body: JSON.stringify({port:8001})});
-    showToast(r.success ? 'Tunnel start requested' : 'Tunnel start failed', r.success ? 'success' : 'warning');
-    setTimeout(loadAdminRuntime, 1500);
-  } catch(e) { showToast('Tunnel start failed: ' + (e.message || ''), 'error'); }
-}
-
-async function adminRuntimeTunnelStop() {
-  try {
-    await apiFetch('/admin/runtime/tunnel/stop', {method:'POST'});
-    showToast('Tunnel stop requested', 'success');
-    setTimeout(loadAdminRuntime, 1200);
-  } catch(e) { showToast('Tunnel stop failed: ' + (e.message || ''), 'error'); }
-}
-
-async function adminRuntimeWebRestart() {
-  if (!confirm('Restart the local web server? The dashboard will disconnect briefly.')) return;
-  try {
-    await apiFetch('/admin/runtime/web/restart', {method:'POST', body: JSON.stringify({port:8001, tunnel:false})});
-    showToast('Web restart scheduled. Refresh in a few seconds.', 'warning');
-  } catch(e) { showToast('Restart failed: ' + (e.message || ''), 'error'); }
 }
 
 async function loadAdminHistory() {
@@ -11823,7 +10897,7 @@ async function wbRefresh() {
   try {
     const r = await apiFetch('/webull/refresh', {method:'POST'});
     document.getElementById('wb-token-exp').textContent = r.token_expire ? new Date(r.token_expire).toLocaleString() : '—';
-    showSuccess('Token refreshed successfully');
+    alert('Token refreshed successfully');
   } catch(e) {
     alert('Refresh error: ' + e.message);
   }
@@ -12560,7 +11634,7 @@ function init() {
   setInterval(updateClock, 30000);
   checkApiStatus();
   setInterval(checkApiStatus, 30000);
-  setInterval(() => { if (!document.hidden && currentTab === 'paper') loadPaperStatus(); }, 5000);
+  setInterval(() => { if (currentTab === 'paper') loadPaperStatus(); }, 5000);
   loadDashboard();
   loadAuthUser();
   applyLegalHashRoute();
@@ -13462,8 +12536,8 @@ async function resolveHil(action) {
   }
 }
 
-// Check every 3 seconds — skip while tab hidden to save CPU/network
-setInterval(function(){ if(!document.hidden) checkHilPending(); }, 3000);
+// Check every 3 seconds
+setInterval(checkHilPending, 3000);
 </script>
 
 <!-- ═══════════════════════════════════════════════════════
@@ -13472,7 +12546,7 @@ setInterval(function(){ if(!document.hidden) checkHilPending(); }, 3000);
      ═══════════════════════════════════════════════════════ -->
 <style>
 /* ── Toast ─────────────────────────────────────────── */
-#ta-toast-region{position:fixed;top:64px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;width:300px}
+#ta-toast-region{position:fixed;top:16px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none;width:300px}
 .ta-toast{background:var(--surface);border:1px solid var(--surface-rule);border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.12);padding:12px 14px;display:flex;align-items:flex-start;gap:10px;pointer-events:all;position:relative;overflow:hidden;animation:ta-in .22s cubic-bezier(.34,1.4,.64,1) forwards;font-family:inherit}
 .ta-toast.ta-out{animation:ta-out .18s ease forwards}
 @keyframes ta-in{from{opacity:0;transform:translateX(110%)}to{opacity:1;transform:translateX(0)}}
@@ -13841,18 +12915,7 @@ document.addEventListener('keydown', e => {
 
 // ─── MARKET STATUS CHIP ───────────────────────────────────────────
 (function() {
-  const preview = document.getElementById('ta-preview-label');
-  if (preview) {
-    const host = window.location.hostname;
-    const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1';
-    preview.textContent = isLocal ? 'Local' : 'Public';
-    preview.closest('.ta-market-chip')?.setAttribute(
-      'data-tippy-content',
-      isLocal ? 'Served from this machine' : 'Served from the public dashboard host'
-    );
-  }
-
-  const hdr = document.querySelector('.ta-header-actions') || document.querySelector('header div[style*="display:flex"]');
+  const hdr = document.querySelector('header div[style*="display:flex"]');
   if (!hdr) return;
   const chip = document.createElement('div');
   chip.id = 'ta-mkt-chip';
@@ -13893,7 +12956,7 @@ async function taUpdateMarket() {
   } catch(e){}
 }
 setTimeout(taUpdateMarket,800);
-setInterval(function(){ if(!document.hidden) taUpdateMarket(); },30000);
+setInterval(taUpdateMarket,30000);
 
 // ─── CSV EXPORT ───────────────────────────────────────────────────
 function taExportTable(tbl, name) {
@@ -13929,22 +12992,13 @@ function taInjectExports() {
   panels.forEach(({id,name,sel}) => {
     const panel = document.getElementById(id);
     if (!panel||panel.querySelector('.ta-exp')) return;
-    // Anchor to a real toolbar row — never inside the table, never the stat
-    // summary grid. Skip entirely if the panel has no table or no toolbar yet.
-    const table = panel.querySelector(sel);
-    if (!table) return;
-    const cands = [...panel.querySelectorAll('.flex.items-center, [style*="justify-content:space-between"]')];
-    const header = cands.find(el =>
-      !el.closest('table') &&                                   // not a table row cell
-      !el.closest('[id$="-summary"]') &&                        // not the stat summary grid
-      (el.querySelector('button') || /justify-content:\s*space-between/.test(el.getAttribute('style')||''))
-    );
+    // Find a good injection point — any flex header row
+    const header = panel.querySelector('.flex.items-center, [style*="justify-content:space-between"]');
     if (!header) return;
     const btn = document.createElement('button');
     btn.className='ta-exp';
-    btn.style.marginLeft='auto';
     btn.innerHTML=`<svg width="11" height="11" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export`;
-    btn.onclick=()=>{ taExportTable(table,name); };
+    btn.onclick=()=>{ const t=panel.querySelector(sel); taExportTable(t,name); };
     header.appendChild(btn);
   });
 }
@@ -13979,8 +13033,7 @@ document.getElementById('nav-paper')?.addEventListener('click',()=>{
 
 // ─── WELCOME TOAST ────────────────────────────────────────────────
 setTimeout(() => {
-  const compact = window.matchMedia && window.matchMedia('(max-width: 760px)').matches;
-  if (!compact && !sessionStorage.getItem('ta-hi')) {
+  if (!sessionStorage.getItem('ta-hi')) {
     sessionStorage.setItem('ta-hi','1');
     showToast('Press <b>?</b> for shortcuts · <b>⌘K</b> to search','info','Tip',5000);
   }
@@ -14223,11 +13276,434 @@ if (typeof _origLoadSettings === 'function') {
 }
 </script>
 
-<!-- ta-polish hoisted to <head> for first-paint stability -->
+<style id="ta-polish">
+/* Keyboard-nav focus rings — visible only for keyboard users, accent-matched */
+a:focus-visible, button:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible,
+.nav-item:focus-visible, .report-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 5px;
+}
+:focus:not(:focus-visible) { outline: none; }
 
-<!-- ta-redesign hoisted to <head> for first-paint stability -->
+/* Smooth in-page jumps */
+html { scroll-behavior: smooth; }
 
-<!-- ta-emil hoisted to <head> for first-paint stability -->
+/* Respect reduced-motion: kill non-essential animation/transition */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+</style>
+
+<style id="ta-redesign">
+/* ════════════════════════════════════════════════════════════════
+   Design pass — product register.
+   Skills: design-taste-frontend (tinted neutrals, type hierarchy,
+   anti-card-overuse), impeccable (never flat #fff, scene-driven),
+   high-end-visual-design (macro whitespace, refined chrome),
+   emil-design-eng (ease-out motion, press feedback).
+   Accent is warm (#E03E00) so every neutral is tinted warm.
+   ════════════════════════════════════════════════════════════════ */
+:root{
+  --canvas:#F5F4F1;          /* warm paper, not slate-50 flat */
+  --surface:#FCFBFA;         /* sidebar / chrome */
+  --surface-soft:#F2F1ED;
+  --surface-raised:#EBE9E4;
+  --surface-rule:#E2DFD8;    /* warm hairline */
+  --ink:#1A1714;             /* warm near-black, not #0E1118 */
+  --ink-muted:#534E47;       /* ~8:1 on white */
+  --ink-faint:#736C61;       /* ~4.7:1 — passes WCAG AA body (was 3.4:1 fail) */
+  --accent:#D63A00;
+  --accent-hover:#B83100;
+  --accent-subtle:rgba(214,58,0,.09);
+  --shadow-card:0 1px 2px rgba(26,23,20,.04),0 4px 14px -6px rgba(26,23,20,.08);
+}
+body{background:var(--canvas)!important;color:var(--ink)!important;letter-spacing:-.005em;}
+#ta-shader-field{
+  position:fixed;
+  inset:0;
+  width:100%;
+  height:100%;
+  z-index:0;
+  pointer-events:none;
+  opacity:.58;
+  mix-blend-mode:multiply;
+  filter:saturate(.9) contrast(1.02);
+}
+body.theme-dark #ta-shader-field{
+  opacity:.34;
+  mix-blend-mode:screen;
+  filter:saturate(.75) contrast(1.08);
+}
+body>aside,
+body>.flex-1.flex.flex-col.overflow-hidden{
+  position:relative;
+  z-index:1;
+}
+.ta-app-header{
+  gap:18px;
+  backdrop-filter:saturate(1.08);
+}
+.ta-title-block{min-width:178px;}
+.ta-page-kicker{
+  margin-top:2px;
+  font-size:10px;
+  line-height:1;
+  color:var(--ink-faint);
+  font-weight:700;
+  letter-spacing:.11em;
+  text-transform:uppercase;
+}
+.ta-commandbar{
+  width:min(440px, 38vw);
+  min-width:250px;
+  height:38px;
+  display:flex;
+  align-items:center;
+  gap:9px;
+  padding:0 10px 0 12px;
+  border:1px solid var(--surface-rule);
+  border-radius:8px;
+  background:linear-gradient(180deg, rgba(255,255,255,.62), rgba(255,255,255,.28));
+  color:var(--ink-faint);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.42), 0 1px 2px rgba(26,23,20,.03);
+}
+body.theme-dark .ta-commandbar{
+  background:linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.02));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+}
+.ta-commandbar:focus-within{
+  border-color:var(--accent);
+  box-shadow:0 0 0 3px rgba(214,58,0,.10), inset 0 1px 0 rgba(255,255,255,.42);
+}
+.ta-commandbar input{
+  width:100%;
+  height:100%;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:var(--ink);
+  font:600 12.5px/1 var(--font-sans);
+}
+.ta-commandbar input::placeholder{color:var(--ink-faint);}
+.ta-commandbar kbd{
+  min-width:20px;
+  height:20px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border:1px solid var(--surface-rule);
+  border-radius:5px;
+  background:var(--surface);
+  color:var(--ink-faint);
+  font:700 10px/1 var(--font-mono);
+}
+.ta-header-actions{flex-shrink:0;}
+.ta-market-chip{
+  min-height:32px;
+  display:inline-flex;
+  align-items:center;
+  gap:7px;
+  padding:0 10px;
+  border:1px solid var(--surface-rule);
+  border-radius:999px;
+  background:var(--surface-soft);
+  color:var(--ink-muted);
+  font-size:11px;
+  font-weight:750;
+  white-space:nowrap;
+}
+.ta-market-pulse,
+.ta-status-dot{
+  width:7px;
+  height:7px;
+  border-radius:999px;
+  background:#8890A4;
+  flex:0 0 auto;
+}
+.ta-market-pulse{background:var(--accent);}
+.ta-connection-card{
+  min-height:42px;
+  display:flex;
+  align-items:center;
+  gap:9px;
+  padding:8px 10px;
+  border:1px solid var(--surface-rule);
+  border-radius:8px;
+  background:var(--surface-soft);
+  color:var(--ink-faint);
+}
+.ta-status-copy{display:flex;flex-direction:column;gap:1px;min-width:0;}
+.ta-status-label{
+  font-size:9px;
+  font-weight:800;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  color:var(--ink-faint);
+}
+.ta-status-value{
+  font-size:12px;
+  font-weight:750;
+  color:var(--ink-muted);
+}
+.ta-connection-card[data-state="connected"]{
+  border-color:rgba(4,120,87,.24);
+  background:rgba(52,211,153,.09);
+}
+.ta-connection-card[data-state="connected"] .ta-status-dot{background:#047857;}
+.ta-connection-card[data-state="connected"] .ta-status-value{color:#047857;}
+.ta-connection-card[data-state="disconnected"]{
+  border-color:rgba(185,28,28,.24);
+  background:rgba(248,113,113,.09);
+}
+.ta-connection-card[data-state="disconnected"] .ta-status-dot{background:#b91c1c;}
+.ta-connection-card[data-state="disconnected"] .ta-status-value{color:#b91c1c;}
+.dash-stat-cell{
+  position:relative;
+  background:linear-gradient(180deg, rgba(255,255,255,.38), rgba(255,255,255,0));
+}
+.dash-stat-cell::after{
+  content:"";
+  position:absolute;
+  left:22px;
+  right:22px;
+  bottom:0;
+  height:1px;
+  background:linear-gradient(90deg, transparent, rgba(214,58,0,.22), transparent);
+  opacity:0;
+  transition:opacity .18s var(--ease-out);
+}
+.dash-stat-cell:hover::after{opacity:1;}
+.dash-stat-num{font-size:26px!important;}
+#dash-main-grid{
+  min-height:0;
+  background:rgba(252,251,250,.78);
+}
+#dash-main-grid>div{
+  backdrop-filter:saturate(1.02);
+}
+.dash-chart-btn,
+.dash-opp-btn,
+.dlf-tab{
+  white-space:nowrap;
+}
+.ta-panel-shader{
+  position:absolute;
+  inset:0;
+  width:100%;
+  height:100%;
+  border-radius:8px;
+  pointer-events:none;
+  opacity:.72;
+  mix-blend-mode:multiply;
+}
+body.theme-dark .ta-panel-shader{
+  opacity:.42;
+  mix-blend-mode:screen;
+}
+#dash-market-canvas{
+  position:relative;
+  z-index:1;
+}
+#dash-chart-loading{
+  z-index:2;
+}
+@media (max-width:980px){
+  .ta-app-header{gap:10px;flex-wrap:wrap;padding-top:8px!important;padding-bottom:8px!important;}
+  .ta-commandbar{order:3;width:100%;min-width:0;}
+  .ta-header-actions{margin-left:auto;}
+  .ta-market-chip{display:none;}
+}
+@media (max-width:640px){
+  .ta-header-actions #current-datetime{display:none;}
+  .ta-commandbar{height:40px;}
+  .dash-stat-num{font-size:21px!important;}
+}
+
+/* Sidebar — distinct calm surface, generous rhythm */
+body>aside{
+  width:236px!important;
+  background:var(--surface)!important;
+  border-right:1px solid var(--surface-rule)!important;
+}
+body>aside>div:first-child{padding:18px 18px 16px!important;border-bottom:1px solid var(--surface-rule)!important;}
+body>aside nav{padding:14px 12px!important;gap:3px!important;}
+
+/* Brand lockup */
+body>aside>div:first-child>div:last-child>div:first-child{
+  font-size:15px!important;font-weight:700!important;letter-spacing:-.02em!important;
+}
+body>aside>div:first-child>div:last-child>div:last-child{
+  font-size:10px!important;text-transform:uppercase!important;letter-spacing:.13em!important;
+  font-weight:600!important;color:var(--ink-faint)!important;
+}
+
+/* Nav — calmer idle, decisive active. No side-stripe (impeccable ban). */
+.nav-item{
+  padding:9px 12px!important;font-size:13px!important;font-weight:500!important;
+  border-radius:8px!important;color:var(--ink-muted)!important;
+  transition:color .15s var(--ease-out),background-color .15s var(--ease-out)!important;
+}
+.nav-item svg{width:17px!important;height:17px!important;opacity:.7;}
+.nav-item:hover{background:var(--surface-raised)!important;color:var(--ink)!important;}
+.nav-item:hover svg{opacity:1;}
+.nav-item.active{
+  background:var(--accent-subtle)!important;color:var(--accent)!important;font-weight:600!important;
+}
+.nav-item.active svg{color:var(--accent)!important;opacity:1;}
+
+/* Header — taller, real H1 type scale (design-taste deterministic type) */
+.flex-1.flex.flex-col.overflow-hidden>header{
+  height:60px!important;padding:0 28px!important;
+  background:var(--surface)!important;border-bottom:1px solid var(--surface-rule)!important;
+}
+/* Product register: calmer scale ratio than brand. 18px not 21. */
+#page-title{
+  font-size:18px!important;font-weight:700!important;
+  letter-spacing:-.02em!important;color:var(--ink)!important;
+}
+
+/* Cards — tighter radius, warm hairline, tinted depth, motion on hover */
+.card{
+  background:#FFFFFF!important;border:1px solid var(--surface-rule)!important;
+  border-radius:10px!important;box-shadow:var(--shadow-card)!important;
+  transition:box-shadow .2s var(--ease-out),transform .2s var(--ease-out);
+}
+.card:hover{
+  box-shadow:0 2px 4px rgba(26,23,20,.05),0 10px 28px -10px rgba(26,23,20,.13)!important;
+}
+
+/* Eyebrow labels — uppercase micro tracking (impeccable/high-end) */
+.label{
+  text-transform:uppercase!important;letter-spacing:.11em!important;
+  font-size:10.5px!important;font-weight:600!important;color:var(--ink-faint)!important;
+}
+
+/* Ticker tape + content blend into warm canvas, no slate seam */
+#panel-dashboard>div:first-child,
+.flex-1.flex.flex-col.overflow-hidden>header{backdrop-filter:none;}
+
+/* Scrollbar — warm, recessive */
+::-webkit-scrollbar-track{background:var(--surface-soft)!important;}
+::-webkit-scrollbar-thumb{background:#C9C3B8!important;border-radius:3px!important;}
+::-webkit-scrollbar-thumb:hover{background:#A89F8F!important;}
+
+/* Inputs pick up warm calibration + ease-out focus */
+.input{border-color:#D2CCC0!important;border-radius:7px!important;}
+.input::placeholder{color:#8C857A!important;} /* was #A0A7B8 — failed WCAG */
+.input:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px rgba(214,58,0,.10)!important;}
+
+/* Primary CTA — confident, press feedback (emil) */
+.btn-primary{border-radius:7px!important;letter-spacing:0!important;}
+.btn-primary:active{transform:scale(.97)!important;}
+
+/* ── impeccable typography.md: rendering polish + a11y ── */
+h1,h2,h3,#page-title{text-wrap:balance;}
+.prose-dark p,.prose-dark li{text-wrap:pretty;}
+.prose-dark code,pre,code,kbd,samp{font-variant-ligatures:none;}
+.prose-dark p{max-width:72ch;}            /* readable measure for report prose */
+/* All-caps eyebrows need tracking compensation (typography.md) */
+.label{letter-spacing:.11em!important;}
+
+/* Touch targets — primary controls meet mobile target sizing */
+.nav-item{min-height:46px!important;}
+.btn-primary,.btn-secondary,.btn-danger,
+.report-tab,.dash-chart-btn,.dash-opp-btn,.dlf-tab,.admin-tab,
+.a-analyst-pill,.ta-pre,.ta-exp,#ta-sz-btn,
+button.text-xs,a[onclick],button[onclick],[role="button"]{
+  min-height:46px!important;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+}
+button.text-xs,a[onclick],button[onclick],[role="button"]{ min-width:46px; }
+.input,select.input,textarea.input{ min-height:46px; }
+label.flex:has(input[type="checkbox"]),
+label.flex:has(input[type="radio"]),
+.a-analyst-pill{ min-height:46px; }
+input[type="checkbox"],input[type="radio"]{ min-width:18px; min-height:18px; }
+
+/* State vocabulary completeness (product.md: ship all states) */
+.btn-primary:disabled,.btn-secondary:disabled,.btn-danger:disabled{opacity:.55;cursor:not-allowed;transform:none!important;}
+.btn-secondary:focus-visible,.btn-danger:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+/* Tables: tabular figures + calmer zebra on warm canvas */
+table td,table th{font-variant-numeric:tabular-nums;}
+
+/* ── Responsive: ≤980px uses mobile drawer (see main <style>).
+   The 860px icon-rail is removed — drawer replaces it. ── */
+@media (max-width:980px){
+  body>aside{
+    width:100%!important;position:fixed!important;
+    top:0!important;left:0!important;right:0!important;
+    border-right:0!important;
+  }
+  .nav-item{font-size:14px!important;width:100%!important;}
+}
+@media (max-width:560px){
+  .flex-1.flex.flex-col.overflow-hidden>header{min-height:52px!important;height:auto!important;}
+  #page-title{font-size:16px!important;}
+}
+
+/* Theme: light is the default (docs/DESIGN.md scene), dark is opt-in via the
+   Settings → Appearance toggle. Light uses the warm `#ta-redesign :root`
+   tokens; dark uses the pre-existing `.theme-dark` token set. No
+   single-mode override — the toggle flips both ways. */
+input[type=checkbox], input[type=radio], input[type=range],
+input[type=date], progress{ accent-color:var(--accent); }
+</style>
+
+<style id="ta-emil">
+/* ════════════════════════════════════════════════════════════════
+   emil-design-eng pass — motion correctness.
+   1. Kill wildcard transitions → explicit props only (browser
+      can't GPU-skip unknown props; `all` also animates layout).
+   2. Strong custom ease-out everywhere (built-in easings lack punch).
+   3. Press feedback on every pressable pill/tab (scale .97) — the
+      interface must feel like it heard the click.
+   4. Perceived performance: faster spinner reads as faster load.
+   Later source order → wins specificity ties over the base rules.
+   ════════════════════════════════════════════════════════════════ */
+
+/* report tabs / settings tabs — color+bg+border, no `all` */
+.report-tab,.admin-tab{
+  transition:color .15s var(--ease-out),background-color .15s var(--ease-out),
+             border-color .15s var(--ease-out),transform .12s var(--ease-out)!important;
+}
+.dlf-tab{
+  transition:color .15s var(--ease-out),border-color .15s var(--ease-out),
+             transform .12s var(--ease-out)!important;
+}
+.dash-chart-btn,.dash-opp-btn,.a-analyst-pill,
+.ta-pre,.ta-exp,#ta-sz-btn{
+  transition:color .12s var(--ease-out),background-color .12s var(--ease-out),
+             border-color .12s var(--ease-out),transform .12s var(--ease-out)!important;
+}
+/* status pill — read-only, no press; just drop `all` */
+.a-agent-step{
+  transition:color .2s var(--ease-out),background-color .2s var(--ease-out),
+             border-color .2s var(--ease-out)!important;
+}
+
+/* Press feedback — subtle scale, instant ease-out. Buttons must
+   feel responsive to press (emil: 0.95–0.98 range). */
+.report-tab:active,.admin-tab:active,.dlf-tab:active,
+.dash-chart-btn:active,.dash-opp-btn:active,.a-analyst-pill:active,
+.ta-pre:active,.ta-exp:active,#ta-sz-btn:active{ transform:scale(.97); }
+
+/* Perceived performance — a faster spinner makes the app feel
+   like it loads faster even at identical load time (emil). */
+.spin{ animation-duration:.7s!important; }
+
+/* prefers-reduced-motion already neutralised globally in #ta-polish:
+   motion here degrades to instant, comprehension unaffected. */
+</style>
 
 <script>
 /* ── a11y shim (impeccable audit: Accessibility) ──
@@ -14939,68 +14415,7 @@ if (typeof _origLoadSettings === 'function') {
 
 
 <!-- TradingAgents premium static UI vendor JS -->
-<script defer src="/static/vendor/js/notyf.min.js"></script>
-<script>
-  // Lazy init so the notyf script can be deferred (instance built on first toast).
-  let notyf = null;
-  function _notyf() {
-    if (notyf) return notyf;
-    if (window.Notyf) {
-      notyf = new Notyf({
-        duration: 3000,
-        position: { x: 'right', y: 'top' },
-        dismissible: true
-      });
-    }
-    return notyf;
-  }
-  window.showSuccess = function(msg) {
-    var n = _notyf();
-    if (n) { n.success(msg); } else { alert(msg); }
-  };
-  window.showError = function(msg) {
-    var n = _notyf();
-    if (n) { n.error(msg); } else { alert(msg); }
-  };
-  window.showInfo = function(msg) {
-    var n = _notyf();
-    if (n) { n.success({message: msg, icon: false, background: '#3b82f6'}); } else { alert(msg); }
-  };
-</script>
 
-<!-- Phase 3: Tippy.js tooltips (Popper must load first; deferred order preserved) -->
-<script defer src="/static/vendor/js/popper.min.js"></script>
-<script defer src="/static/vendor/js/tippy-bundle.umd.min.js"></script>
-<!-- Phase 4: Lucide icons (standalone UMD) -->
-<script defer src="/static/vendor/js/lucide.min.js"></script>
-<!-- Phase 7: Chart.js annotation plugin (self-registers to global Chart) -->
-<script defer src="/static/vendor/js/chartjs-plugin-annotation.min.js"></script>
-<!-- Phase 8: GSAP intentionally NOT loaded — entrance animations on above-the-fold
-     content caused intermittent layout-shift (CLS) spikes; CSS enter-anim (transform/
-     opacity, reduced-motion-gated) already provides motion at zero CLS cost. -->
-<script>
-  (function () {
-    // Phase 4: render Lucide placeholders, then re-render after dynamic DOM updates.
-    function renderIcons() { if (window.lucide && lucide.createIcons) { try { lucide.createIcons(); } catch (e) {} } }
 
-    // Phase 3: initialise Tippy only on explicit [data-tippy-content] targets.
-    function initTooltips() {
-      if (!window.tippy) return;
-      try {
-        tippy('[data-tippy-content]', { delay: [200, 0], duration: [150, 100] });
-      } catch (e) {}
-    }
-
-    function boot() { renderIcons(); initTooltips(); }
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', boot);
-    } else {
-      boot();
-    }
-    // Expose so dynamically-injected sections can refresh icons/tooltips.
-    window.taRefreshIcons = renderIcons;
-    window.taRefreshTooltips = initTooltips;
-  })();
-</script>
 </body>
 </html>

@@ -17,6 +17,9 @@ Env:
   CF_ACCESS_REQUIRED     "true" to enforce; "false" (default) enables
                          localhost dev fallback that injects dev@local
                          as admin when CF_ACCESS_TEAM_DOMAIN is unset.
+  CF_ACCESS_LOCAL_DEV    "true" allows localhost-only dev auth even when
+                         CF_ACCESS_REQUIRED=true for tunnel/public traffic.
+  CF_ACCESS_LOCAL_DEV_EMAIL email to use for that localhost-only dev user.
 """
 from __future__ import annotations
 
@@ -59,6 +62,22 @@ def _audience() -> str:
 
 def _required() -> bool:
     return os.getenv("CF_ACCESS_REQUIRED", "false").lower() == "true"
+
+
+def _local_dev_enabled() -> bool:
+    return os.getenv("CF_ACCESS_LOCAL_DEV", "false").lower() == "true"
+
+
+def _local_dev_email() -> str:
+    email = os.getenv("CF_ACCESS_LOCAL_DEV_EMAIL", "").strip().lower()
+    if email:
+        return email
+    bootstrap = [
+        e.strip().lower()
+        for e in os.getenv("CF_ACCESS_BOOTSTRAP_ADMIN", "").split(",")
+        if e.strip()
+    ]
+    return bootstrap[0] if bootstrap else "dev@local"
 
 
 def _is_localhost(request: Request) -> bool:
@@ -119,7 +138,7 @@ async def get_current_user(request: Request) -> dict[str, Any]:
     """FastAPI dependency: returns the authenticated user record.
 
     Order of precedence:
-      1. Localhost + CF_ACCESS_REQUIRED!=true  -> dev fallback user.
+      1. Localhost + local dev auth enabled    -> dev fallback user.
       2. Valid Cloudflare Access JWT           -> verified user.
       3. Anything else                         -> 401.
 
@@ -128,8 +147,8 @@ async def get_current_user(request: Request) -> dict[str, Any]:
     """
     global _LAST_FAIL_LOG_AT
 
-    if _is_localhost(request) and not _required():
-        user = _apply_view_as(request, get_or_create_user("dev@local"))
+    if _is_localhost(request) and (not _required() or _local_dev_enabled()):
+        user = _apply_view_as(request, get_or_create_user(_local_dev_email()))
         request.state.user = user
         return user
 
@@ -232,8 +251,8 @@ async def require_step_up(
             status_code=status.HTTP_428_PRECONDITION_REQUIRED,
             detail="HIL trading disclosure must be accepted before real broker trading.",
         )
-    # Local dev convenience: skip step-up when auth itself is relaxed.
-    if _is_localhost(request) and not _required():
+    # Local dev convenience: skip step-up when localhost dev auth is relaxed.
+    if _is_localhost(request) and (not _required() or _local_dev_enabled()):
         return user
 
     from web import twofa

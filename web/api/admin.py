@@ -5,6 +5,9 @@ import datetime as dt
 import json
 import os
 import platform
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -91,6 +94,59 @@ def _masked(value: str) -> str:
     if len(value) <= 8:
         return "set"
     return value[:4] + "..." + value[-4:]
+
+
+def _run_capture(cmd: list[str], timeout: int = 5) -> dict[str, Any]:
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return {
+            "ok": proc.returncode == 0,
+            "return_code": proc.returncode,
+            "stdout": proc.stdout[-4000:],
+            "stderr": proc.stderr[-4000:],
+        }
+    except Exception as exc:
+        return {"ok": False, "return_code": None, "stdout": "", "stderr": str(exc)}
+
+
+def _tail(path: Path, lines: int = 80) -> list[str]:
+    try:
+        if not path.exists():
+            return []
+        return path.read_text(errors="ignore").splitlines()[-lines:]
+    except Exception as exc:
+        return [f"Could not read {path.name}: {exc}"]
+
+
+def _port_pids(port: int = 8001) -> list[str]:
+    if not shutil.which("lsof"):
+        return []
+    proc = _run_capture(["lsof", f"-tiTCP:{port}", "-sTCP:LISTEN"], timeout=3)
+    return [line.strip() for line in proc.get("stdout", "").splitlines() if line.strip()]
+
+
+def _screen_sessions() -> list[str]:
+    if not shutil.which("screen"):
+        return []
+    proc = _run_capture(["screen", "-ls"], timeout=3)
+    return [line.strip() for line in proc.get("stdout", "").splitlines() if "." in line]
+
+
+def _cloudflared_pids() -> list[str]:
+    proc = _run_capture(["pgrep", "-f", "cloudflared.*tunnel"], timeout=3)
+    return [line.strip() for line in proc.get("stdout", "").splitlines() if line.strip()]
+
+
+class RuntimeActionBody(BaseModel):
+    port: int = 8001
+    tunnel: bool = False
 
 
 @router.get("/admin/audit")
@@ -184,6 +240,102 @@ async def admin_cloudflare(admin: dict[str, Any] = Depends(require_admin)):
             "bucket": os.getenv("CLOUDFLARE_R2_BUCKET") or os.getenv("R2_BUCKET", ""),
         },
     }
+
+
+@router.get("/admin/runtime/status")
+async def admin_runtime_status(admin: dict[str, Any] = Depends(require_admin)):
+    port = int(os.getenv("PORT", "8001"))
+    return {
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "root": str(ROOT),
+        "python": sys.executable,
+        "platform": platform.platform(),
+        "port": port,
+        "web_pids": _port_pids(port),
+        "screen_sessions": _screen_sessions(),
+        "cloudflared_pids": _cloudflared_pids(),
+        "commands": {
+            "git": shutil.which("git"),
+            "python3": shutil.which("python3"),
+            "uv": shutil.which("uv"),
+            "cloudflared": shutil.which("cloudflared"),
+            "screen": shutil.which("screen"),
+            "lsof": shutil.which("lsof"),
+        },
+        "logs": {
+            "web": str(TMP / "web.screen.log"),
+            "cloudflared": str(TMP / "cloudflared.screen.log"),
+        },
+    }
+
+
+@router.get("/admin/runtime/diagnostics")
+async def admin_runtime_diagnostics(admin: dict[str, Any] = Depends(require_admin)):
+    git_status = _run_capture(["git", "status", "--short"], timeout=5) if shutil.which("git") else {"stderr": "git not found"}
+    git_branch = _run_capture(["git", "branch", "--show-current"], timeout=5) if shutil.which("git") else {"stderr": "git not found"}
+    return {
+        "runtime": await admin_runtime_status(admin),
+        "git": {
+            "branch": (git_branch.get("stdout") or "").strip(),
+            "status_short": (git_status.get("stdout") or "").splitlines()[:200],
+            "error": git_status.get("stderr") or git_branch.get("stderr") or "",
+        },
+        "env": {
+            "env_file_present": (ROOT / ".env").exists(),
+            "cloudflare_access": _env_set("CF_ACCESS_TEAM_DOMAIN") and _env_set("CF_ACCESS_AUD"),
+            "cloudflare_ai": _env_set("CLOUDFLARE_API_TOKEN") and _env_set("CLOUDFLARE_ACCOUNT_ID"),
+            "supabase": _env_set("SUPABASE_URL") and _env_set("SUPABASE_SERVICE_KEY"),
+            "smtp": _env_set("SMTP_HOST") and _env_set("SMTP_USERNAME"),
+            "sendblue": _env_set("SENDBLUE_API_KEY_ID") and _env_set("SENDBLUE_API_SECRET"),
+        },
+        "log_tail": {
+            "web": _tail(TMP / "web.screen.log"),
+            "cloudflared": _tail(TMP / "cloudflared.screen.log"),
+        },
+    }
+
+
+@router.post("/admin/runtime/web/restart")
+async def admin_runtime_web_restart(
+    body: RuntimeActionBody,
+    admin: dict[str, Any] = Depends(require_admin),
+):
+    record_audit_event("runtime_web_restart", admin["email"], detail=f"Requested web restart on port {body.port}.")
+    tunnel_flag = [] if body.tunnel else ["--no-tunnel"]
+    cmd = [
+        "bash",
+        "-lc",
+        (
+            "sleep 1; "
+            f"{shutil.which('python3') or sys.executable} "
+            "cli/restore_runtime.py start --restart "
+            f"--port {int(body.port)} {' '.join(tunnel_flag)} "
+            ">> tmp/runtime-admin-actions.log 2>&1"
+        ),
+    ]
+    subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"success": True, "message": "Restart scheduled. Refresh in a few seconds."}
+
+
+@router.post("/admin/runtime/tunnel/start")
+async def admin_runtime_tunnel_start(
+    body: RuntimeActionBody,
+    admin: dict[str, Any] = Depends(require_admin),
+):
+    record_audit_event("runtime_tunnel_start", admin["email"], detail="Requested Cloudflare tunnel start.")
+    cmd = [sys.executable, "cli/restore_runtime.py", "start", "--port", str(body.port)]
+    proc = _run_capture(cmd, timeout=15)
+    return {"success": proc["ok"], "result": proc}
+
+
+@router.post("/admin/runtime/tunnel/stop")
+async def admin_runtime_tunnel_stop(admin: dict[str, Any] = Depends(require_admin)):
+    record_audit_event("runtime_tunnel_stop", admin["email"], detail="Requested Cloudflare tunnel stop.")
+    results: list[dict[str, Any]] = []
+    if shutil.which("screen"):
+        results.append(_run_capture(["screen", "-S", "agentic-tunnel", "-X", "quit"], timeout=5))
+    # Only stop the managed screen session; do not kill unrelated/root cloudflared processes.
+    return {"success": True, "results": results, "remaining_cloudflared_pids": _cloudflared_pids()}
 
 
 @router.get("/admin/export")

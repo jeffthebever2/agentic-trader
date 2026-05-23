@@ -23,6 +23,40 @@ _fetch_lock = asyncio.Lock()
 WATCHLIST = ['SPY', 'QQQ', 'AAPL', 'NVDA', 'TSLA', 'MSFT', 'AMZN', 'META', 'BTC-USD']
 
 
+def _download_symbol(symbol: str, *, period: str, interval: str):
+    import yfinance as yf
+
+    return yf.download(
+        symbol,
+        period=period,
+        interval=interval,
+        auto_adjust=True,
+        progress=False,
+        threads=False,
+    )
+
+
+def _flatten_yfinance_columns(data):
+    """Normalize yfinance's single-ticker MultiIndex shape."""
+    if getattr(data, "empty", True):
+        return data
+    columns = getattr(data, "columns", None)
+    if columns is not None and getattr(columns, "nlevels", 1) > 1:
+        data = data.copy()
+        data.columns = columns.get_level_values(0)
+    return data
+
+
+def _close_series(data):
+    data = _flatten_yfinance_columns(data)
+    if getattr(data, "empty", True) or "Close" not in data:
+        return None
+    series = data["Close"]
+    if hasattr(series, "ndim") and series.ndim > 1:
+        series = series.iloc[:, 0]
+    return series.dropna()
+
+
 def _get_sp500_tickers() -> list[str]:
     global _sp500_tickers, _sp500_ts
     if _sp500_tickers and (time.time() - _sp500_ts) < SP500_TTL:
@@ -56,23 +90,15 @@ async def _fetch_quotes_bg():
         if _quotes_cache and (time.time() - _quotes_ts) < QUOTES_TTL:
             return
         try:
-            import yfinance as yf
-            data = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: yf.download(WATCHLIST, period="2d", interval="1d",
-                                     auto_adjust=True, progress=False, threads=True)
-            )
-            close = data.get("Close", data)
             quotes = []
             for sym in WATCHLIST:
                 try:
-                    if hasattr(close, "columns") and sym in close.columns:
-                        prices = close[sym].dropna()
-                    elif len(WATCHLIST) == 1:
-                        prices = close.dropna()
-                    else:
-                        continue
-                    if len(prices) < 1:
+                    data = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda symbol=sym: _download_symbol(symbol, period="5d", interval="1d"),
+                    )
+                    prices = _close_series(data)
+                    if prices is None or len(prices) < 1:
                         continue
                     last = float(prices.iloc[-1])
                     prev = float(prices.iloc[-2]) if len(prices) >= 2 else last
@@ -102,17 +128,14 @@ async def market_chart(symbol: str = Query("SPY"), period: str = Query("5d"), in
     cached = _chart_cache.get(key)
     if cached and (time.time() - cached.get("_ts", 0)) < 300:
         return cached
-    import yfinance as yf
     data = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: yf.download(symbol, period=period, interval=interval,
-                                   auto_adjust=True, progress=False)
+        None,
+        lambda: _download_symbol(symbol, period=period, interval=interval),
     )
     if data.empty:
         return {"symbol": symbol, "dates": [], "close": [], "volume": []}
 
-    # Flatten multi-level columns (newer yfinance returns MultiIndex even for single ticker)
-    if data.columns.nlevels > 1:
-        data.columns = data.columns.get_level_values(0)
+    data = _flatten_yfinance_columns(data)
 
     def _col(col):
         s = data[col]
@@ -177,16 +200,18 @@ async def market_sparklines():
     global _sparkline_cache
     if _sparkline_cache and (time.time() - _sparkline_cache.get("_ts", 0)) < 300:
         return _sparkline_cache
-    import yfinance as yf
-    data = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: yf.download(WATCHLIST, period="5d", interval="1h",
-                                   auto_adjust=True, progress=False, threads=True)
-    )
-    close = data.get("Close", data)
     result: dict = {"_ts": int(time.time())}
     for sym in WATCHLIST:
         try:
-            prices = [round(float(v), 2) for v in close[sym].dropna().tolist()]
+            data = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda symbol=sym: _download_symbol(symbol, period="5d", interval="1h"),
+            )
+            close = _close_series(data)
+            if close is None:
+                result[sym] = []
+                continue
+            prices = [round(float(v), 2) for v in close.tolist()]
             result[sym] = prices
         except Exception:
             result[sym] = []
