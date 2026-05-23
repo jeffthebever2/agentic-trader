@@ -301,11 +301,15 @@ class LauncherApp:
             log(self.install_dir, "Auto-updater: checking for updates...")
             try:
                 subprocess.run(["git", "fetch", "origin"], cwd=str(self.repo_dir), check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                output = subprocess.check_output(["git", "status", "-uno"], cwd=str(self.repo_dir), text=True)
-                if "Your branch is behind" in output:
-                    log(self.install_dir, "Auto-updater: new updates found! Applying...")
-                    subprocess.run(["git", "pull", "--ff-only"], cwd=str(self.repo_dir), check=True)
-                    sync_dependencies(self.install_dir, self.repo_dir)
+                local = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(self.repo_dir), text=True).strip()
+                remote = subprocess.check_output(["git", "rev-parse", "@{u}"], cwd=str(self.repo_dir), text=True).strip()
+                
+                if local != remote:
+                    base = subprocess.check_output(["git", "merge-base", "@", "@{u}"], cwd=str(self.repo_dir), text=True).strip()
+                    if local == base:
+                        log(self.install_dir, "Auto-updater: new updates found! Applying...")
+                        subprocess.run(["git", "pull", "--ff-only"], cwd=str(self.repo_dir), check=True)
+                        sync_dependencies(self.install_dir, self.repo_dir)
                     log(self.install_dir, "Auto-updater: updates successfully applied.")
                     
                     if self.server_process and not self.is_restarting:
