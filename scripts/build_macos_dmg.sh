@@ -21,6 +21,8 @@ pyinstaller \
   --clean \
   --windowed \
   --name "$APP_NAME" \
+  --icon "assets/logo.icns" \
+  --add-data "assets/TauricResearch.png:assets" \
   --distpath "$DIST_DIR" \
   --workpath "$BUILD_DIR/agentic-launcher" \
   packaging/agentic_trader_launcher.py
