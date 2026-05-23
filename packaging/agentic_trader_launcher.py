@@ -263,23 +263,49 @@ class LauncherApp:
             pass
         self.root.after(100, self.process_log_queue)
 
+    def get_server_pid(self):
+        if self.server_process and self.server_process.poll() is None:
+            return self.server_process.pid
+        try:
+            output = subprocess.check_output(["lsof", "-tiTCP:" + str(self.port_var.get()), "-sTCP:LISTEN"], text=True)
+            pids = output.strip().split()
+            if pids: return int(pids[0])
+        except Exception:
+            pass
+        return None
+
     def diagnostics_loop(self):
         """Thread that updates Uptime, CPU, and Memory usage every second."""
         while True:
             time.sleep(1)
-            if not self.server_process:
+            pid = self.get_server_pid()
+            
+            if not pid:
+                if self.status_var.get() == "Running":
+                    self.status_var.set("Stopped")
+                    self.stop_btn.configure(state="disabled", fg_color="gray30")
+                    self.restart_btn.configure(state="disabled", fg_color="gray30")
+                    self.start_btn.configure(state="normal")
                 self.uptime_var.set("Uptime: 00:00:00")
                 self.resource_var.set("CPU: 0.0% | RAM: 0.0 MB")
                 continue
 
+            if self.status_var.get() == "Stopped":
+                self.status_var.set("Running")
+                self.stop_btn.configure(state="normal", fg_color="#E74C3C", hover_color="#C0392B")
+                self.restart_btn.configure(state="normal", fg_color="#3498DB", hover_color="#2980B9")
+                self.start_btn.configure(state="disabled")
+                if not self.start_time:
+                    self.start_time = time.time()
+
             # Calculate Uptime
-            uptime_sec = int(time.time() - self.start_time)
-            m, s = divmod(uptime_sec, 60)
-            h, m = divmod(m, 60)
-            self.uptime_var.set(f"Uptime: {h:02d}:{m:02d}:{s:02d}")
+            if self.start_time:
+                uptime_sec = int(time.time() - self.start_time)
+                m, s = divmod(uptime_sec, 60)
+                h, m = divmod(m, 60)
+                self.uptime_var.set(f"Uptime: {h:02d}:{m:02d}:{s:02d}")
 
             # Calculate Resource Usage
-            pid = self.server_process.pid
             system = platform.system().lower()
             try:
                 if system in ("darwin", "linux"):
@@ -381,20 +407,29 @@ class LauncherApp:
     def on_stop_clicked(self):
         self.stop_btn.configure(state="disabled", fg_color="gray30")
         self.restart_btn.configure(state="disabled", fg_color="gray30")
-        if self.server_process:
+        
+        pid = self.get_server_pid()
+        if pid:
             self.status_var.set("Stopping...")
             log(self.install_dir, "Stopping server...")
-            self.server_process.terminate()
-            try:
-                self.server_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.server_process.kill()
-            self.server_process = None
+            if self.server_process:
+                self.server_process.terminate()
+                try:
+                    self.server_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.server_process.kill()
+                self.server_process = None
+            else:
+                try:
+                    subprocess.run(["kill", str(pid)], check=False)
+                except Exception:
+                    pass
             
         if self.log_file_handle:
             self.log_file_handle.close()
             self.log_file_handle = None
             
+        self.start_time = 0
         self.status_var.set("Stopped")
         self.start_btn.configure(state="normal")
         self.update_btn.configure(state="normal")
