@@ -152,7 +152,7 @@ class LauncherApp:
             style.theme_use("clam")
 
         # Variables for settings
-        self.auto_update_var = tk.BooleanVar(value=True)
+        self.auto_update_var = tk.BooleanVar(value=False)
         self.tunnel_var = tk.BooleanVar(value=args.tunnel)
         self.port_var = tk.IntVar(value=args.port)
 
