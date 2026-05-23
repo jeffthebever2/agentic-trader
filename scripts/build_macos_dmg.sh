@@ -25,6 +25,7 @@ pyinstaller \
   --add-data "assets/TauricResearch.png:assets" \
   --distpath "$DIST_DIR" \
   --workpath "$BUILD_DIR/agentic-launcher" \
+  --collect-all customtkinter \
   packaging/agentic_trader_launcher.py
 
 hdiutil create \

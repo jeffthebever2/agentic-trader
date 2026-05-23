@@ -16,7 +16,7 @@ import webbrowser
 import threading
 import queue
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+import customtkinter as ctk
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -120,7 +120,7 @@ def health_ok(port: int) -> bool:
         return False
 
 class LauncherApp:
-    def __init__(self, root: tk.Tk, args: argparse.Namespace):
+    def __init__(self, root: ctk.CTk, args: argparse.Namespace):
         self.root = root
         self.args = args
         self.install_dir = Path(args.install_dir).expanduser().resolve()
@@ -142,25 +142,26 @@ class LauncherApp:
         icon_path = base_path / "assets" / "TauricResearch.png"
         if icon_path.exists():
             try:
-                img = tk.PhotoImage(file=str(icon_path))
-                self.root.iconphoto(True, img)
+                tk_img = tk.PhotoImage(file=str(icon_path))
+                self.root.iconphoto(True, tk_img)
             except Exception:
                 pass
-        
-        style = ttk.Style()
-        if "clam" in style.theme_names():
-            style.theme_use("clam")
 
         # Variables for settings
         self.auto_update_var = tk.BooleanVar(value=False)
         self.tunnel_var = tk.BooleanVar(value=args.tunnel)
         self.port_var = tk.IntVar(value=args.port)
 
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
 
-        self.notebook = ttk.Notebook(main_frame)
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        main_frame = ctk.CTkFrame(self.root, fg_color="transparent")
+        main_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=20)
+        main_frame.grid_rowconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(0, weight=1)
+
+        self.notebook = ctk.CTkTabview(main_frame)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
 
         self.build_dashboard_tab()
         self.build_diagnostics_tab()
@@ -175,82 +176,89 @@ class LauncherApp:
         log(self.install_dir, "Admin Panel initialized. Ready to start.")
 
     def build_dashboard_tab(self):
-        tab = ttk.Frame(self.notebook, padding="20")
-        self.notebook.add(tab, text="Dashboard")
+        self.notebook.add("Dashboard")
+        tab = self.notebook.tab("Dashboard")
+        tab.grid_columnconfigure(0, weight=1)
         
-        title = ttk.Label(tab, text="Server Control", font=("Helvetica", 18, "bold"))
-        title.pack(anchor="w", pady=(0, 20))
+        title = ctk.CTkLabel(tab, text="Server Control", font=ctk.CTkFont(size=24, weight="bold"))
+        title.grid(row=0, column=0, sticky="w", pady=(10, 20))
         
         # Status Card
-        card = ttk.LabelFrame(tab, text="Server Status", padding="15")
-        card.pack(fill=tk.X, pady=(0, 20))
+        card = ctk.CTkFrame(tab, corner_radius=15, fg_color=("gray85", "gray16"))
+        card.grid(row=1, column=0, sticky="ew", pady=(0, 20))
+        card.grid_columnconfigure(0, weight=1)
         
+        card_inner = ctk.CTkFrame(card, fg_color="transparent")
+        card_inner.grid(row=0, column=0, sticky="w", padx=20, pady=20)
+
         self.status_var = tk.StringVar(value="Stopped")
-        status_lbl = ttk.Label(card, textvariable=self.status_var, font=("Helvetica", 14))
-        status_lbl.grid(row=0, column=0, sticky="w", pady=5)
+        status_lbl = ctk.CTkLabel(card_inner, textvariable=self.status_var, font=ctk.CTkFont(size=18, weight="bold"), text_color="#F25C05")
+        status_lbl.grid(row=0, column=0, sticky="w", pady=(0, 10))
         
         self.uptime_var = tk.StringVar(value="Uptime: 00:00:00")
-        uptime_lbl = ttk.Label(card, textvariable=self.uptime_var, font=("Helvetica", 12))
-        uptime_lbl.grid(row=1, column=0, sticky="w", pady=5)
+        uptime_lbl = ctk.CTkLabel(card_inner, textvariable=self.uptime_var, font=ctk.CTkFont(size=14))
+        uptime_lbl.grid(row=1, column=0, sticky="w", pady=(0, 5))
         
         self.resource_var = tk.StringVar(value="CPU: 0.0% | RAM: 0.0 MB")
-        resource_lbl = ttk.Label(card, textvariable=self.resource_var, font=("Helvetica", 12))
-        resource_lbl.grid(row=2, column=0, sticky="w", pady=5)
+        resource_lbl = ctk.CTkLabel(card_inner, textvariable=self.resource_var, font=ctk.CTkFont(size=14))
+        resource_lbl.grid(row=2, column=0, sticky="w")
 
         # Control Buttons
-        btn_frame = ttk.Frame(tab)
-        btn_frame.pack(fill=tk.X)
+        btn_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        btn_frame.grid(row=2, column=0, sticky="ew")
 
-        self.start_btn = ttk.Button(btn_frame, text="Start Server", command=self.on_start_clicked)
+        self.start_btn = ctk.CTkButton(btn_frame, text="Start Server", command=self.on_start_clicked, fg_color="#F25C05", hover_color="#C04803")
         self.start_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        self.stop_btn = ttk.Button(btn_frame, text="Stop Server", command=self.on_stop_clicked, state=tk.DISABLED)
+        self.stop_btn = ctk.CTkButton(btn_frame, text="Stop Server", command=self.on_stop_clicked, state="disabled", fg_color="gray30")
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 10))
         
-        self.restart_btn = ttk.Button(btn_frame, text="Restart Server", command=self.on_restart_clicked, state=tk.DISABLED)
+        self.restart_btn = ctk.CTkButton(btn_frame, text="Restart Server", command=self.on_restart_clicked, state="disabled", fg_color="gray30")
         self.restart_btn.pack(side=tk.LEFT, padx=(0, 10))
         
-        self.dash_btn = ttk.Button(btn_frame, text="Open Web Dashboard", command=self.on_dashboard_clicked)
+        self.dash_btn = ctk.CTkButton(btn_frame, text="Open Web Dashboard", command=self.on_dashboard_clicked)
         self.dash_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        self.update_btn = ttk.Button(btn_frame, text="Manual Update", command=self.on_update_clicked)
+        self.update_btn = ctk.CTkButton(btn_frame, text="Manual Update", command=self.on_update_clicked, fg_color="transparent", border_width=2, text_color=("gray10", "gray90"))
         self.update_btn.pack(side=tk.RIGHT)
 
     def build_diagnostics_tab(self):
-        tab = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(tab, text="Diagnostics & Logs")
+        self.notebook.add("Diagnostics")
+        tab = self.notebook.tab("Diagnostics")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
 
-        lbl = ttk.Label(tab, text="Live Output Log", font=("Helvetica", 12, "bold"))
-        lbl.pack(anchor="w", pady=(0, 5))
+        lbl = ctk.CTkLabel(tab, text="Live Output Log", font=ctk.CTkFont(size=16, weight="bold"))
+        lbl.grid(row=0, column=0, sticky="w", pady=(10, 10))
 
-        self.log_area = scrolledtext.ScrolledText(tab, wrap=tk.WORD, bg="#1e1e1e", fg="#d4d4d4", font=("Courier", 11))
-        self.log_area.pack(fill=tk.BOTH, expand=True)
-        self.log_area.configure(state=tk.DISABLED)
+        self.log_area = ctk.CTkTextbox(tab, font=ctk.CTkFont(family="Courier", size=12), wrap="word", corner_radius=10)
+        self.log_area.grid(row=1, column=0, sticky="nsew")
+        self.log_area.configure(state="disabled")
 
     def build_settings_tab(self):
-        tab = ttk.Frame(self.notebook, padding="20")
-        self.notebook.add(tab, text="Settings")
-
-        ttk.Label(tab, text="Network", font=("Helvetica", 14, "bold")).pack(anchor="w", pady=(0, 10))
+        self.notebook.add("Settings")
+        tab = self.notebook.tab("Settings")
         
-        port_frame = ttk.Frame(tab)
-        port_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(port_frame, text="Local Port: ").pack(side=tk.LEFT)
-        ttk.Entry(port_frame, textvariable=self.port_var, width=10).pack(side=tk.LEFT)
+        ctk.CTkLabel(tab, text="Network", font=ctk.CTkFont(size=18, weight="bold")).grid(row=0, column=0, sticky="w", pady=(10, 10))
         
-        ttk.Checkbutton(tab, text="Enable Cloudflare Tunnel (Public Access)", variable=self.tunnel_var).pack(anchor="w", pady=5)
+        port_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        port_frame.grid(row=1, column=0, sticky="w", pady=(0, 10))
+        ctk.CTkLabel(port_frame, text="Local Port: ").pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkEntry(port_frame, textvariable=self.port_var, width=100).pack(side=tk.LEFT)
+        
+        ctk.CTkSwitch(tab, text="Enable Cloudflare Tunnel (Public Access)", variable=self.tunnel_var, progress_color="#F25C05").grid(row=2, column=0, sticky="w", pady=(0, 20))
 
-        ttk.Label(tab, text="System", font=("Helvetica", 14, "bold")).pack(anchor="w", pady=(20, 10))
-        ttk.Checkbutton(tab, text="Enable Automatic Background Updates (checks every 5 mins)", variable=self.auto_update_var).pack(anchor="w", pady=5)
+        ctk.CTkLabel(tab, text="System", font=ctk.CTkFont(size=18, weight="bold")).grid(row=3, column=0, sticky="w", pady=(10, 10))
+        ctk.CTkSwitch(tab, text="Enable Automatic Background Updates (checks every 5 mins)", variable=self.auto_update_var, progress_color="#F25C05").grid(row=4, column=0, sticky="w")
 
     def process_log_queue(self):
         try:
             while True:
                 line = log_queue.get_nowait()
-                self.log_area.configure(state=tk.NORMAL)
-                self.log_area.insert(tk.END, line + "\\n")
-                self.log_area.see(tk.END)
-                self.log_area.configure(state=tk.DISABLED)
+                self.log_area.configure(state="normal")
+                self.log_area.insert("end", line + "\\n")
+                self.log_area.see("end")
+                self.log_area.configure(state="disabled")
         except queue.Empty:
             pass
         self.root.after(100, self.process_log_queue)
@@ -310,17 +318,17 @@ class LauncherApp:
                         log(self.install_dir, "Auto-updater: new updates found! Applying...")
                         subprocess.run(["git", "pull", "--ff-only"], cwd=str(self.repo_dir), check=True)
                         sync_dependencies(self.install_dir, self.repo_dir)
-                    log(self.install_dir, "Auto-updater: updates successfully applied.")
-                    
-                    if self.server_process and not self.is_restarting:
-                        log(self.install_dir, "Auto-updater: restarting server to apply updates...")
-                        self.on_restart_clicked()
+                        log(self.install_dir, "Auto-updater: updates successfully applied.")
+                        
+                        if self.server_process and not self.is_restarting:
+                            log(self.install_dir, "Auto-updater: restarting server to apply updates...")
+                            self.on_restart_clicked()
             except Exception as e:
                 log(self.install_dir, f"Auto-updater error: {e}")
 
     def on_start_clicked(self):
-        self.start_btn.config(state=tk.DISABLED)
-        self.update_btn.config(state=tk.DISABLED)
+        self.start_btn.configure(state="disabled")
+        self.update_btn.configure(state="disabled")
         self.status_var.set("Starting...")
         
         def task():
@@ -352,27 +360,27 @@ class LauncherApp:
                     if ready:
                         self.status_var.set("Running")
                         log(self.install_dir, "Server is healthy and ready.")
-                        self.stop_btn.config(state=tk.NORMAL)
-                        self.restart_btn.config(state=tk.NORMAL)
+                        self.stop_btn.configure(state="normal", fg_color="#E74C3C", hover_color="#C0392B")
+                        self.restart_btn.configure(state="normal", fg_color="#3498DB", hover_color="#2980B9")
                     else:
                         self.status_var.set("Error: Server Not Ready")
                         log(self.install_dir, "Server health did not become ready within 30 seconds.")
-                        self.stop_btn.config(state=tk.NORMAL) # allow killing
+                        self.stop_btn.configure(state="normal", fg_color="#E74C3C", hover_color="#C0392B") # allow killing
                 self.root.after(0, update_ui_success)
 
             except Exception as exc:
                 log(self.install_dir, f"ERROR: {exc}")
                 def update_ui_error():
                     self.status_var.set("Error starting server")
-                    self.start_btn.config(state=tk.NORMAL)
-                    self.update_btn.config(state=tk.NORMAL)
+                    self.start_btn.configure(state="normal")
+                    self.update_btn.configure(state="normal")
                 self.root.after(0, update_ui_error)
 
         threading.Thread(target=task, daemon=True).start()
 
     def on_stop_clicked(self):
-        self.stop_btn.config(state=tk.DISABLED)
-        self.restart_btn.config(state=tk.DISABLED)
+        self.stop_btn.configure(state="disabled", fg_color="gray30")
+        self.restart_btn.configure(state="disabled", fg_color="gray30")
         if self.server_process:
             self.status_var.set("Stopping...")
             log(self.install_dir, "Stopping server...")
@@ -388,8 +396,8 @@ class LauncherApp:
             self.log_file_handle = None
             
         self.status_var.set("Stopped")
-        self.start_btn.config(state=tk.NORMAL)
-        self.update_btn.config(state=tk.NORMAL)
+        self.start_btn.configure(state="normal")
+        self.update_btn.configure(state="normal")
 
     def on_restart_clicked(self):
         self.is_restarting = True
@@ -401,8 +409,8 @@ class LauncherApp:
         threading.Thread(target=restart_task, daemon=True).start()
 
     def on_update_clicked(self):
-        self.start_btn.config(state=tk.DISABLED)
-        self.update_btn.config(state=tk.DISABLED)
+        self.start_btn.configure(state="disabled")
+        self.update_btn.configure(state="disabled")
         self.status_var.set("Updating...")
         
         def task():
@@ -415,8 +423,8 @@ class LauncherApp:
                 log(self.install_dir, f"Update ERROR: {exc}")
                 self.root.after(0, lambda: self.status_var.set("Update Failed"))
             finally:
-                self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL) if not self.server_process else None)
-                self.root.after(0, lambda: self.update_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.start_btn.configure(state="normal") if not self.server_process else None)
+                self.root.after(0, lambda: self.update_btn.configure(state="normal"))
 
         threading.Thread(target=task, daemon=True).start()
 
@@ -435,7 +443,10 @@ def main() -> int:
 
     setup_environment()
     
-    root = tk.Tk()
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
+
+    root = ctk.CTk()
     app = LauncherApp(root, args)
     root.protocol("WM_DELETE_WINDOW", lambda: (app.on_stop_clicked(), root.destroy()))
     root.mainloop()
