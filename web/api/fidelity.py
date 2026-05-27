@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +24,7 @@ if str(ROOT) not in sys.path:
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
 from web.auth import require_admin, require_step_up
+from web.secure_store import encrypted_temp_file, is_encrypted_path, write_encrypted
 from pydantic import BaseModel, Field
 
 router = APIRouter()
@@ -34,6 +36,7 @@ _LEGACY_STORAGE_STATE = ROOT / ".fidelity_session.json"
 _PW_CONTEXTS: dict[str, object] = {}
 _PW_INSTANCES: dict[str, object] = {}
 _PW_BROWSERS: dict[str, object] = {}
+_FIDELITY_STORAGE_PURPOSE = "fidelity-playwright-storage-state"
 
 LOGIN_URL = "https://digital.fidelity.com/ftgw/digital/login/full-page"
 PORTFOLIO_URL = "https://digital.fidelity.com/ftgw/digital/portfolio/positions"
@@ -52,13 +55,6 @@ def _fidelity_state_path(email: str) -> Path:
 
 def _session_owner_hash(email: str) -> str:
     return hashlib.sha256(_user_key(email).encode()).hexdigest()[:12]
-
-
-def _chmod_private(path: Path):
-    try:
-        os.chmod(path, 0o600)
-    except Exception:
-        pass
 
 
 async def _reset_browser_state(email: str):
@@ -128,18 +124,29 @@ async def _ensure_browser(email: str):
             )
     _PW_BROWSERS[key] = browser
     storage_path = _fidelity_state_path(key)
-    storage = str(storage_path) if storage_path.exists() else None
-    context = await browser.new_context(
-        storage_state=storage,
-        viewport={"width": 1280, "height": 900},
-        user_agent=(
+    storage_tmp = encrypted_temp_file(storage_path, _FIDELITY_STORAGE_PURPOSE) if storage_path.exists() else None
+    context_kwargs = {
+        "viewport": {"width": 1280, "height": 900},
+        "user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        java_script_enabled=True,
-        accept_downloads=False,
-    )
+        "java_script_enabled": True,
+        "accept_downloads": False,
+    }
+    if storage_tmp:
+        context_kwargs["storage_state"] = storage_tmp
+    try:
+        context = await browser.new_context(**context_kwargs)
+    finally:
+        if storage_tmp:
+            try:
+                Path(storage_tmp).unlink()
+            except Exception:
+                pass
+    if storage_path.exists() and not is_encrypted_path(storage_path):
+        await _save_context_storage(context, storage_path)
     # Suppress automation flags
     await context.add_init_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
@@ -153,8 +160,21 @@ async def _save_storage(email: str):
     context = _PW_CONTEXTS.get(key)
     if context:
         path = _fidelity_state_path(key)
-        await context.storage_state(path=str(path))
-        _chmod_private(path)
+        await _save_context_storage(context, path)
+
+
+async def _save_context_storage(context, path: Path):
+    fd, tmp_name = tempfile.mkstemp(prefix="fidelity-storage-", suffix=".json")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        await context.storage_state(path=str(tmp_path))
+        write_encrypted(path, tmp_path.read_bytes(), _FIDELITY_STORAGE_PURPOSE)
+    finally:
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
 
 
 async def _is_logged_in(email: str) -> bool:
@@ -431,6 +451,7 @@ async def fidelity_status(user: dict = Depends(require_admin)):
     return {
         "connected": connected,
         "session_file": path.exists(),
+        "session_encrypted": is_encrypted_path(path),
         "session_scope": "per_user",
         "session_owner_hash": _session_owner_hash(email),
         "legacy_session_file": _LEGACY_STORAGE_STATE.exists(),

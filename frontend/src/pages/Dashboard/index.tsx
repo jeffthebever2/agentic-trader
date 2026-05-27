@@ -26,8 +26,19 @@ const STRATEGY_COLORS: Record<string, string> = {
   unified_brain: '#e879f9',
 }
 
-const CHART_SYMBOLS = ['SPY', 'QQQ', 'NVDA', 'AAPL'] as const
-type ChartSymbol = (typeof CHART_SYMBOLS)[number]
+const DEFAULT_CHART_SYMBOLS = ['SPY', 'QQQ', 'NVDA', 'AAPL']
+type ChartSymbol = string
+
+function loadChartSymbols(): string[] {
+  try {
+    const raw = localStorage.getItem('dash_chart_symbols')
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed.slice(0, 8)
+    }
+  } catch {}
+  return DEFAULT_CHART_SYMBOLS
+}
 
 const DEFAULT_WATCHLIST = ['SPY', 'QQQ', 'AAPL', 'NVDA', 'TSLA', 'META', 'MSFT', 'AMZN']
 const TAPE_TICKERS = ['SPY', 'QQQ', 'AAPL', 'NVDA', 'TSLA', 'META', 'MSFT', 'AMZN', 'GOOGL', 'BRK.B']
@@ -226,8 +237,29 @@ type ChartPeriod = '5d' | '30d' | '90d' | '1y'
 const CHART_PERIODS: ChartPeriod[] = ['5d', '30d', '90d', '1y']
 
 function MarketChartPanel() {
-  const [symbol, setSymbol] = useState<ChartSymbol>('SPY')
+  const [symbols, setSymbols] = useState<string[]>(loadChartSymbols)
+  const [symbol, setSymbol] = useState<ChartSymbol>(() => loadChartSymbols()[0] ?? 'SPY')
   const [period, setPeriod] = useState<ChartPeriod>('30d')
+  const [editingSymbols, setEditingSymbols] = useState(false)
+  const [newTicker, setNewTicker] = useState('')
+
+  function saveSymbols(list: string[]) {
+    const capped = list.slice(0, 8)
+    setSymbols(capped)
+    setSymbol(capped[0] ?? 'SPY')
+    try { localStorage.setItem('dash_chart_symbols', JSON.stringify(capped)) } catch {}
+  }
+
+  function addSymbol() {
+    const t = newTicker.trim().toUpperCase()
+    if (!t || symbols.includes(t) || symbols.length >= 8) return
+    saveSymbols([...symbols, t])
+    setNewTicker('')
+  }
+
+  function removeSymbol(s: string) {
+    saveSymbols(symbols.filter(x => x !== s))
+  }
 
   const chartQ = useQuery({
     queryKey: ['market', 'chart', symbol, period],
@@ -239,22 +271,76 @@ function MarketChartPanel() {
     <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)', padding: '16px 20px 12px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 0 }}>Market Overview</div>
-        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-          {CHART_SYMBOLS.map(s => (
-            <button key={s} id={`dcb-${s}`} onClick={() => setSymbol(s)} className={`dash-chart-btn${symbol === s ? ' active' : ''}`} style={{
-              padding: '3px 10px',
-              borderRadius: 4,
-              border: '1px solid var(--surface-rule)',
-              background: symbol === s ? 'var(--accent)' : 'var(--surface-raised)',
-              color: symbol === s ? '#fff' : 'var(--ink-muted)',
-              fontSize: 11,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}>
-              {s}
-            </button>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+          {symbols.map(s => (
+            <div key={s} style={{ display: 'flex', alignItems: 'center', gap: 0 }}>
+              <button id={`dcb-${s}`} onClick={() => { if (!editingSymbols) setSymbol(s) }} className={`dash-chart-btn${symbol === s ? ' active' : ''}`} style={{
+                padding: '3px 10px',
+                borderRadius: editingSymbols ? '4px 0 0 4px' : 4,
+                border: '1px solid var(--surface-rule)',
+                background: symbol === s ? 'var(--accent)' : 'var(--surface-raised)',
+                color: symbol === s ? '#fff' : 'var(--ink-muted)',
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}>
+                {s}
+              </button>
+              {editingSymbols && (
+                <button onClick={() => removeSymbol(s)} style={{
+                  padding: '3px 6px',
+                  borderRadius: '0 4px 4px 0',
+                  border: '1px solid var(--surface-rule)',
+                  borderLeft: 'none',
+                  background: 'var(--surface-raised)',
+                  color: 'var(--ink-faint)',
+                  fontSize: 11,
+                  cursor: 'pointer',
+                  lineHeight: 1,
+                }}>×</button>
+              )}
+            </div>
           ))}
-          <div style={{ width: 1, background: 'var(--surface-rule)', margin: '0 2px' }} />
+          {editingSymbols && (
+            <>
+              <input
+                type="text"
+                placeholder="Ticker"
+                value={newTicker}
+                onChange={e => setNewTicker(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addSymbol()}
+                style={{
+                  width: 60,
+                  padding: '3px 6px',
+                  borderRadius: 4,
+                  border: '1px solid var(--surface-rule)',
+                  background: 'var(--canvas)',
+                  color: 'var(--ink)',
+                  fontSize: 11,
+                  outline: 'none',
+                }}
+              />
+              <button onClick={addSymbol} style={{
+                padding: '3px 8px',
+                borderRadius: 4,
+                border: '1px solid var(--surface-rule)',
+                background: 'var(--surface-raised)',
+                color: 'var(--ink-muted)',
+                fontSize: 11,
+                cursor: 'pointer',
+              }}>Add</button>
+            </>
+          )}
+          <button onClick={() => setEditingSymbols(v => !v)} style={{
+            padding: '3px 8px',
+            borderRadius: 4,
+            border: '1px solid var(--surface-rule)',
+            background: editingSymbols ? 'var(--surface-soft)' : 'transparent',
+            color: 'var(--ink-faint)',
+            fontSize: 11,
+            cursor: 'pointer',
+          }}>{editingSymbols ? 'Done' : 'Edit'}</button>
+          <div style={{ width: 1, background: 'var(--surface-rule)', margin: '0 2px', alignSelf: 'stretch' }} />
           {CHART_PERIODS.map(p => (
             <button key={p} id={`dcp-${p}`} onClick={() => setPeriod(p)} style={{
               padding: '3px 10px',
@@ -364,6 +450,72 @@ function OpportunitiesPanel() {
           })
         )}
       </div>
+    </div>
+  )
+}
+
+interface NewsItem {
+  headline: string
+  summary: string
+  url: string
+  source: string
+  published_at: string
+}
+
+function NewsPanel() {
+  const newsQ = useQuery({
+    queryKey: ['market', 'news'],
+    queryFn: () => api.get<NewsItem[]>('/market/news').then(r => r.data),
+    staleTime: 240_000,
+    refetchInterval: 300_000,
+  })
+
+  const items = Array.isArray(newsQ.data) ? newsQ.data.slice(0, 8) : []
+
+  function timeAgo(published_at: string) {
+    try {
+      const diff = Date.now() - new Date(published_at).getTime()
+      const h = Math.floor(diff / 3_600_000)
+      const m = Math.floor(diff / 60_000)
+      if (h >= 24) return `${Math.floor(h / 24)}d ago`
+      if (h >= 1) return `${h}h ago`
+      return `${m}m ago`
+    } catch {
+      return ''
+    }
+  }
+
+  return (
+    <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)', padding: '14px 20px' }}>
+      <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 10 }}>Market News</div>
+      {newsQ.isLoading ? (
+        <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>Loading…</div>
+      ) : items.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>No news available</div>
+      ) : (
+        <div>
+          {items.map((it, i) => (
+            <div
+              key={i}
+              onClick={() => window.open(it.url, '_blank', 'noopener')}
+              style={{
+                padding: '8px 12px',
+                borderBottom: '1px solid var(--surface-rule)',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-soft)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              <div style={{ fontSize: 10, color: 'var(--ink-faint)', marginBottom: 3 }}>
+                {it.source} • {timeAgo(it.published_at)}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--ink)', fontWeight: 700, lineHeight: 1.4 }}>
+                {it.headline}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -842,6 +994,7 @@ export default function DashboardPage() {
         <div style={{ borderRight: narrow ? 'none' : '1px solid var(--surface-rule)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <MarketChartPanel />
           <OpportunitiesPanel />
+          <NewsPanel />
           <LiveFeedPanel accounts={accounts} />
         </div>
 

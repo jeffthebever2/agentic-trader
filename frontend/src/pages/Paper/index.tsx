@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import api from '@/api/client'
 import { getPaperStatus, getPaperEquity, getPaperAnalytics, startPaperRunner, stopPaperRunner, getPaperAutostart, setPaperAutostart } from '@/api/paper'
 import { Badge } from '@/components/ui/Badge'
 import { Drawer } from '@/components/ui/Drawer'
@@ -436,9 +437,18 @@ function RunnerControls({ running }: { running: boolean }) {
 export default function PaperPage() {
   const [drawerAccount, setDrawerAccount] = useState<PaperAccount | null>(null)
   const [candFilter, setCandFilter] = useState<string>('all')
+  const [candView, setCandView] = useState<'live' | 'history'>('live')
+  const [historyDate, setHistoryDate] = useState<string>('')
   const [selectedCand, setSelectedCand] = useState<CandidateRow | null>(null)
   const { user } = useAuthStore()
   const isAdmin = user?.role === 'admin'
+
+  const historyQ = useQuery({
+    queryKey: ['paper', 'candidates-history'],
+    queryFn: () => api.get('/paper/candidates-history').then(r => Array.isArray(r.data) ? r.data : []).catch(() => []),
+    staleTime: 300_000,
+    enabled: candView === 'history',
+  })
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['paper', 'status'],
@@ -504,33 +514,142 @@ export default function PaperPage() {
       {/* Candidates */}
       <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, overflow: 'hidden' }}>
         <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--surface-rule)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>Candidates</div>
-          <div id="cand-strategy-tabs" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {[{ id: 'all', label: `All (${allCands.length})` },
-              ...accounts
-                .filter(a => (a.candidates?.count ?? 0) > 0)
-                .map(a => ({ id: a.strategy, label: `${a.label} (${a.candidates?.count ?? 0})` }))
-            ].map(tab => (
+          {/* Live / History top-level toggle */}
+          <div id="cand-view-tabs" style={{ display: 'flex', gap: 4 }}>
+            {(['live', 'history'] as const).map(v => (
               <button
-                key={tab.id}
-                className="cand-strat-tab"
+                key={v}
                 style={{
-                  padding: '2px 9px', fontSize: 11, fontWeight: 600,
+                  padding: '2px 10px', fontSize: 11, fontWeight: 700,
                   border: '1px solid', borderRadius: 4, cursor: 'pointer',
-                  background: candFilter === tab.id ? 'var(--accent)' : 'transparent',
-                  color:      candFilter === tab.id ? '#fff' : 'var(--ink-faint)',
-                  borderColor: candFilter === tab.id ? 'var(--accent)' : 'var(--surface-rule)',
+                  background: candView === v ? 'var(--accent)' : 'transparent',
+                  color:      candView === v ? '#fff' : 'var(--ink-faint)',
+                  borderColor: candView === v ? 'var(--accent)' : 'var(--surface-rule)',
                   transition: 'background .1s, color .1s',
+                  textTransform: 'capitalize',
                 }}
-                onClick={() => setCandFilter(tab.id)}
+                onClick={() => setCandView(v)}
               >
-                {tab.label}
+                {v}
               </button>
             ))}
           </div>
+          {/* Strategy filter tabs — only in Live view */}
+          {candView === 'live' && (
+            <div id="cand-strategy-tabs" style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {[{ id: 'all', label: `All (${allCands.length})` },
+                ...accounts
+                  .filter(a => (a.candidates?.count ?? 0) > 0)
+                  .map(a => ({ id: a.strategy, label: `${a.label} (${a.candidates?.count ?? 0})` }))
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  className="cand-strat-tab"
+                  style={{
+                    padding: '2px 9px', fontSize: 11, fontWeight: 600,
+                    border: '1px solid', borderRadius: 4, cursor: 'pointer',
+                    background: candFilter === tab.id ? 'var(--accent)' : 'transparent',
+                    color:      candFilter === tab.id ? '#fff' : 'var(--ink-faint)',
+                    borderColor: candFilter === tab.id ? 'var(--accent)' : 'var(--surface-rule)',
+                    transition: 'background .1s, color .1s',
+                  }}
+                  onClick={() => setCandFilter(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-        <CandidatesTable rows={filteredCands} onSelect={(r) => setSelectedCand(r)} />
+
+        {candView === 'live' ? (
+          <CandidatesTable rows={filteredCands} onSelect={(r) => setSelectedCand(r)} />
+        ) : (
+          <div>
+            {/* Date filter */}
+            <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <label style={{ fontSize: 11, color: 'var(--ink-faint)' }}>Filter by date:</label>
+              <input
+                type="date"
+                value={historyDate}
+                onChange={e => setHistoryDate(e.target.value)}
+                style={{
+                  padding: '4px 8px', background: 'var(--surface-soft)',
+                  border: '1px solid var(--surface-rule)', borderRadius: 6,
+                  color: 'var(--ink)', fontSize: 12, fontFamily: 'inherit',
+                }}
+              />
+              {historyDate && (
+                <button
+                  onClick={() => setHistoryDate('')}
+                  style={{ fontSize: 11, color: 'var(--ink-faint)', background: 'none', border: 'none', cursor: 'pointer' }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+
+            {historyQ.isLoading ? (
+              <div style={{ padding: '24px 16px', color: 'var(--ink-faint)', fontSize: 12, textAlign: 'center' }}>Loading history…</div>
+            ) : (() => {
+              const histRows = (historyQ.data as Array<CandidateRow & { date?: string }> | undefined) ?? []
+              const filtered = historyDate ? histRows.filter(r => (r.date ?? '').startsWith(historyDate)) : histRows
+
+              if (!histRows.length) {
+                return <div style={{ padding: '24px 16px', color: 'var(--ink-faint)', fontSize: 12, textAlign: 'center' }}>No historical candidates available</div>
+              }
+              if (!filtered.length) {
+                return <div style={{ padding: '24px 16px', color: 'var(--ink-faint)', fontSize: 12, textAlign: 'center' }}>No candidates for selected date</div>
+              }
+
+              return (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid var(--surface-rule)' }}>
+                        {['Date', 'Strategy', 'Ticker', 'Entry', 'Target', 'Stop', 'Score', 'ML%', 'Gate'].map(h => (
+                          <th key={h} style={{ padding: '8px 12px', fontWeight: 500, color: 'var(--ink-faint)', whiteSpace: 'nowrap',
+                            textAlign: h === 'Date' || h === 'Strategy' || h === 'Ticker' || h === 'Gate' ? 'left' : 'right' }}>
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filtered.slice(0, 200).map((row, i) => {
+                        const gateStatus = row.gate_status ?? ''
+                        const gateBg   = gateStatus === 'PASS' ? '#4ade8022' : '#fbbf2422'
+                        const gateText = gateStatus === 'PASS' ? '#4ade80'   : '#fbbf24'
+                        return (
+                          <tr key={i} className="tr-hover" onClick={() => setSelectedCand(row)}
+                              style={{ borderBottom: '1px solid var(--surface-rule)', cursor: 'pointer' }}>
+                            <td style={{ padding: '7px 12px', color: 'var(--ink-faint)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
+                              {row.date ?? '—'}
+                            </td>
+                            <td style={{ padding: '7px 12px', color: 'var(--ink-faint)' }}>{row._stratLabel || row.account || row.strategy || ''}</td>
+                            <td style={{ padding: '7px 12px', fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{row.ticker}</td>
+                            <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>${Number(row.entry).toFixed(2)}</td>
+                            <td style={{ padding: '7px 12px', textAlign: 'right', color: '#4ade80', fontFamily: 'var(--font-mono)' }}>${Number(row.target).toFixed(2)}</td>
+                            <td style={{ padding: '7px 12px', textAlign: 'right', color: '#f87171', fontFamily: 'var(--font-mono)' }}>${Number(row.stop).toFixed(2)}</td>
+                            <td style={{ padding: '7px 12px', textAlign: 'right', fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>{Math.round(Number(row.score))}</td>
+                            <td style={{ padding: '7px 12px', textAlign: 'right', color: '#67e8f9', fontFamily: 'var(--font-mono)' }}>{fmtPct(Number(row.ml_probability))}</td>
+                            <td style={{ padding: '7px 12px' }}>
+                              <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4, background: gateBg, color: gateText }}>
+                                {gateStatus || '—'}
+                              </span>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            })()}
+          </div>
+        )}
       </div>
 
       {/* Runner log */}

@@ -17,6 +17,7 @@ from web.auth import get_current_user
 from web.api.fidelity import _fidelity_state_path, _session_owner_hash
 from web.api.paper import AUTOSTART_CONFIG_PATH, DEFAULT_AUTOSTART_CONFIG, _process_status
 from web.api.webull_portfolio import _wb_owner_hash, _wb_state_path
+from web.secure_store import broker_session_key_status, is_encrypted_path
 
 router = APIRouter()
 
@@ -93,16 +94,39 @@ async def live_verification(user: dict = Depends(get_current_user)):
         },
     ))
 
+    key_status = broker_session_key_status()
+    checks.append(_check(
+        "broker_session_key",
+        "Broker session encryption key",
+        "pass" if key_status.get("configured") and key_status.get("private_file") is not False else "warn",
+        (
+            "Broker session encryption key is supplied by the environment."
+            if key_status.get("source") == "env"
+            else "Broker session encryption key is stored locally with private permissions."
+            if key_status.get("source") == "local_file" and key_status.get("private_file") is True
+            else "Set BROKER_SESSION_KEY for strongest protection, or ensure tmp/broker_session.key is chmod 600."
+        ),
+        key_status,
+    ))
+
     fidelity_path = _fidelity_state_path(email)
     fidelity_exists, fidelity_private = _exists_private(fidelity_path)
+    fidelity_encrypted = is_encrypted_path(fidelity_path)
     checks.append(_check(
         "fidelity_isolation",
-        "Fidelity per-user isolation",
-        "pass" if not fidelity_exists or fidelity_private else "warn",
-        "Session state is scoped to this Access email." if not fidelity_exists or fidelity_private else "Session state is scoped per user but file permissions should be private.",
+        "Fidelity encrypted per-user session",
+        "pass" if not fidelity_exists or (fidelity_private and fidelity_encrypted) else "warn",
+        (
+            "Session state is scoped to this Access email and encrypted at rest."
+            if fidelity_exists and fidelity_private and fidelity_encrypted
+            else "No Fidelity session file exists yet."
+            if not fidelity_exists
+            else "Session state is scoped per user but should be encrypted and chmod 600."
+        ),
         {
             "session_scope": "per_user",
             "session_file": fidelity_exists,
+            "encrypted": fidelity_encrypted,
             "private_file": fidelity_private,
             "owner_hash": _session_owner_hash(email),
         },
@@ -110,14 +134,22 @@ async def live_verification(user: dict = Depends(get_current_user)):
 
     webull_path = _wb_state_path(email)
     webull_exists, webull_private = _exists_private(webull_path)
+    webull_encrypted = is_encrypted_path(webull_path)
     checks.append(_check(
         "webull_isolation",
-        "Webull per-user isolation",
-        "pass" if not webull_exists or webull_private else "warn",
-        "Session state is scoped to this Access email." if not webull_exists or webull_private else "Session state is scoped per user but file permissions should be private.",
+        "Webull encrypted per-user session",
+        "pass" if not webull_exists or (webull_private and webull_encrypted) else "warn",
+        (
+            "Session state is scoped to this Access email and encrypted at rest."
+            if webull_exists and webull_private and webull_encrypted
+            else "No Webull session file exists yet."
+            if not webull_exists
+            else "Session state is scoped per user but should be encrypted and chmod 600."
+        ),
         {
             "session_scope": "per_user",
             "session_file": webull_exists,
+            "encrypted": webull_encrypted,
             "private_file": webull_private,
             "owner_hash": _wb_owner_hash(email),
         },

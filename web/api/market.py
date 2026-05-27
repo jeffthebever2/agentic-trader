@@ -223,3 +223,93 @@ async def market_sparklines():
 async def sp500_list():
     tickers = await asyncio.get_event_loop().run_in_executor(None, _get_sp500_tickers)
     return {"tickers": tickers, "count": len(tickers)}
+
+
+_news_cache: dict = {}
+
+@router.get("/market/news")
+async def market_news(symbol: str):
+    """Fetch recent news for a ticker via yfinance."""
+    global _news_cache
+    cache_key = symbol.upper()
+    cached = _news_cache.get(cache_key)
+    if cached and (time.time() - cached.get("_ts", 0)) < 900:  # 15 min TTL
+        return cached
+
+    def _fetch():
+        import yfinance as yf
+        ticker = yf.Ticker(symbol.upper())
+        raw = ticker.news or []
+        items = []
+        for n in raw[:10]:
+            # yfinance v0.2+ nests content inside 'content' key
+            content = n.get("content", n)
+            title = content.get("title", "")
+            summary = content.get("summary", "")
+            url_obj = content.get("canonicalUrl") or content.get("url") or {}
+            url = url_obj.get("url", "") if isinstance(url_obj, dict) else str(url_obj)
+            if not url:
+                url = n.get("link", "")
+            provider = content.get("provider") or {}
+            source = provider.get("displayName", "") if isinstance(provider, dict) else str(provider)
+            if not source:
+                source = n.get("publisher", "")
+            pub = content.get("pubDate", "") or str(n.get("providerPublishTime", ""))
+            if title:
+                items.append({"title": title, "summary": summary, "url": url,
+                               "source": source, "published": pub})
+        return items
+
+    try:
+        items = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+    except Exception as e:
+        log.warning(f"News fetch failed for {symbol}: {e}")
+        items = []
+
+    result = {"symbol": symbol.upper(), "news": items, "_ts": int(time.time())}
+    _news_cache[cache_key] = result
+    return result
+
+
+@router.get("/market/quote-detail")
+async def market_quote_detail(symbol: str):
+    """Fetch price, change, 52w range, volume for a single ticker."""
+    def _fetch():
+        import yfinance as yf
+        t = yf.Ticker(symbol.upper())
+        info = t.info or {}
+        # Fallback to fast_info if info is empty
+        fi = getattr(t, "fast_info", None)
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        if price is None and fi:
+            price = getattr(fi, "last_price", None)
+        prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
+        if prev_close is None and fi:
+            prev_close = getattr(fi, "previous_close", None)
+        change = round(float(price) - float(prev_close), 2) if price and prev_close else None
+        change_pct = round(change / float(prev_close) * 100, 2) if change and prev_close else None
+        return {
+            "symbol": symbol.upper(),
+            "price": round(float(price), 2) if price else None,
+            "change": change,
+            "change_pct": change_pct,
+            "prev_close": round(float(prev_close), 2) if prev_close else None,
+            "day_high": info.get("dayHigh") or info.get("regularMarketDayHigh"),
+            "day_low": info.get("dayLow") or info.get("regularMarketDayLow"),
+            "week52_high": info.get("fiftyTwoWeekHigh"),
+            "week52_low": info.get("fiftyTwoWeekLow"),
+            "volume": info.get("volume") or info.get("regularMarketVolume"),
+            "avg_volume": info.get("averageVolume"),
+            "market_cap": info.get("marketCap"),
+            "pe_ratio": info.get("trailingPE"),
+            "short_name": info.get("shortName") or info.get("longName") or symbol.upper(),
+            "sector": info.get("sector", ""),
+            "industry": info.get("industry", ""),
+        }
+
+    try:
+        data = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+    except Exception as e:
+        log.warning(f"Quote detail failed for {symbol}: {e}")
+        data = {"symbol": symbol.upper(), "price": None, "change": None, "change_pct": None}
+    return data

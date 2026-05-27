@@ -800,11 +800,23 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [interval, setInterval]   = useState('D')
   const [chartStyle, setChartStyle] = useState('1')
+  const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
 
   const posQ = useQuery<{ positions: FidelityPosition[]; grand_totals: FidelitySummary }>({
     queryKey: ['fidelity', 'positions'],
     queryFn: () => api.get('/fidelity/positions').then(r => r.data),
     refetchInterval: 60_000,
+  })
+
+  useEffect(() => {
+    if (posQ.data) setRefreshedAt(new Date())
+  }, [posQ.data])
+
+  const fidStatusQ = useQuery<FidelityStatus>({
+    queryKey: ['fidelity', 'status'],
+    queryFn: () => api.get('/fidelity/status').then(r => r.data),
+    refetchInterval: 60_000,
+    retry: false,
   })
 
   const logoutMut = useMutation({
@@ -814,6 +826,7 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
 
   const positions: FidelityPosition[] = posQ.data?.positions ?? []
   const grand = posQ.data?.grand_totals
+  const fidConnected = fidStatusQ.data?.connected ?? true
 
   function gainColor(s?: string | null): string {
     if (!s) return 'var(--ink-muted)'
@@ -830,7 +843,15 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
       <div style={{ background: 'var(--surface)', borderBottom: '1px solid var(--surface-rule)', padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 0, flexShrink: 0, minHeight: 54 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingRight: 20, borderRight: '1px solid var(--surface-rule)', marginRight: 20, flexShrink: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)' }}>Fidelity</div>
-          <StatusBadge connected={true} />
+          <span style={{
+            fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+            display: 'inline-flex', alignItems: 'center', gap: 5,
+            background: fidConnected ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.15)',
+            color: fidConnected ? '#4ade80' : '#f87171',
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: fidConnected ? '#4ade80' : '#f87171', display: 'inline-block' }} />
+            {fidConnected ? 'Connected' : 'Disconnected'}
+          </span>
         </div>
         {grand?.total_value && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 36, flex: 1 }}>
@@ -866,9 +887,16 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
         <div style={{ width: 288, borderRight: '1px solid var(--surface-rule)', display: 'flex', flexDirection: 'column', flexShrink: 0, background: 'var(--surface)' }}>
           <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Holdings</div>
-            <button onClick={() => qc.invalidateQueries({ queryKey: ['fidelity', 'positions'] })}
-              style={{ fontSize: 14, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 700, lineHeight: 1, padding: 0 }}
-              title="Refresh positions">↻</button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {refreshedAt && (
+                <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>
+                  {refreshedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
+                </span>
+              )}
+              <button onClick={() => qc.invalidateQueries({ queryKey: ['fidelity', 'positions'] })}
+                style={{ fontSize: 14, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 700, lineHeight: 1, padding: 0 }}
+                title="Refresh positions">↻ Refresh</button>
+            </div>
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 5 }}>
             {posQ.isLoading ? (
@@ -898,6 +926,32 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
               </button>
             ))}
           </div>
+          {/* Positions table with Day P&L column */}
+          {positions.length > 0 && (
+            <div style={{ borderTop: '1px solid var(--surface-rule)', flexShrink: 0, overflowX: 'auto', maxHeight: 220, overflowY: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 260 }}>
+                <thead>
+                  <tr>
+                    {['Symbol', 'Mkt Val', 'Day P&L'].map(h => (
+                      <th key={h} style={{ fontSize: 10, fontWeight: 700, color: 'var(--ink-faint)', textTransform: 'uppercase', letterSpacing: '.04em', padding: '6px 8px', borderBottom: '1px solid var(--surface-rule)', textAlign: 'left', whiteSpace: 'nowrap', background: 'var(--surface)' }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {positions.map(p => (
+                    <tr key={p.symbol} style={{ cursor: 'pointer' }} onClick={() => setSelectedSymbol(p.symbol)}>
+                      <td style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink)', padding: '5px 8px', borderBottom: '1px solid var(--surface-rule)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>{p.symbol}</td>
+                      <td style={{ fontSize: 11, color: 'var(--ink)', padding: '5px 8px', borderBottom: '1px solid var(--surface-rule)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>{p.market_value ?? '—'}</td>
+                      <td style={{ fontSize: 11, fontWeight: 600, padding: '5px 8px', borderBottom: '1px solid var(--surface-rule)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap', color: gainColor(p.today_gain_loss) }}>
+                        {p.today_gain_loss ?? '—'}
+                        {p.today_gain_pct ? <span style={{ fontSize: 10, marginLeft: 3 }}>{p.today_gain_pct}</span> : null}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         {/* Chart area */}

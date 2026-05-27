@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import api from '@/api/client'
 import { getMlStatus } from '@/api/ml'
 import { getPaperStatus } from '@/api/paper'
 import { useWebSocket } from '@/hooks/useWebSocket'
@@ -225,6 +226,12 @@ export default function MLPage() {
     queryKey: ['ml', 'status'],
     queryFn: getMlStatus,
     refetchInterval: 60_000,
+  })
+
+  const { data: mlHistory } = useQuery({
+    queryKey: ['ml', 'history'],
+    queryFn: () => api.get('/ml/history').then(r => Array.isArray(r.data) ? r.data : []).catch(() => []),
+    staleTime: 300_000,
   })
 
   const { send, close } = useWebSocket(WS_ML_TRAIN, {
@@ -476,21 +483,25 @@ export default function MLPage() {
         }}>
           {mlData ? (
             <>
-              {/* Status + basic metrics */}
+              {/* Status badge */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
                 <div id="ml-status-badge">
                   <Badge variant={mlData.bundle_exists ? 'success' : 'danger'}>
                     {mlData.status_label ?? (mlData.bundle_exists ? 'Model Loaded' : 'No Model')}
                   </Badge>
                 </div>
-                {mlData.created_at && (
-                  <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>
-                    Last trained: {mlData.created_at}
-                  </div>
-                )}
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: 16, marginBottom: 20 }}>
+                {/* Last Trained — first, prominent */}
+                {mlData.created_at && (
+                  <div style={{ background: 'var(--surface-soft)', borderRadius: 6, padding: 12, gridColumn: 'span 2' }}>
+                    <div style={{ fontSize: 10, color: 'var(--ink-faint)', marginBottom: 4 }}>Last Trained</div>
+                    <div id="ml-last-trained" style={{ fontSize: 14, fontWeight: 700, color: 'var(--accent)' }}>
+                      {new Date(mlData.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                )}
                 {[
                   { label: 'Confidence Threshold', value: mlData.settings?.ml_probability_threshold?.toFixed(2), id: 'ml-confidence-thresh' },
                   { label: 'Features', value: mlData.settings?.feature_count, id: 'ml-features' },
@@ -515,6 +526,85 @@ export default function MLPage() {
                   <FeatureImportanceBar features={mlData.feature_importance} topN={15} />
                 </div>
               )}
+
+              {/* Model History sub-section */}
+              <details style={{ marginTop: 20 }}>
+                <summary style={{
+                  cursor: 'pointer', userSelect: 'none',
+                  fontSize: 13, fontWeight: 600, color: 'var(--ink)',
+                  background: 'var(--surface-soft)', border: '1px solid var(--surface-rule)',
+                  borderRadius: 6, padding: '10px 14px', listStyle: 'none',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                }}>
+                  <span>Model History</span>
+                  <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>▼</span>
+                </summary>
+                <div style={{ marginTop: 8 }}>
+                  {(mlHistory as unknown[] | undefined)?.length ? (
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr style={{ borderBottom: '1px solid var(--surface-rule)' }}>
+                            {['Version / Date', 'ROC AUC', 'Features', 'Train Rows', 'Hold Days', 'Status'].map(h => (
+                              <th key={h} style={{ padding: '8px 12px', fontWeight: 500, color: 'var(--ink-faint)', textAlign: 'left', whiteSpace: 'nowrap' }}>{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(mlHistory as Array<Record<string, unknown>>).map((m, i) => {
+                            const isCurrent = !!(m.is_current ?? i === 0)
+                            return (
+                              <tr key={i} style={{ borderBottom: '1px solid var(--surface-rule)', background: isCurrent ? 'rgba(214,58,0,0.06)' : 'transparent' }}>
+                                <td style={{ padding: '7px 12px', color: 'var(--ink)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
+                                  {m.created_at ? new Date(m.created_at as string).toLocaleString() : (m.version as string) ?? `v${i + 1}`}
+                                  {isCurrent && (
+                                    <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, color: 'var(--accent)', background: 'rgba(214,58,0,0.12)', padding: '1px 5px', borderRadius: 3 }}>
+                                      CURRENT
+                                    </span>
+                                  )}
+                                </td>
+                                <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>
+                                  {m.roc_auc != null ? Number(m.roc_auc).toFixed(4) : (m.metrics as Record<string, unknown> | undefined)?.win_probability != null ? Number(((m.metrics as Record<string, unknown>).win_probability as Record<string, unknown>)?.roc_auc).toFixed(4) : '—'}
+                                </td>
+                                <td style={{ padding: '7px 12px', color: 'var(--ink-muted)' }}>{(m.feature_count ?? (m.settings as Record<string, unknown> | undefined)?.feature_count ?? '—') as string}</td>
+                                <td style={{ padding: '7px 12px', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>
+                                  {m.train_rows != null ? Number(m.train_rows).toLocaleString() : ((m.settings as Record<string, unknown> | undefined)?.train_rows != null ? Number((m.settings as Record<string, unknown>).train_rows).toLocaleString() : '—')}
+                                </td>
+                                <td style={{ padding: '7px 12px', color: 'var(--ink-muted)' }}>{(m.hold ?? (m.settings as Record<string, unknown> | undefined)?.hold ?? '—') as string}</td>
+                                <td style={{ padding: '7px 12px' }}>
+                                  <span style={{ fontSize: 10, fontWeight: 700, color: isCurrent ? 'var(--accent)' : 'var(--ink-faint)' }}>
+                                    {isCurrent ? 'Active' : (m.status as string) ?? 'Archived'}
+                                  </span>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div style={{ padding: '16px 12px', background: 'var(--surface-soft)', borderRadius: 6 }}>
+                      {/* Single-model fallback: show current model in mini-table */}
+                      <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 12 }}>No version history available. Current model:</div>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '6px 16px', fontSize: 12 }}>
+                        {[
+                          ['Version / Date', mlData.created_at ? new Date(mlData.created_at).toLocaleString() : '—'],
+                          ['ROC AUC', mlData.metrics?.win_probability?.roc_auc?.toFixed(4) ?? '—'],
+                          ['Features', mlData.settings?.feature_count ?? '—'],
+                          ['Train Rows', mlData.settings?.train_rows?.toLocaleString() ?? '—'],
+                          ['Hold Days', mlData.settings?.hold ?? '—'],
+                          ['Status', 'Active'],
+                        ].map(([label, value]) => (
+                          <>
+                            <span key={`l-${label}`} style={{ color: 'var(--ink-faint)', fontWeight: 500 }}>{label}</span>
+                            <span key={`v-${label}`} style={{ color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{String(value)}</span>
+                          </>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </details>
             </>
           ) : (
             <div style={{ color: 'var(--ink-faint)', fontSize: 13 }}>No ML model data available.</div>
@@ -574,6 +664,20 @@ export default function MLPage() {
               disabled={training || !trainInput}
             >
               {training ? 'Training…' : 'Start Training'}
+            </button>
+            <button
+              id="ml-retrain-all-btn"
+              className="btn-secondary"
+              disabled={training}
+              onClick={() => {
+                api.post('/ml/train/all', {}).catch(() =>
+                  api.post('/ml/retrain-all', {}).catch(() =>
+                    window.alert('Not supported by current backend')
+                  )
+                )
+              }}
+            >
+              Retrain All (Auto)
             </button>
             {training && (
               <button

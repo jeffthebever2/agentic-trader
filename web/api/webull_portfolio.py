@@ -1,7 +1,5 @@
 """Webull real-account portfolio integration (per-user isolated)."""
 import hashlib
-import json
-import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -15,12 +13,14 @@ from pydantic import BaseModel
 from tradingagents.compliance import validate_live_order
 
 from web.auth import require_admin, require_step_up, get_current_user
+from web.secure_store import is_encrypted_path, read_encrypted_json, write_encrypted_json
 
 router = APIRouter()
 
 # Per-user Webull session: each user's broker login is isolated by email.
-# Instance objects are cached in-process; tokens persist to a per-user file.
+# Instance objects and live tokens are cached in-process; durable metadata is encrypted.
 _wb_instances: dict[str, object] = {}
+_WEBULL_SESSION_PURPOSE = "webull-session-metadata"
 
 
 def _wb_state_path(email: str) -> Path:
@@ -48,7 +48,10 @@ def _load_session(email: str) -> dict:
     path = _wb_state_path(email)
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            session = read_encrypted_json(path, _WEBULL_SESSION_PURPOSE)
+            if not is_encrypted_path(path):
+                write_encrypted_json(path, session, _WEBULL_SESSION_PURPOSE)
+            return session
         except Exception:
             pass
     return {}
@@ -56,11 +59,7 @@ def _load_session(email: str) -> dict:
 
 def _save_session(email: str, data: dict):
     path = _wb_state_path(email)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except Exception:
-        pass
+    write_encrypted_json(path, data, _WEBULL_SESSION_PURPOSE)
 
 
 def _clear_session(email: str):
@@ -125,6 +124,7 @@ async def wb_status(user: dict = Depends(get_current_user)):
         "account_id": wb._account_id or session.get("account_id"),
         "token_expire": str(wb._token_expire) if wb._token_expire else None,
         "session_file": _wb_state_path(user["email"]).exists(),
+        "session_encrypted": is_encrypted_path(_wb_state_path(user["email"])),
         "session_scope": "per_user",
         "session_owner_hash": _wb_owner_hash(user["email"]),
     }
@@ -151,14 +151,14 @@ async def wb_login(req: LoginRequest, admin: dict = Depends(require_admin)):
                 password=req.password,
                 device_name="TradingAgents",
                 mfa=req.mfa_code,
-                save_token=True,
+                save_token=False,
             )
         else:
             result = wb.login(
                 username=req.username,
                 password=req.password,
                 device_name="TradingAgents",
-                save_token=True,
+                save_token=False,
             )
 
         if not wb._access_token:

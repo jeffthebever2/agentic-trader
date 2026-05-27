@@ -536,6 +536,375 @@ function ProvidersTab() {
   )
 }
 
+// ── Analytics ─────────────────────────────────────────────────────────────────
+
+interface StrategyStats { win_rate: number; total_pnl: number; trades: number }
+interface AnalyticsData {
+  win_rate: number
+  total_pnl: number
+  total_trades: number
+  by_strategy?: Record<string, StrategyStats>
+}
+
+function AnalyticsTab() {
+  const { data, isLoading } = useQuery<AnalyticsData>({
+    queryKey: ['admin', 'analytics'],
+    queryFn: () => api.get('/paper/analytics').then(r => r.data),
+  })
+  if (isLoading) return <LoadingState />
+
+  const winRateColor = (wr: number) =>
+    wr >= 0.65 ? '#059669' : wr >= 0.5 ? '#d97706' : '#dc2626'
+
+  const pnlColor = (pnl: number) => (pnl >= 0 ? '#059669' : '#dc2626')
+
+  const strategies = Object.entries(data?.by_strategy ?? {})
+
+  return (
+    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14 }}>
+        <div style={cardStyle}>
+          <div style={labelStyle}>Win Rate</div>
+          <div style={{ ...valueStyle, color: winRateColor(data?.win_rate ?? 0) }}>
+            {data ? `${(data.win_rate * 100).toFixed(1)}%` : '—'}
+          </div>
+        </div>
+        <div style={cardStyle}>
+          <div style={labelStyle}>Total P&L</div>
+          <div style={{ ...valueStyle, color: pnlColor(data?.total_pnl ?? 0) }}>
+            {data ? `$${data.total_pnl.toFixed(2)}` : '—'}
+          </div>
+        </div>
+        <div style={cardStyle}>
+          <div style={labelStyle}>Total Trades</div>
+          <div style={valueStyle}>{data?.total_trades ?? '—'}</div>
+        </div>
+      </div>
+
+      {strategies.length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink-muted)', marginBottom: 8 }}>
+            Per-Strategy Breakdown
+          </div>
+          <table style={tableStyle}>
+            <thead>
+              <tr>
+                <th style={thStyle}>Strategy</th>
+                <th style={thStyle}>Trades</th>
+                <th style={thStyle}>Win Rate</th>
+                <th style={thStyle}>P&L</th>
+              </tr>
+            </thead>
+            <tbody>
+              {strategies.map(([name, s]) => (
+                <tr key={name}>
+                  <td style={tdStyle}>{name}</td>
+                  <td style={tdStyle}>{s.trades}</td>
+                  <td style={{ ...tdStyle, color: winRateColor(s.win_rate) }}>
+                    {(s.win_rate * 100).toFixed(1)}%
+                  </td>
+                  <td style={{ ...tdStyle, color: pnlColor(s.total_pnl) }}>
+                    ${s.total_pnl.toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Approvals ─────────────────────────────────────────────────────────────────
+
+interface HilApproval {
+  id: string
+  ticker: string
+  action: string
+  shares: number
+  price: number
+  strategy: string
+  created_at: string
+  expires_at: string
+}
+
+function ApprovalsTab() {
+  const qc = useQueryClient()
+  const [msgs, setMsgs] = useState<Record<string, string>>({})
+
+  const { data, isLoading } = useQuery<HilApproval[]>({
+    queryKey: ['admin', 'approvals'],
+    queryFn: () => api.get('/paper/hil/pending').then(r => r.data),
+    refetchInterval: 30_000,
+  })
+
+  const act = async (id: string, endpoint: string, label: string) => {
+    try {
+      await api.post(endpoint, { id })
+      setMsgs(m => ({ ...m, [id]: label }))
+      qc.invalidateQueries({ queryKey: ['admin', 'approvals'] })
+    } catch {
+      setMsgs(m => ({ ...m, [id]: 'Error' }))
+    }
+  }
+
+  if (isLoading) return <LoadingState />
+
+  const items = data ?? []
+
+  if (items.length === 0) {
+    return (
+      <div style={{ padding: 40, textAlign: 'center', color: 'var(--ink-faint)', fontSize: 13 }}>
+        No pending approvals
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ padding: 20 }}>
+      <table style={tableStyle}>
+        <thead>
+          <tr>
+            <th style={thStyle}>Ticker</th>
+            <th style={thStyle}>Action</th>
+            <th style={thStyle}>Shares</th>
+            <th style={thStyle}>Price</th>
+            <th style={thStyle}>Strategy</th>
+            <th style={thStyle}>Created</th>
+            <th style={thStyle}>Expires</th>
+            <th style={thStyle}>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map(item => (
+            <tr key={item.id}>
+              <td style={{ ...tdStyle, fontWeight: 600 }}>{item.ticker}</td>
+              <td style={{ ...tdStyle, color: item.action === 'BUY' ? '#059669' : '#dc2626', fontWeight: 600 }}>
+                {item.action}
+              </td>
+              <td style={tdStyle}>{item.shares}</td>
+              <td style={tdStyle}>${item.price.toFixed(2)}</td>
+              <td style={tdStyle}>{item.strategy}</td>
+              <td style={{ ...tdStyle, fontSize: 11 }}>
+                {item.created_at ? new Date(item.created_at).toLocaleString() : '—'}
+              </td>
+              <td style={{ ...tdStyle, fontSize: 11 }}>
+                {item.expires_at ? new Date(item.expires_at).toLocaleString() : '—'}
+              </td>
+              <td style={{ ...tdStyle }}>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <button
+                    className="btn-primary"
+                    style={{ fontSize: 11, padding: '3px 10px', background: '#059669', borderColor: '#059669' }}
+                    onClick={() => act(item.id, '/paper/hil/approve', 'Approved')}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    className="btn-danger"
+                    style={{ fontSize: 11, padding: '3px 10px' }}
+                    onClick={() => act(item.id, '/paper/hil/reject', 'Rejected')}
+                  >
+                    Reject
+                  </button>
+                  {msgs[item.id] && (
+                    <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{msgs[item.id]}</span>
+                  )}
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ── Security ──────────────────────────────────────────────────────────────────
+
+interface UserWithSecurity {
+  email: string
+  totp_enabled?: boolean
+  passkeys?: unknown[]
+  step_up_method?: string
+}
+
+function SecurityTab() {
+  const { data, isLoading } = useQuery<UserWithSecurity[]>({
+    queryKey: ['admin', 'users'],
+    queryFn: () => api.get<{ users: UserWithSecurity[] }>('/auth/users').then(r => r.data.users),
+  })
+
+  if (isLoading) return <LoadingState />
+
+  const users = data ?? []
+  const totpCount = users.filter(u => u.totp_enabled).length
+  const passkeysCount = users.filter(u => (u.passkeys?.length ?? 0) > 0).length
+
+  const stepUpColor = (method?: string) => {
+    if (method === 'passkey') return { background: 'rgba(5,150,105,.15)', color: '#059669' }
+    if (method === 'totp') return { background: 'rgba(37,99,235,.15)', color: '#2563eb' }
+    return { background: 'var(--surface-soft)', color: 'var(--ink-faint)' }
+  }
+
+  return (
+    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 14 }}>
+        <div style={cardStyle}>
+          <div style={labelStyle}>TOTP Enabled</div>
+          <div style={valueStyle}>{totpCount}</div>
+        </div>
+        <div style={cardStyle}>
+          <div style={labelStyle}>Has Passkeys</div>
+          <div style={valueStyle}>{passkeysCount}</div>
+        </div>
+      </div>
+
+      <table style={tableStyle}>
+        <thead>
+          <tr>
+            <th style={thStyle}>Email</th>
+            <th style={thStyle}>2FA Method</th>
+            <th style={thStyle}>TOTP</th>
+            <th style={thStyle}>Passkeys</th>
+            <th style={thStyle}>Step-Up</th>
+          </tr>
+        </thead>
+        <tbody>
+          {users.map(u => {
+            const method = u.totp_enabled ? 'TOTP' : (u.passkeys?.length ?? 0) > 0 ? 'Passkey' : 'None'
+            const sc = stepUpColor(u.step_up_method)
+            return (
+              <tr key={u.email}>
+                <td style={{ ...tdStyle, fontFamily: 'var(--font-mono)', fontSize: 12 }}>{u.email}</td>
+                <td style={tdStyle}>{method}</td>
+                <td style={tdStyle}>
+                  {u.totp_enabled ? <span style={{ color: '#059669' }}>✓</span> : '—'}
+                </td>
+                <td style={tdStyle}>
+                  {(u.passkeys?.length ?? 0) > 0 ? (
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                      minWidth: 20, height: 20, borderRadius: 999, fontSize: 11, fontWeight: 700,
+                      background: 'rgba(37,99,235,.15)', color: '#2563eb', padding: '0 6px',
+                    }}>
+                      {u.passkeys?.length}
+                    </span>
+                  ) : '—'}
+                </td>
+                <td style={tdStyle}>
+                  <span style={{
+                    display: 'inline-flex', padding: '2px 8px', borderRadius: 999,
+                    fontSize: 11, fontWeight: 600, ...sc,
+                  }}>
+                    {u.step_up_method || 'none'}
+                  </span>
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// ── Paper Runner ──────────────────────────────────────────────────────────────
+
+interface PaperStatus {
+  process?: { running: boolean; pid?: number }
+  date?: string
+  log_lines?: string[]
+}
+
+function RunnerTab() {
+  const [msg, setMsg] = useState('')
+
+  const { data, isLoading, refetch } = useQuery<PaperStatus>({
+    queryKey: ['admin', 'runner'],
+    queryFn: () => api.get('/paper/status').then(r => r.data),
+    refetchInterval: 15_000,
+  })
+
+  const doAction = async (endpoint: string, label: string) => {
+    setMsg('')
+    try {
+      await api.post(endpoint, {})
+      setMsg(`${label} OK`)
+      refetch()
+    } catch {
+      setMsg(`${label} failed`)
+    }
+  }
+
+  if (isLoading) return <LoadingState />
+
+  const running = data?.process?.running ?? false
+  const pid = data?.process?.pid
+  const logLines = (data?.log_lines ?? []).slice(-20)
+
+  return (
+    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={cardStyle}>
+          <div style={labelStyle}>Status</div>
+          <div style={{ marginTop: 4 }}>
+            <span style={{
+              display: 'inline-flex', padding: '3px 10px', borderRadius: 999,
+              fontSize: 13, fontWeight: 700,
+              background: running ? 'rgba(5,150,105,.15)' : 'var(--surface-soft)',
+              color: running ? '#059669' : 'var(--ink-faint)',
+            }}>
+              {running ? 'RUNNING' : 'STOPPED'}
+            </span>
+          </div>
+        </div>
+        {pid && (
+          <div style={cardStyle}>
+            <div style={labelStyle}>PID</div>
+            <div style={{ ...valueStyle, fontSize: 18 }}>{pid}</div>
+          </div>
+        )}
+        {data?.date && (
+          <div style={cardStyle}>
+            <div style={labelStyle}>Date</div>
+            <div style={{ ...valueStyle, fontSize: 16 }}>{data.date}</div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button
+          className="btn-primary"
+          style={{ background: '#059669', borderColor: '#059669' }}
+          onClick={() => doAction('/paper/start', 'Start')}
+          disabled={running}
+        >
+          Start
+        </button>
+        <button
+          className="btn-danger"
+          onClick={() => doAction('/paper/stop', 'Stop')}
+          disabled={!running}
+        >
+          Stop
+        </button>
+        {msg && <span style={{ fontSize: 12, color: 'var(--ink-faint)' }}>{msg}</span>}
+      </div>
+
+      {logLines.length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink-muted)', marginBottom: 6 }}>
+            Last {logLines.length} log lines
+          </div>
+          <pre style={preStyle}>{logLines.join('\n')}</pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function AdminPage() {
@@ -585,21 +954,13 @@ export default function AdminPage() {
         {activeTab === 'integrations' && <IntegrationsTab />}
         {activeTab === 'models'       && <ModelsTab />}
         {activeTab === 'providers'    && <ProvidersTab />}
-        {activeTab === 'analytics'    && (
-          <JsonTab queryKey={['admin', 'analytics']} url="/paper/analytics" />
-        )}
-        {activeTab === 'approvals'    && (
-          <JsonTab queryKey={['admin', 'approvals']} url="/paper/hil/pending" />
-        )}
-        {activeTab === 'security'     && (
-          <JsonTab queryKey={['admin', 'security']} url="/auth/2fa/status" />
-        )}
+        {activeTab === 'analytics'    && <AnalyticsTab />}
+        {activeTab === 'approvals'    && <ApprovalsTab />}
+        {activeTab === 'security'     && <SecurityTab />}
         {activeTab === 'history'      && (
           <JsonTab queryKey={['admin', 'history']} url="/paper/backtest-index" />
         )}
-        {activeTab === 'runner'       && (
-          <JsonTab queryKey={['admin', 'runner']} url="/paper/status" />
-        )}
+        {activeTab === 'runner'       && <RunnerTab />}
       </div>
     </div>
   )

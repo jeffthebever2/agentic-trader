@@ -311,25 +311,31 @@ export default function HistoryPage() {
   const [searchParams, setSearchParams] = useSearchParams()
 
   // URL-derived filter values
-  const ticker   = searchParams.get('ticker')   ?? ''
-  const decision = searchParams.get('decision') ?? ''
-  const page     = parseInt(searchParams.get('page') ?? '1', 10)
+  const ticker    = searchParams.get('ticker')    ?? ''
+  const decision  = searchParams.get('decision')  ?? ''
+  const date_from = searchParams.get('date_from') ?? ''
+  const date_to   = searchParams.get('date_to')   ?? ''
+  const page      = parseInt(searchParams.get('page') ?? '1', 10)
 
   // Local controlled input state (initialized from URL)
   const [tickerInput,   setTickerInput]   = useState(ticker)
   const [decisionInput, setDecisionInput] = useState(decision)
+  const [dateFrom,      setDateFrom]      = useState(date_from)
+  const [dateTo,        setDateTo]        = useState(date_to)
 
   const [expandedIds, setExpandedIds] = useState<Set<string | number>>(new Set())
 
   const PER_PAGE = 25
 
   const { data, isLoading, isError } = useQuery<HistoryResponse>({
-    queryKey: ['history', ticker, decision, page],
+    queryKey: ['history', ticker, decision, date_from, date_to, page],
     queryFn: () =>
       api.get<HistoryResponse>('/history', {
         params: {
-          ticker:   ticker   || undefined,
-          decision: decision || undefined,
+          ticker:    ticker    || undefined,
+          decision:  decision  || undefined,
+          date_from: date_from || undefined,
+          date_to:   date_to   || undefined,
           page,
           per_page: PER_PAGE,
         },
@@ -340,9 +346,11 @@ export default function HistoryPage() {
 
   function applyFilters() {
     setSearchParams(p => {
-      p.set('ticker',   tickerInput.trim().toUpperCase())
-      p.set('decision', decisionInput)
-      p.set('page',     '1')
+      p.set('ticker',    tickerInput.trim().toUpperCase())
+      p.set('decision',  decisionInput)
+      p.set('date_from', dateFrom)
+      p.set('date_to',   dateTo)
+      p.set('page',      '1')
       return p
     })
   }
@@ -350,7 +358,25 @@ export default function HistoryPage() {
   function clearFilters() {
     setTickerInput('')
     setDecisionInput('')
+    setDateFrom('')
+    setDateTo('')
     setSearchParams({})
+  }
+
+  function downloadCsv(items: HistoryItem[]) {
+    const header = 'Ticker,Date,Decision,Summary'
+    const rows = items.map(it => {
+      const summary = (it.summary ?? '').replace(/"/g, '""')
+      return `${it.ticker},${it.date},${it.decision},"${summary}"`
+    })
+    const csv = [header, ...rows].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `analysis-history-${Date.now()}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
   }
 
   function setPage(newPage: number) {
@@ -420,6 +446,28 @@ export default function HistoryPage() {
           <option value="Sell">Sell</option>
         </select>
 
+        <input
+          type="date"
+          value={dateFrom}
+          onChange={e => setDateFrom(e.target.value)}
+          style={{
+            background: 'var(--canvas)', border: '1px solid var(--surface-rule)',
+            borderRadius: 6, padding: '6px 10px', fontSize: 13,
+            color: 'var(--ink)', outline: 'none',
+          }}
+        />
+
+        <input
+          type="date"
+          value={dateTo}
+          onChange={e => setDateTo(e.target.value)}
+          style={{
+            background: 'var(--canvas)', border: '1px solid var(--surface-rule)',
+            borderRadius: 6, padding: '6px 10px', fontSize: 13,
+            color: 'var(--ink)', outline: 'none',
+          }}
+        />
+
         <button
           onClick={applyFilters}
           style={{
@@ -447,6 +495,19 @@ export default function HistoryPage() {
             {totalRecords.toLocaleString()} result{totalRecords !== 1 ? 's' : ''}
           </span>
         )}
+
+        <button
+          onClick={() => downloadCsv(items)}
+          disabled={items.length === 0}
+          style={{
+            background: 'transparent', border: '1px solid var(--surface-rule)',
+            borderRadius: 6, padding: '6px 14px', fontSize: 13,
+            color: items.length === 0 ? 'var(--ink-faint)' : 'var(--ink-muted)',
+            cursor: items.length === 0 ? 'default' : 'pointer',
+          }}
+        >
+          Export CSV
+        </button>
       </div>
 
       {/* Table */}

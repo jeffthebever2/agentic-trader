@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Loader2, Play } from 'lucide-react'
 import { wsUrl } from '@/api/client'
+import api from '@/api/client'
 
 // ── Provider model map ────────────────────────────────────────────────────────
 
@@ -188,6 +189,183 @@ function ReportModal({ reports, onClose }: { reports: ReportEntry[]; onClose: ()
         </div>
       </div>
     </div>
+  )
+}
+
+// ── Bulk Scan ─────────────────────────────────────────────────────────────────
+
+interface BulkResult {
+  ticker: string
+  decision?: string
+  summary?: string
+  status: 'pending' | 'running' | 'done' | 'error'
+  error?: string
+}
+
+function BulkScan({ defaultDate }: { defaultDate: string }) {
+  const [tickersText, setTickersText] = useState('')
+  const [scanDate, setScanDate] = useState(defaultDate)
+  const [results, setResults] = useState<BulkResult[]>([])
+  const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
+  const abortRef = useRef(false)
+
+  async function loadWatchlist() {
+    try {
+      const res = await api.get('/market/watchlist')
+      const tickers: string[] = res.data?.tickers ?? []
+      setTickersText(tickers.join('\n'))
+    } catch {
+      // ignore
+    }
+  }
+
+  function parseTickers(text: string): string[] {
+    return text
+      .split(/[\n,]+/)
+      .map(t => t.trim().toUpperCase())
+      .filter(t => t.length > 0 && t.length <= 10)
+  }
+
+  async function runBulkScan() {
+    const tickers = parseTickers(tickersText)
+    if (!tickers.length) return
+    abortRef.current = false
+    setRunning(true)
+    setResults(tickers.map(t => ({ ticker: t, status: 'pending' })))
+    setProgress({ done: 0, total: tickers.length })
+
+    for (let i = 0; i < tickers.length; i++) {
+      if (abortRef.current) break
+      const ticker = tickers[i]
+      setResults(prev => prev.map(r => r.ticker === ticker ? { ...r, status: 'running' } : r))
+      try {
+        const res = await api.post('/analyze', {
+          ticker,
+          date: scanDate,
+          mode: 'algorithm',
+          provider: 'cloudflare',
+          model: '@cf/meta/llama-3.1-8b-instruct',
+        })
+        const data = res.data ?? {}
+        setResults(prev => prev.map(r => r.ticker === ticker ? {
+          ...r,
+          status: 'done',
+          decision: data.decision ?? data.action ?? '—',
+          summary: data.summary ?? data.text ?? '',
+        } : r))
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'Error'
+        setResults(prev => prev.map(r => r.ticker === ticker ? { ...r, status: 'error', error: msg } : r))
+      }
+      setProgress({ done: i + 1, total: tickers.length })
+    }
+
+    setRunning(false)
+  }
+
+  function exportCsv() {
+    const rows = [['Ticker', 'Date', 'Decision', 'Summary']]
+    results.forEach(r => {
+      rows.push([r.ticker, scanDate, r.decision ?? '', (r.summary ?? '').replace(/"/g, '""')])
+    })
+    const csv = rows.map(r => r.map(c => `"${c}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `bulk-scan-${scanDate}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const hasResults = results.some(r => r.status === 'done' || r.status === 'error')
+
+  const statusColor = (s: BulkResult['status']) => {
+    if (s === 'done') return '#4ade80'
+    if (s === 'error') return '#f87171'
+    if (s === 'running') return 'var(--accent)'
+    return 'var(--ink-faint)'
+  }
+
+  return (
+    <details style={{ borderTop: '1px solid var(--surface-rule)', paddingTop: 8 }}>
+      <summary style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink-muted)', cursor: 'pointer', userSelect: 'none', marginBottom: 8 }}>
+        Bulk Scan
+      </summary>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>Tickers</div>
+          <textarea
+            className="input"
+            style={{ width: '100%', height: 80, resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 12, boxSizing: 'border-box' }}
+            placeholder={'AAPL\nMSFT\nNVDA'}
+            value={tickersText}
+            onChange={e => setTickersText(e.target.value)}
+            disabled={running}
+          />
+        </div>
+        <button
+          className="btn-secondary"
+          style={{ fontSize: 12, height: 30, padding: '0 10px' }}
+          onClick={loadWatchlist}
+          disabled={running}
+        >
+          Scan Watchlist
+        </button>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>Date</div>
+          <input className="input" type="date" value={scanDate} onChange={e => setScanDate(e.target.value)} disabled={running} />
+        </div>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <button
+            className="btn-primary"
+            style={{ flex: 1, height: 34, fontSize: 13, fontWeight: 700 }}
+            onClick={running ? () => { abortRef.current = true } : runBulkScan}
+            disabled={!tickersText.trim()}
+          >
+            {running ? 'Stop' : 'Run Bulk Scan'}
+          </button>
+          {hasResults && (
+            <button className="btn-secondary" style={{ height: 34, padding: '0 10px', fontSize: 12 }} onClick={exportCsv}>
+              Export CSV
+            </button>
+          )}
+        </div>
+        {progress && (
+          <div style={{ fontSize: 12, color: 'var(--ink-muted)', textAlign: 'center' }}>
+            {progress.done} / {progress.total} tickers scanned
+          </div>
+        )}
+        {results.length > 0 && (
+          <div style={{ overflowX: 'auto', marginTop: 4 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+              <thead>
+                <tr>
+                  {['Ticker', 'Decision', 'Summary', 'Status'].map(h => (
+                    <th key={h} style={{ fontSize: 10, fontWeight: 700, color: 'var(--ink-faint)', textTransform: 'uppercase', letterSpacing: '.04em', padding: '5px 6px', borderBottom: '1px solid var(--surface-rule)', textAlign: 'left', whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {results.map(r => (
+                  <tr key={r.ticker}>
+                    <td style={{ padding: '5px 6px', borderBottom: '1px solid var(--surface-rule)', fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--ink)', whiteSpace: 'nowrap' }}>{r.ticker}</td>
+                    <td style={{ padding: '5px 6px', borderBottom: '1px solid var(--surface-rule)', fontFamily: 'var(--font-mono)', color: 'var(--ink)', whiteSpace: 'nowrap' }}>{r.decision ?? '—'}</td>
+                    <td style={{ padding: '5px 6px', borderBottom: '1px solid var(--surface-rule)', color: 'var(--ink-muted)', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {r.error ?? (r.summary ? r.summary.slice(0, 60) + (r.summary.length > 60 ? '…' : '') : '—')}
+                    </td>
+                    <td style={{ padding: '5px 6px', borderBottom: '1px solid var(--surface-rule)', color: statusColor(r.status), fontWeight: 600, whiteSpace: 'nowrap' }}>
+                      {r.status}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </details>
   )
 }
 
@@ -573,10 +751,13 @@ export default function AnalyzePage() {
             </div>
           )}
 
+          {/* 11. Bulk Scan */}
+          <BulkScan defaultDate={date} />
+
           {/* Spacer */}
           <div style={{ flex: 1 }} />
 
-          {/* 11. Open Chart */}
+          {/* 12. Open Chart */}
           <button className="btn-secondary" style={{ height: 36, width: '100%' }} onClick={() => setShowTv(true)}>
             Open Chart
           </button>
