@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
-import { getQuoteDetail, getMarketNews, getMarketChart } from '@/api/market'
+import { getQuoteDetail, getMarketNews, getMarketChart, getNewsSummary } from '@/api/market'
 import type { CandidateRow } from '@/types'
 
 // ── Design tokens ────────────────────────────────────────────────────────────
@@ -338,8 +338,15 @@ export function CandidatePanel({ candidate, open, onClose, strategyColor = '#94a
   const newsQ = useQuery({
     queryKey: ['market', 'news', ticker],
     queryFn: () => getMarketNews(ticker),
-    enabled: open && !!ticker,   // prefetch on open, not just when News tab active
+    enabled: open && !!ticker,
     staleTime: 900_000,
+  })
+
+  const summaryQ = useQuery({
+    queryKey: ['market', 'news-summary', ticker],
+    queryFn: () => getNewsSummary(ticker),
+    enabled: open && !!ticker,
+    staleTime: 1_800_000,   // 30 min — matches server cache
   })
 
   const chartInterval = chartPeriod === '1d' ? '5m' : '1d'
@@ -928,72 +935,190 @@ export function CandidatePanel({ candidate, open, onClose, strategyColor = '#94a
           )}
 
           {/* ════ NEWS ════ */}
-          {tab === 'News' && (
-            <div>
-              {newsQ.isLoading ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-                  {[0, 1, 2].map(i => (
-                    <div key={i} style={{ padding: '14px 0', borderBottom: `1px solid ${C.line}` }}>
-                      {skeleton('40%', 10)}
-                      <div style={{ height: 6 }} />
-                      {skeleton('90%', 14)}
-                      <div style={{ height: 5 }} />
-                      {skeleton('70%', 11)}
+          {tab === 'News' && (() => {
+            const sm = summaryQ.data
+            const sentColor = sm?.sentiment === 'bullish' ? C.up
+              : sm?.sentiment === 'bearish' ? C.down : C.warn
+            const sentBg = sm?.sentiment === 'bullish' ? C.upDim
+              : sm?.sentiment === 'bearish' ? C.downDim : C.warnDim
+            const impactColor = (s: string) =>
+              s?.includes('upside') ? C.up : s?.includes('downside') ? C.down : C.warn
+
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+                {/* ── AI Summary Card ── */}
+                <div style={{
+                  background: C.panel2, border: `1px solid ${C.line2}`,
+                  borderRadius: 12, padding: 18,
+                  borderLeft: sm ? `3px solid ${sentColor}` : `3px solid ${C.line2}`,
+                }}>
+                  {/* Header */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                      AI Impact Analysis
                     </div>
-                  ))}
-                </div>
-              ) : !newsQ.data?.news?.length ? (
-                <div style={{ fontSize: 13, color: C.dim, textAlign: 'center', padding: 40 }}>No recent news available.</div>
-              ) : (
-                <div>
-                  {newsQ.data.news.map((item, i) => {
-                    const tone = sentimentTone(item.title ?? '')
-                    return (
-                      <a
-                        key={i}
-                        href={item.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style={{
-                          display: 'block',
-                          padding: '14px 10px',
-                          borderBottom: i < newsQ.data!.news.length - 1 ? `1px solid ${C.line}` : 'none',
-                          textDecoration: 'none',
-                          borderRadius: 6,
-                          cursor: 'pointer',
-                        }}
-                        onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = C.panel }}
-                        onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'wrap' }}>
-                          {item.source && <span style={{ fontSize: 10, color: C.dim2, fontWeight: 600 }}>{item.source}</span>}
-                          {item.published && <span style={{ fontSize: 10, color: C.dim2 }}>· {relativeTime(item.published)}</span>}
-                          {tone === 'pos' && <Pill tone="ok">Positive</Pill>}
-                          {tone === 'neg' && <Pill tone="miss">Negative</Pill>}
+                    <div style={{ fontSize: 9, color: C.dim2, background: C.line, borderRadius: 4, padding: '2px 6px' }}>
+                      Llama 3.3 70B
+                    </div>
+                    {sm && (
+                      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{
+                          fontSize: 10, fontWeight: 700, color: sentColor,
+                          background: sentBg, padding: '2px 8px', borderRadius: 4,
+                          textTransform: 'uppercase', letterSpacing: '0.06em',
+                        }}>
+                          {sm.sentiment}
                         </div>
-                        <div style={{ fontSize: 13, fontWeight: 600, color: C.text, lineHeight: 1.45, marginBottom: 4 }}>
-                          {item.title}
+                        <div style={{
+                          fontSize: 10, color: impactColor(sm.price_impact),
+                          fontFamily: MONO, fontWeight: 600,
+                        }}>
+                          {sm.price_impact}
                         </div>
-                        {item.summary && (
-                          <div style={{
-                            fontSize: 12,
-                            color: C.dim,
-                            lineHeight: 1.55,
-                            display: '-webkit-box',
-                            WebkitLineClamp: 2,
-                            WebkitBoxOrient: 'vertical' as const,
-                            overflow: 'hidden',
-                          }}>
-                            {item.summary}
-                          </div>
-                        )}
-                      </a>
-                    )
-                  })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Summary text */}
+                  {summaryQ.isLoading ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {skeleton('100%', 13)}
+                      {skeleton('85%', 13)}
+                      {skeleton('60%', 13)}
+                    </div>
+                  ) : sm?.summary ? (
+                    <div style={{ fontSize: 13, color: C.text, lineHeight: 1.65, marginBottom: 14 }}>
+                      {sm.summary}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: C.dim, fontStyle: 'italic' }}>
+                      AI summary loading…
+                    </div>
+                  )}
+
+                  {sm && (sm.key_themes.length > 0 || sm.risks.length > 0 || sm.opportunities.length > 0) && (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                      {/* Themes */}
+                      {sm.key_themes.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 9, fontWeight: 700, color: C.info, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>Key Themes</div>
+                          {sm.key_themes.slice(0, 3).map((t, i) => (
+                            <div key={i} style={{ fontSize: 11, color: C.dim, padding: '2px 0', lineHeight: 1.4 }}>· {t}</div>
+                          ))}
+                        </div>
+                      )}
+                      {/* Risks */}
+                      {sm.risks.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 9, fontWeight: 700, color: C.down, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>Risks</div>
+                          {sm.risks.slice(0, 3).map((r, i) => (
+                            <div key={i} style={{ fontSize: 11, color: C.dim, padding: '2px 0', lineHeight: 1.4 }}>· {r}</div>
+                          ))}
+                        </div>
+                      )}
+                      {/* Opportunities */}
+                      {sm.opportunities.length > 0 && (
+                        <div>
+                          <div style={{ fontSize: 9, fontWeight: 700, color: C.up, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>Opportunities</div>
+                          {sm.opportunities.slice(0, 3).map((o, i) => (
+                            <div key={i} style={{ fontSize: 11, color: C.dim, padding: '2px 0', lineHeight: 1.4 }}>· {o}</div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Sentiment score bar */}
+                  {sm && (
+                    <div style={{ marginTop: 14 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: C.dim2, marginBottom: 4 }}>
+                        <span>Bearish</span>
+                        <span style={{ color: C.dim, fontFamily: MONO }}>{sm.sentiment_score >= 0 ? '+' : ''}{sm.sentiment_score.toFixed(2)}</span>
+                        <span>Bullish</span>
+                      </div>
+                      <div style={{ height: 4, background: C.line2, borderRadius: 2, overflow: 'hidden' }}>
+                        <div style={{
+                          height: '100%',
+                          width: `${Math.abs(sm.sentiment_score) * 50}%`,
+                          background: sm.sentiment_score >= 0 ? C.up : C.down,
+                          borderRadius: 2,
+                          marginLeft: sm.sentiment_score >= 0 ? '50%' : `${50 - Math.abs(sm.sentiment_score) * 50}%`,
+                          transition: 'width 0.5s ease',
+                        }} />
+                      </div>
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          )}
+
+                {/* ── News Articles ── */}
+                <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, overflow: 'hidden' }}>
+                  <div style={{ padding: '12px 16px 10px', borderBottom: `1px solid ${C.line}`, fontSize: 10, fontWeight: 700, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Recent Headlines
+                  </div>
+                  {newsQ.isLoading ? (
+                    <div style={{ padding: '0 16px' }}>
+                      {[0, 1, 2].map(i => (
+                        <div key={i} style={{ padding: '14px 0', borderBottom: i < 2 ? `1px solid ${C.line}` : 'none' }}>
+                          {skeleton('40%', 10)}
+                          <div style={{ height: 6 }} />
+                          {skeleton('90%', 14)}
+                          <div style={{ height: 5 }} />
+                          {skeleton('70%', 11)}
+                        </div>
+                      ))}
+                    </div>
+                  ) : !newsQ.data?.news?.length ? (
+                    <div style={{ fontSize: 13, color: C.dim, textAlign: 'center', padding: 40 }}>
+                      No recent headlines found.
+                    </div>
+                  ) : (
+                    <div style={{ padding: '0 16px' }}>
+                      {newsQ.data.news.map((item, i) => {
+                        const tone = sentimentTone(item.title ?? '')
+                        return (
+                          <a
+                            key={i}
+                            href={item.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{
+                              display: 'block',
+                              padding: '14px 0',
+                              borderBottom: i < newsQ.data!.news.length - 1 ? `1px solid ${C.line}` : 'none',
+                              textDecoration: 'none',
+                              cursor: 'pointer',
+                            }}
+                            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.opacity = '0.8' }}
+                            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'wrap' }}>
+                              {item.source && <span style={{ fontSize: 10, color: C.dim2, fontWeight: 600 }}>{item.source}</span>}
+                              {item.published && <span style={{ fontSize: 10, color: C.dim2 }}>· {relativeTime(item.published)}</span>}
+                              {tone === 'pos' && <Pill tone="ok">Positive</Pill>}
+                              {tone === 'neg' && <Pill tone="miss">Negative</Pill>}
+                            </div>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: C.text, lineHeight: 1.45, marginBottom: 4 }}>
+                              {item.title}
+                            </div>
+                            {item.summary && (
+                              <div style={{
+                                fontSize: 12, color: C.dim, lineHeight: 1.55,
+                                display: '-webkit-box', WebkitLineClamp: 2,
+                                WebkitBoxOrient: 'vertical' as const, overflow: 'hidden',
+                              }}>
+                                {item.summary}
+                              </div>
+                            )}
+                          </a>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })()}
         </div>
       </div>
     </>,

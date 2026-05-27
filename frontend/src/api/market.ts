@@ -44,6 +44,21 @@ export const getMarketNews = (symbol: string) =>
   api.get<{ symbol: string; news: NewsItem[] }>(`/market/news?symbol=${encodeURIComponent(symbol)}`)
      .then(r => r.data)
 
+export interface NewsSummary {
+  symbol: string
+  sentiment: 'bullish' | 'bearish' | 'neutral'
+  sentiment_score: number
+  summary: string
+  key_themes: string[]
+  risks: string[]
+  opportunities: string[]
+  price_impact: string
+}
+
+export const getNewsSummary = (symbol: string) =>
+  api.get<NewsSummary>(`/market/news-summary?symbol=${encodeURIComponent(symbol)}`)
+     .then(r => r.data)
+
 export const getQuoteDetail = (symbol: string) =>
   api.get<QuoteDetail>(`/market/quote-detail?symbol=${encodeURIComponent(symbol)}`)
      .then(r => r.data)

@@ -226,60 +226,302 @@ async def sp500_list():
 
 
 _news_cache: dict = {}
+_summary_cache: dict = {}
+
+
+def _parse_pub_date(raw: str) -> str:
+    """Parse RFC 2822 or ISO date string → ISO 8601. Returns raw on failure."""
+    if not raw:
+        return ""
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(raw).isoformat()
+    except Exception:
+        return raw
+
+
+def _strip_html(text: str) -> str:
+    import re
+    return re.sub(r"<[^>]+>", "", text).strip()
+
+
+def _fetch_google_news(symbol: str) -> list[dict]:
+    """Primary source: Google News RSS — no auth, broad coverage."""
+    import feedparser
+    import requests as req
+
+    query = f"{symbol.upper()} stock"
+    url = f"https://news.google.com/rss/search?q={req.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingAgents/1.0)"}
+    r = req.get(url, timeout=10, headers=headers)
+    r.raise_for_status()
+    feed = feedparser.parse(r.text)
+    items = []
+    for entry in feed.entries[:15]:
+        title = entry.get("title", "").strip()
+        if not title:
+            continue
+        source_obj = entry.get("source", {})
+        source = source_obj.get("title", "") if isinstance(source_obj, dict) else str(source_obj)
+        items.append({
+            "title": title,
+            "summary": _strip_html(entry.get("summary", ""))[:300],
+            "url": entry.get("link", ""),
+            "source": source,
+            "published": _parse_pub_date(entry.get("published", "")),
+        })
+    return items
+
+
+def _fetch_finviz_news(symbol: str) -> list[dict]:
+    """Fallback 1: Finviz stock page news table — detailed, ticker-specific."""
+    import requests as req
+    from bs4 import BeautifulSoup
+    import re, datetime
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    r = req.get(f"https://finviz.com/quote.ashx?t={symbol.upper()}", headers=headers, timeout=12)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    table = soup.find("table", class_="fullview-news-outer")
+    if not table:
+        return []
+
+    items = []
+    today = datetime.date.today()
+    last_date = today
+    for row in table.find_all("tr")[:15]:
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            continue
+        time_str = cells[0].text.strip()
+        title_cell = cells[1]
+        a = title_cell.find("a")
+        if not a:
+            continue
+        title = a.text.strip()
+        url = a.get("href", "")
+        span = title_cell.find("span")
+        source = span.text.strip().strip("()") if span else ""
+
+        # Parse time — Finviz shows "Today HH:MMam" or "Dec-20-24 HH:MMam"
+        try:
+            if time_str.startswith("Today"):
+                t = datetime.datetime.strptime(time_str, "Today %I:%M%p").replace(
+                    year=today.year, month=today.month, day=today.day)
+            elif re.match(r"^\d{1,2}:\d{2}", time_str):
+                t = datetime.datetime.strptime(time_str, "%I:%M%p").replace(
+                    year=last_date.year, month=last_date.month, day=last_date.day)
+            else:
+                # e.g. "May-27-26 01:48PM"
+                parts = time_str.split()
+                date_part = parts[0]
+                time_part = parts[1] if len(parts) > 1 else "12:00PM"
+                t = datetime.datetime.strptime(f"{date_part} {time_part}", "%b-%d-%y %I:%M%p")
+                last_date = t.date()
+            pub = t.isoformat()
+        except Exception:
+            pub = time_str
+
+        items.append({"title": title, "summary": "", "url": url, "source": source, "published": pub})
+    return items
+
+
+def _fetch_seeking_alpha_rss(symbol: str) -> list[dict]:
+    """Fallback 2: Seeking Alpha RSS (public, no auth required)."""
+    import feedparser
+    import requests as req
+
+    url = f"https://seekingalpha.com/api/sa/combined/{symbol.upper()}.xml"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingAgents/1.0)"}
+    r = req.get(url, timeout=10, headers=headers)
+    r.raise_for_status()
+    feed = feedparser.parse(r.text)
+    items = []
+    for entry in feed.entries[:12]:
+        title = entry.get("title", "").strip()
+        if not title:
+            continue
+        items.append({
+            "title": title,
+            "summary": _strip_html(entry.get("summary", ""))[:300],
+            "url": entry.get("link", ""),
+            "source": "Seeking Alpha",
+            "published": _parse_pub_date(entry.get("published", "")),
+        })
+    return items
+
+
+def _fetch_news_with_fallbacks(symbol: str) -> tuple[list[dict], str]:
+    """Try each source in order; return (items, source_used)."""
+    sources = [
+        ("google_rss",    _fetch_google_news),
+        ("finviz",        _fetch_finviz_news),
+        ("seeking_alpha", _fetch_seeking_alpha_rss),
+    ]
+    last_err = None
+    for name, fn in sources:
+        try:
+            items = fn(symbol)
+            if items:
+                return items, name
+        except Exception as e:
+            last_err = e
+            log.warning(f"News source '{name}' failed for {symbol}: {e}")
+    log.error(f"All news sources failed for {symbol}: {last_err}")
+    return [], "none"
+
 
 @router.get("/market/news")
 async def market_news(symbol: str):
-    """Fetch recent news for a ticker via Google News RSS (no auth required)."""
+    """Fetch recent news with 3-source fallback chain (Google RSS → Finviz → Seeking Alpha)."""
     global _news_cache
     cache_key = symbol.upper()
     cached = _news_cache.get(cache_key)
     if cached and (time.time() - cached.get("_ts", 0)) < 900:  # 15 min TTL
         return cached
 
-    def _fetch():
-        import feedparser, requests as req
-        from email.utils import parsedate_to_datetime
+    items, source = await asyncio.get_event_loop().run_in_executor(
+        None, _fetch_news_with_fallbacks, symbol
+    )
 
-        query = f"{symbol.upper()} stock"
-        url = f"https://news.google.com/rss/search?q={req.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingAgents/1.0)"}
-        r = req.get(url, timeout=10, headers=headers)
-        feed = feedparser.parse(r.text)
-        items = []
-        for entry in feed.entries[:12]:
-            title = entry.get("title", "").strip()
-            if not title:
-                continue
-            # Google News redirects — use direct link
-            link = entry.get("link", "")
-            source_obj = entry.get("source", {})
-            source = source_obj.get("title", "") if isinstance(source_obj, dict) else str(source_obj)
-            pub_raw = entry.get("published", "")
-            try:
-                pub = parsedate_to_datetime(pub_raw).isoformat() if pub_raw else ""
-            except Exception:
-                pub = pub_raw
-            summary = entry.get("summary", "")
-            # Strip HTML tags from summary
-            import re as _re
-            summary = _re.sub(r"<[^>]+>", "", summary).strip()
-            items.append({
-                "title": title,
-                "summary": summary[:300],
-                "url": link,
-                "source": source,
-                "published": pub,
-            })
-        return items
-
-    try:
-        items = await asyncio.get_event_loop().run_in_executor(None, _fetch)
-    except Exception as e:
-        log.warning(f"News fetch failed for {symbol}: {e}")
-        items = []
-
-    result = {"symbol": symbol.upper(), "news": items, "_ts": int(time.time())}
+    result = {
+        "symbol": symbol.upper(),
+        "news": items,
+        "_source": source,
+        "_ts": int(time.time()),
+    }
     _news_cache[cache_key] = result
+    return result
+
+
+def _call_cf_ai(prompt: str, max_tokens: int = 400) -> str:
+    """Call Cloudflare Workers AI (Llama 3.3 70B). Returns text or raises."""
+    import os, httpx
+    account = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    token   = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+    gateway = os.getenv("CLOUDFLARE_AI_GATEWAY_URL", "").strip().rstrip("/")
+    if not token:
+        raise RuntimeError("CLOUDFLARE_API_TOKEN not set")
+
+    if gateway:
+        if gateway.endswith("/chat/completions"):
+            gateway = gateway[: -len("/chat/completions")].rstrip("/")
+        base = gateway if gateway.endswith("/compat") else gateway + "/compat"
+    else:
+        base = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1"
+
+    model = os.getenv("CLOUDFLARE_DEFAULT_QUICK_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast")
+    req_model = ("workers-ai/" + model) if (gateway and model.startswith("@cf/")) else model
+
+    with httpx.Client(timeout=30.0) as client:
+        r = client.post(
+            base + "/chat/completions",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"model": req_model, "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": max_tokens},
+        )
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+@router.get("/market/news-summary")
+async def market_news_summary(symbol: str):
+    """
+    AI-powered news impact summary for a ticker.
+    Fetches latest news then uses Cloudflare Workers AI (Llama 3.3 70B)
+    to produce: sentiment, key themes, risk/opportunity analysis, price impact.
+    Cached 30 min per symbol.
+    """
+    global _summary_cache, _news_cache
+    cache_key = symbol.upper()
+    cached = _summary_cache.get(cache_key)
+    if cached and (time.time() - cached.get("_ts", 0)) < 1800:  # 30 min TTL
+        return cached
+
+    # Get news (reuse cache or fetch fresh)
+    news_cached = _news_cache.get(cache_key)
+    if news_cached and news_cached.get("news"):
+        articles = news_cached["news"]
+    else:
+        articles, _ = await asyncio.get_event_loop().run_in_executor(
+            None, _fetch_news_with_fallbacks, symbol
+        )
+
+    if not articles:
+        result = {
+            "symbol": cache_key,
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "No recent news available to analyze.",
+            "key_themes": [],
+            "risks": [],
+            "opportunities": [],
+            "price_impact": "Unknown",
+            "_ts": int(time.time()),
+        }
+        _summary_cache[cache_key] = result
+        return result
+
+    # Build prompt
+    headlines = "\n".join(
+        f"- [{a.get('source','?')}] {a['title']}" for a in articles[:12]
+    )
+    prompt = f"""You are a quantitative analyst. Analyze these recent news headlines for {symbol.upper()} stock and provide a structured assessment.
+
+HEADLINES:
+{headlines}
+
+Respond ONLY with a valid JSON object (no markdown, no explanation) with exactly these fields:
+{{
+  "sentiment": "bullish" | "bearish" | "neutral",
+  "sentiment_score": <float -1.0 to 1.0>,
+  "summary": "<2-3 sentence plain-English summary of the news landscape and its likely near-term impact on {symbol}>",
+  "key_themes": ["<theme1>", "<theme2>", "<theme3>"],
+  "risks": ["<risk1>", "<risk2>"],
+  "opportunities": ["<opp1>", "<opp2>"],
+  "price_impact": "strong upside" | "mild upside" | "neutral" | "mild downside" | "strong downside"
+}}"""
+
+    def _do_summary():
+        try:
+            raw = _call_cf_ai(prompt, max_tokens=500)
+            import json, re
+            # Strip markdown code fences if present
+            clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
+            return json.loads(clean)
+        except Exception as e:
+            log.warning(f"AI summary failed for {symbol}: {e}")
+            return None
+
+    parsed = await asyncio.get_event_loop().run_in_executor(None, _do_summary)
+
+    if parsed and isinstance(parsed, dict):
+        result = {
+            "symbol": cache_key,
+            "sentiment": parsed.get("sentiment", "neutral"),
+            "sentiment_score": float(parsed.get("sentiment_score", 0.0)),
+            "summary": parsed.get("summary", ""),
+            "key_themes": parsed.get("key_themes", []),
+            "risks": parsed.get("risks", []),
+            "opportunities": parsed.get("opportunities", []),
+            "price_impact": parsed.get("price_impact", "neutral"),
+            "_ts": int(time.time()),
+        }
+    else:
+        result = {
+            "symbol": cache_key,
+            "sentiment": "neutral",
+            "sentiment_score": 0.0,
+            "summary": "AI summary temporarily unavailable.",
+            "key_themes": [],
+            "risks": [],
+            "opportunities": [],
+            "price_impact": "Unknown",
+            "_ts": int(time.time()),
+        }
+
+    _summary_cache[cache_key] = result
     return result
 
 

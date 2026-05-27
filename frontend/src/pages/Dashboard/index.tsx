@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useQuery, useQueries } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { getPaperStatus } from '@/api/paper'
-import { getMarketChart, getQuotes } from '@/api/market'
+import { getMarketChart, getQuotes, getNewsSummary } from '@/api/market'
 import { getDiagnostics } from '@/api/admin'
 import { getMlStatus } from '@/api/ml'
 import { CandlestickChart } from '@/components/charts/CandlestickChart'
@@ -492,17 +492,51 @@ function NewsPanel() {
     }))
   })
 
+  // AI market sentiment for SPY (broad market proxy)
+  const spySummaryQ = useQuery({
+    queryKey: ['market', 'news-summary', 'SPY'],
+    queryFn: () => getNewsSummary('SPY'),
+    staleTime: 1_800_000,
+    refetchInterval: 1_800_000,
+  })
+
   const isLoading = results.some(r => r.isLoading)
-  // Combine + dedupe by title
   const seen = new Set<string>()
   const items: NewsItem[] = results
     .flatMap(r => r.data?.news ?? [])
     .filter(n => { if (seen.has(n.title)) return false; seen.add(n.title); return true })
     .slice(0, 10)
 
+  const sm = spySummaryQ.data
+  const sentColor = sm?.sentiment === 'bullish' ? 'var(--accent)'
+    : sm?.sentiment === 'bearish' ? '#e05252' : '#d4a017'
+
   return (
     <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)', padding: '14px 20px' }}>
-      <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 10 }}>Market News</div>
+      {/* Header row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+        <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)' }}>
+          Market News
+        </div>
+        {sm && !spySummaryQ.isLoading && (
+          <>
+            <span style={{ fontSize: 9, fontWeight: 700, color: sentColor, background: 'var(--surface-soft)', padding: '1px 7px', borderRadius: 4, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {sm.sentiment}
+            </span>
+            <span style={{ fontSize: 9, color: 'var(--ink-faint)', background: 'var(--surface-soft)', padding: '1px 6px', borderRadius: 4 }}>
+              {sm.price_impact}
+            </span>
+          </>
+        )}
+      </div>
+
+      {/* AI summary snippet */}
+      {sm?.summary && (
+        <div style={{ fontSize: 11.5, color: 'var(--ink-muted)', lineHeight: 1.55, marginBottom: 10, padding: '8px 10px', background: 'var(--surface-soft)', borderRadius: 6, borderLeft: `2px solid ${sentColor}` }}>
+          {sm.summary}
+        </div>
+      )}
+
       {isLoading ? (
         <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>Loading…</div>
       ) : items.length === 0 ? (
