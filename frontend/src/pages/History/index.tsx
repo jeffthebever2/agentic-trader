@@ -28,15 +28,15 @@ interface StatsResponse {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function decisionColor(decision: string): string {
-  const d = decision.toLowerCase()
+function decisionColor(decision: string | null | undefined): string {
+  const d = (decision ?? '').toLowerCase()
   if (d === 'buy' || d === 'overweight') return '#4ade80'
   if (d === 'hold') return '#fbbf24'
   if (d === 'underweight' || d === 'sell') return '#f87171'
   return 'var(--ink-muted)'
 }
 
-function DecisionBadge({ decision }: { decision: string }) {
+function DecisionBadge({ decision }: { decision: string | null | undefined }) {
   const color = decisionColor(decision)
   return (
     <span style={{
