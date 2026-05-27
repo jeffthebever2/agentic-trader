@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -91,10 +92,40 @@ def _save(data: dict[str, dict[str, Any]]) -> None:
 
 
 def _save_local(data: dict[str, dict[str, Any]]) -> None:
-    _STORE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _STORE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    parent = _STORE.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    # Restrict the tmp/ directory so other local users can't browse it.
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    raw = json.dumps(data, indent=2, sort_keys=True).encode("utf-8")
+    # Write atomically at 0o600 so the TOTP secret and passkey material are
+    # never world-readable, even briefly. Using os.open avoids the race between
+    # write_text() and a subsequent chmod() call.
+    fd, tmp_name = tempfile.mkstemp(prefix=".users-", suffix=".json.tmp", dir=str(parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except Exception:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        tmp.unlink(missing_ok=True)
+        raise
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
     tmp.replace(_STORE)
+    try:
+        os.chmod(_STORE, 0o600)
+    except OSError:
+        pass
 
 
 def get_or_create_user(email: str) -> dict[str, Any]:

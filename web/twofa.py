@@ -50,14 +50,36 @@ def _secret() -> bytes:
     # Persist a generated secret so tokens survive restarts.
     try:
         if _SECRET_FILE.exists():
+            try:
+                os.chmod(_SECRET_FILE, 0o600)
+            except OSError:
+                pass
             return _SECRET_FILE.read_text().strip().encode()
-        _SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
-        gen = secrets.token_urlsafe(48)
-        _SECRET_FILE.write_text(gen)
+        parent = _SECRET_FILE.parent
+        parent.mkdir(parents=True, exist_ok=True)
         try:
-            os.chmod(_SECRET_FILE, 0o600)
+            os.chmod(parent, 0o700)
         except OSError:
             pass
+        gen = secrets.token_urlsafe(48)
+        # Write atomically at 0o600 — avoids the chmod-after-write race
+        # that would expose the secret in a brief 644-permissions window.
+        fd = os.open(
+            str(_SECRET_FILE),
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(gen)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except Exception:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+            raise
         return gen.encode()
     except Exception:
         # Last-resort ephemeral secret (tokens won't survive restart).
