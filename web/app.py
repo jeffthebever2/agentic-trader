@@ -269,9 +269,17 @@ async def _startup():
 static_dir = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+# React/Vite build — served at /app (old static frontend remains at /)
+_react_dist = static_dir / "dist"
+if _react_dist.exists():
+    app.mount("/app/assets", StaticFiles(directory=str(_react_dist / "assets")), name="react-assets")
 
 _INDEX_CACHE: bytes | None = None
 _INDEX_MTIME: float = 0.0
+
+_REACT_INDEX_CACHE: bytes | None = None
+_REACT_INDEX_MTIME: float = 0.0
+
 
 @app.get("/")
 async def root():
@@ -283,6 +291,27 @@ async def root():
         _INDEX_MTIME = mtime
     return Response(
         content=_INDEX_CACHE,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
+
+
+@app.get("/app")
+@app.get("/app/{full_path:path}")
+async def react_app(full_path: str = ""):
+    """Serve the React/Vite SPA at /app. Falls back to legacy UI if dist not built."""
+    global _REACT_INDEX_CACHE, _REACT_INDEX_MTIME
+    react_index = _react_dist / "index.html"
+    if not react_index.exists():
+        # Fallback: redirect to legacy UI
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/")
+    mtime = react_index.stat().st_mtime
+    if _REACT_INDEX_CACHE is None or mtime != _REACT_INDEX_MTIME:
+        _REACT_INDEX_CACHE = react_index.read_bytes()
+        _REACT_INDEX_MTIME = mtime
+    return Response(
+        content=_REACT_INDEX_CACHE,
         media_type="text/html",
         headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )

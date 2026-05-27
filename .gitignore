@@ -253,3 +253,19 @@ did.bin
 
 # macOS
 .DS_Store
+
+# Frontend build output (Vite, regenerable)
+frontend/node_modules/
+web/static/dist/
+frontend/.vite/
+frontend/dist/
+
+# Repo artifacts directory
+artifacts/
+
+# Python bytecode (redundant explicit patterns)
+tests/__pycache__/
+web/__pycache__/
+
+# Cleanup scripts (one-off)
+clean-tradingagents-repo-safe.sh
