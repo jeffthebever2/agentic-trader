@@ -155,18 +155,23 @@ body.theme-dark main::after {
 
 /* ── Input ───────────────────────────────────────────────────────────────── */
 .input {
-  background: var(--surface-raised);
+  background: var(--surface);
   border: 1px solid var(--surface-rule);
-  border-radius: var(--radius-sm);
+  border-radius: 6px;
   color: var(--ink);
-  padding: 6px 10px;
-  font-size: 13px;
+  padding: 8px 12px;
+  font-size: 13.5px;
   font-family: var(--font-sans);
   outline: none;
-  transition: border-color .15s;
+  transition: border-color .15s var(--ease-out), box-shadow .15s var(--ease-out);
   width: 100%;
 }
-.input:focus { border-color: var(--accent); }
+.input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(214,58,0,.12);
+}
+body.theme-dark .input { border-color: var(--surface-rule); }
+body.theme-dark .input:focus { border-color: var(--accent); }
 
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
 .btn-primary {
