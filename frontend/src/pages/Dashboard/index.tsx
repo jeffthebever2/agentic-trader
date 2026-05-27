@@ -860,34 +860,173 @@ function PortfolioExposure() {
 }
 
 function PaperCandidatesPanel({ accounts }: { accounts: PaperAccount[] }) {
+  const navigate = useNavigate()
+
+  // Fetch news once; filter by candidate tickers below
+  const newsQ = useQuery({
+    queryKey: ['market', 'news'],
+    queryFn: () => api.get<NewsItem[]>('/market/news').then(r => r.data),
+    staleTime: 240_000,
+    refetchInterval: 300_000,
+  })
+
   const candidates = accounts.flatMap(a =>
-    (a.candidates?.rows ?? []).slice(0, 3).map(r => ({ ...r, _stratLabel: a.label }))
-  ).slice(0, 8)
+    (a.candidates?.rows ?? []).slice(0, 4).map(r => ({ ...r, _stratLabel: a.label, _strategy: a.strategy }))
+  ).slice(0, 10)
+
+  // Filter news for candidate tickers
+  const candTickers = new Set(candidates.map(c => c.ticker?.toUpperCase()))
+  const candNews = (Array.isArray(newsQ.data) ? newsQ.data : [])
+    .filter(n => {
+      const text = (n.headline + ' ' + (n.summary ?? '')).toUpperCase()
+      return [...candTickers].some(t => text.includes(t))
+    })
+    .slice(0, 4)
+
+  function timeAgo(published_at: string) {
+    try {
+      const diff = Date.now() - new Date(published_at).getTime()
+      const h = Math.floor(diff / 3_600_000)
+      const m = Math.floor(diff / 60_000)
+      if (h >= 24) return `${Math.floor(h / 24)}d ago`
+      if (h >= 1) return `${h}h ago`
+      return `${m}m ago`
+    } catch { return '' }
+  }
 
   return (
     <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)' }}>
+      {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px 10px' }}>
-        <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 0 }}>Paper Candidates</div>
-        <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{candidates.length}</span>
+        <div style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: 'var(--ink-faint)' }}>
+          Paper Candidates
+        </div>
+        <span style={{ fontSize: 10, color: 'var(--ink-faint)', background: 'var(--surface-soft)', padding: '1px 6px', borderRadius: 999 }}>
+          {candidates.length}
+        </span>
       </div>
-      <div id="dash-candidates">
+
+      {/* Candidate cards */}
+      <div id="dash-candidates" style={{ padding: '0 12px 12px' }}>
         {candidates.length === 0 ? (
-          <div style={{ padding: '14px 16px', fontSize: 12, color: 'var(--ink-faint)' }}>No candidates</div>
+          <div style={{ padding: '20px 4px', fontSize: 12, color: 'var(--ink-faint)', textAlign: 'center' as const }}>
+            No candidates today
+          </div>
         ) : (
-          candidates.map((c, i) => (
-            <div key={i} style={{ padding: '8px 14px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div>
-                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{c.ticker}</span>
-                <div style={{ fontSize: 10, color: 'var(--ink-faint)', marginTop: 2 }}>{c._stratLabel}</div>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: 12, color: '#4ade80', fontFamily: 'var(--font-mono)' }}>${Number(c.entry).toFixed(2)}</div>
-                <div style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--font-mono)' }}>ML {(Number(c.ml_probability) * 100).toFixed(0)}%</div>
-              </div>
-            </div>
-          ))
+          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
+            {candidates.map((c, i) => {
+              const entry = Number(c.entry)
+              const target = Number(c.target)
+              const stop = Number(c.stop)
+              const rr = (entry > 0 && entry > stop && stop > 0)
+                ? ((target - entry) / (entry - stop))
+                : null
+              const ml = Number(c.ml_probability) * 100
+              const gateOk = (c.gate_status ?? '') === 'PASS'
+              const stratColor = STRATEGY_COLORS[c._strategy ?? ''] ?? '#94a3b8'
+              return (
+                <div
+                  key={i}
+                  onClick={() => navigate(`/analyze?ticker=${encodeURIComponent(c.ticker)}`)}
+                  style={{
+                    background: 'var(--surface-soft)',
+                    border: '1px solid var(--surface-rule)',
+                    borderLeft: `3px solid ${stratColor}`,
+                    borderRadius: 6,
+                    padding: '10px 12px',
+                    cursor: 'pointer',
+                  }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'var(--canvas)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'var(--surface-soft)')}
+                >
+                  {/* Top row: ticker + gate badge */}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 14, fontWeight: 800, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>
+                        {c.ticker}
+                      </span>
+                      <span style={{ fontSize: 9, color: stratColor, background: `${stratColor}18`, padding: '1px 5px', borderRadius: 3, fontWeight: 700 }}>
+                        {c._stratLabel}
+                      </span>
+                    </div>
+                    {c.gate_status && (
+                      <span style={{
+                        fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 3,
+                        background: gateOk ? 'rgba(74,222,128,0.15)' : 'rgba(251,191,36,0.15)',
+                        color: gateOk ? '#4ade80' : '#fbbf24',
+                      }}>
+                        {c.gate_status}
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Price trio */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4, marginBottom: 6 }}>
+                    {[
+                      { label: 'Entry', value: `$${entry.toFixed(2)}`, color: 'var(--ink)' },
+                      { label: 'Target', value: `$${target.toFixed(2)}`, color: '#4ade80' },
+                      { label: 'Stop', value: `$${stop.toFixed(2)}`, color: '#f87171' },
+                    ].map(p => (
+                      <div key={p.label} style={{ textAlign: 'center' as const }}>
+                        <div style={{ fontSize: 9, color: 'var(--ink-faint)', marginBottom: 1 }}>{p.label}</div>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: p.color, fontFamily: 'var(--font-mono)' }}>{p.value}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Stats row: R:R, ML%, Score */}
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    {rr !== null && (
+                      <span style={{
+                        fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 700,
+                        color: rr >= 2 ? '#4ade80' : rr >= 1 ? '#fbbf24' : '#f87171',
+                      }}>
+                        R:R {rr.toFixed(1)}
+                      </span>
+                    )}
+                    <span style={{ fontSize: 10, color: 'var(--accent)', fontFamily: 'var(--font-mono)', fontWeight: 700 }}>
+                      ML {ml.toFixed(0)}%
+                    </span>
+                    {c.score != null && (
+                      <span style={{ fontSize: 10, color: 'var(--ink-faint)', fontFamily: 'var(--font-mono)' }}>
+                        Score {Number(c.score).toFixed(0)}
+                      </span>
+                    )}
+                    <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--ink-faint)' }}>→</span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
         )}
       </div>
+
+      {/* Candidate news section — only show if there are relevant news items */}
+      {candNews.length > 0 && (
+        <div style={{ borderTop: '1px solid var(--surface-rule)', padding: '10px 16px 12px' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 8 }}>
+            Candidate News
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
+            {candNews.map((n, i) => (
+              <div
+                key={i}
+                onClick={() => window.open(n.url, '_blank', 'noopener')}
+                style={{ cursor: 'pointer', padding: '6px 8px', borderRadius: 5, background: 'var(--surface-soft)' }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--canvas)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'var(--surface-soft)')}
+              >
+                <div style={{ fontSize: 9, color: 'var(--ink-faint)', marginBottom: 2 }}>
+                  {n.source} · {timeAgo(n.published_at)}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--ink)', fontWeight: 600, lineHeight: 1.35 }}>
+                  {n.headline}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -985,7 +1124,7 @@ export default function DashboardPage() {
       {/* Main grid: left 1fr | right 320px */}
       <div id="dash-main-grid" style={{
         display: 'grid',
-        gridTemplateColumns: narrow ? '1fr' : '1fr 320px',
+        gridTemplateColumns: narrow ? '1fr' : '1fr 380px',
         flex: 1,
         overflow: 'hidden',
         minHeight: 0,
