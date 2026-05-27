@@ -628,7 +628,7 @@ export default function PaperPage() {
                             <td style={{ padding: '7px 12px', color: 'var(--ink-faint)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
                               {row.date ?? '—'}
                             </td>
-                            <td style={{ padding: '7px 12px', color: 'var(--ink-faint)' }}>{row._stratLabel || row.account || row.strategy || ''}</td>
+                            <td style={{ padding: '7px 12px', color: 'var(--ink-faint)' }}>{row._stratLabel || row.account || ''}</td>
                             <td style={{ padding: '7px 12px', fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{row.ticker}</td>
                             <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>${Number(row.entry).toFixed(2)}</td>
                             <td style={{ padding: '7px 12px', textAlign: 'right', color: '#4ade80', fontFamily: 'var(--font-mono)' }}>${Number(row.target).toFixed(2)}</td>
