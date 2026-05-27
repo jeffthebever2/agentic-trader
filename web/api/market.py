@@ -229,7 +229,7 @@ _news_cache: dict = {}
 
 @router.get("/market/news")
 async def market_news(symbol: str):
-    """Fetch recent news for a ticker via yfinance."""
+    """Fetch recent news for a ticker via Google News RSS (no auth required)."""
     global _news_cache
     cache_key = symbol.upper()
     cached = _news_cache.get(cache_key)
@@ -237,27 +237,39 @@ async def market_news(symbol: str):
         return cached
 
     def _fetch():
-        import yfinance as yf
-        ticker = yf.Ticker(symbol.upper())
-        raw = ticker.news or []
+        import feedparser, requests as req
+        from email.utils import parsedate_to_datetime
+
+        query = f"{symbol.upper()} stock"
+        url = f"https://news.google.com/rss/search?q={req.utils.quote(query)}&hl=en-US&gl=US&ceid=US:en"
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; TradingAgents/1.0)"}
+        r = req.get(url, timeout=10, headers=headers)
+        feed = feedparser.parse(r.text)
         items = []
-        for n in raw[:10]:
-            # yfinance v0.2+ nests content inside 'content' key
-            content = n.get("content", n)
-            title = content.get("title", "")
-            summary = content.get("summary", "")
-            url_obj = content.get("canonicalUrl") or content.get("url") or {}
-            url = url_obj.get("url", "") if isinstance(url_obj, dict) else str(url_obj)
-            if not url:
-                url = n.get("link", "")
-            provider = content.get("provider") or {}
-            source = provider.get("displayName", "") if isinstance(provider, dict) else str(provider)
-            if not source:
-                source = n.get("publisher", "")
-            pub = content.get("pubDate", "") or str(n.get("providerPublishTime", ""))
-            if title:
-                items.append({"title": title, "summary": summary, "url": url,
-                               "source": source, "published": pub})
+        for entry in feed.entries[:12]:
+            title = entry.get("title", "").strip()
+            if not title:
+                continue
+            # Google News redirects — use direct link
+            link = entry.get("link", "")
+            source_obj = entry.get("source", {})
+            source = source_obj.get("title", "") if isinstance(source_obj, dict) else str(source_obj)
+            pub_raw = entry.get("published", "")
+            try:
+                pub = parsedate_to_datetime(pub_raw).isoformat() if pub_raw else ""
+            except Exception:
+                pub = pub_raw
+            summary = entry.get("summary", "")
+            # Strip HTML tags from summary
+            import re as _re
+            summary = _re.sub(r"<[^>]+>", "", summary).strip()
+            items.append({
+                "title": title,
+                "summary": summary[:300],
+                "url": link,
+                "source": source,
+                "published": pub,
+            })
         return items
 
     try:
