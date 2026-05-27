@@ -409,6 +409,56 @@ button:active, [role="button"]:active { transform: scale(.965); }
   font-family: var(--font-sans);
 }
 
+/* ── Report / analyst tabs (pill style) ───────────────────────────────────── */
+.report-tab {
+  padding: 6px 14px;
+  font-size: 13px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--ink-muted);
+  background: none;
+  border: 1px solid transparent;
+  transition: color .12s var(--ease-out), background-color .12s var(--ease-out),
+              border-color .12s var(--ease-out), transform .12s var(--ease-out);
+  font-weight: 500;
+  font-family: var(--font-sans);
+}
+.report-tab:hover { color: var(--ink); background: var(--surface-raised); }
+.report-tab.active {
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border-color: rgba(224,62,0,.25);
+  font-weight: 600;
+}
+
+/* ── Admin tabs ────────────────────────────────────────────────────────────── */
+.admin-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink-muted);
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  border-radius: 0 4px 4px 0;
+  transition: color .12s, background .12s, border-color .12s;
+  font-family: var(--font-sans);
+}
+.admin-tab:hover { color: var(--ink); background: var(--surface-soft); }
+.admin-tab.admin-tab-active,
+.admin-tab.active {
+  color: var(--accent);
+  background: var(--accent-subtle);
+  border-left-color: var(--accent);
+  font-weight: 600;
+}
+
 /* ── Header light/dark ────────────────────────────────────────────────────── */
 #ta-app-header {
   background: #FFFFFF !important;
@@ -416,4 +466,38 @@ button:active, [role="button"]:active { transform: scale(.965); }
 body.theme-dark #ta-app-header {
   background: #14151A !important;
   border-bottom: 1px solid rgba(255,255,255,.06) !important;
+}
+
+/* ── Brand mark (logo icon) ───────────────────────────────────────────────── */
+.ta-brand-mark {
+  border-radius: 10px;
+  box-shadow: 0 0 0 1px var(--surface-rule);
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+
+/* ── Opportunity card hover ───────────────────────────────────────────────── */
+.dash-opp-card:hover {
+  border-color: rgba(214,58,0,.4) !important;
+  background: rgba(214,58,0,.03) !important;
+}
+
+/* ── Admin tab active ─────────────────────────────────────────────────────── */
+.admin-tab-active {
+  color: var(--accent) !important;
+}
+
+/* ── Dashboard main grid background ──────────────────────────────────────── */
+#dash-main-grid {
+  background: var(--canvas);
+}
+#dash-main-grid > div {
+  background: var(--surface);
+}
+
+/* ── Dash stat cell ───────────────────────────────────────────────────────── */
+.dash-stat-cell {
+  background: var(--surface);
 }

@@ -103,9 +103,9 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
             id="page-title"
             style={{
               fontSize: 15,
-              fontWeight: 600,
+              fontWeight: 700,
               color: 'var(--ink)',
-              letterSpacing: '-0.01em',
+              letterSpacing: '-0.02em',
               margin: 0,
               lineHeight: 1.2,
             }}
