@@ -104,7 +104,7 @@ function TickerTape() {
     const pctStr = it.changePct == null ? '' : ` ${arrow}${Math.abs(it.changePct).toFixed(2)}%`
     const priceStr = it.price != null ? ` $${it.price.toFixed(2)}` : ''
     return (
-      <span key={it.ticker} className="ticker-item" style={{ marginRight: 32, whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)', fontSize: 12, cursor: 'default' }}>
+      <span key={it.ticker} className="ticker-item" style={{ fontFamily: 'var(--font-mono)' }}>
         <span style={{ fontWeight: 700, color: 'var(--ink)' }}>{it.ticker}</span>
         <span style={{ color: 'var(--ink-muted)', marginLeft: 4 }}>{priceStr}</span>
         <span style={{ color, marginLeft: 4 }}>{pctStr}</span>
@@ -157,10 +157,10 @@ function StatRow({ paperQ }: { paperQ: ReturnType<typeof useQuery<ReturnType<typ
   const totalCash = accounts.reduce((s, a) => s + Number(a.summary?.cash ?? 0), 0)
 
   const stats = [
-    { id: 'stat-portfolio', label: 'Portfolio Value', value: paperQ.isLoading ? '—' : fmt$(totalValue), color: 'var(--ink)' },
-    { id: 'stat-daypnl', label: 'Day P&L', value: paperQ.isLoading ? '—' : fmt$(totalPnl), color: pnlColor(totalPnl) },
-    { id: 'stat-analyses', label: 'Total Analyses', value: paperQ.isLoading ? '—' : String(totalAnalyses), color: 'var(--ink)' },
-    { id: 'stat-cash', label: 'Cash Available', value: paperQ.isLoading ? '—' : fmt$(totalCash), color: 'var(--ink)' },
+    { id: 'stat-portfolio', label: 'Portfolio Value', value: paperQ.isLoading ? '—' : fmt$(totalValue), color: 'var(--ink)', sub: 'Paper trading' },
+    { id: 'stat-daypnl',    label: 'Day P&L',         value: paperQ.isLoading ? '—' : fmt$(totalPnl),   color: pnlColor(totalPnl), sub: 'Since open' },
+    { id: 'stat-analyses',  label: 'Total Analyses',  value: paperQ.isLoading ? '—' : String(totalAnalyses), color: 'var(--ink)', sub: 'LLM signals' },
+    { id: 'stat-cash',      label: 'Cash Available',  value: paperQ.isLoading ? '—' : fmt$(totalCash),   color: 'var(--ink)', sub: 'Across strategies' },
   ]
 
   return (
@@ -181,6 +181,9 @@ function StatRow({ paperQ }: { paperQ: ReturnType<typeof useQuery<ReturnType<typ
           </div>
           <div className="dash-stat-num" style={{ fontSize: 22, fontWeight: 700, color: s.color, fontFamily: 'var(--font-mono)', letterSpacing: '-0.035em' }}>
             {s.value}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginTop: 4, minHeight: 16 }}>
+            {s.sub}
           </div>
         </div>
       ))}
@@ -338,18 +341,8 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
     <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', background: 'var(--surface-soft)' }}>
       {/* Tab bar */}
       <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--surface-rule)', padding: '0 20px', flexShrink: 0, background: 'var(--surface)' }}>
-        <button id="dlf-tab-cand" onClick={() => setTab('candidates')} className={`dlf-tab${tab === 'candidates' ? ' dlf-tab-active' : ''}`} style={{
-          padding: '10px 0', marginRight: 16, background: 'none', border: 'none',
-          borderBottom: tab === 'candidates' ? '2px solid var(--accent)' : '2px solid transparent',
-          color: tab === 'candidates' ? 'var(--ink)' : 'var(--ink-muted)',
-          fontWeight: tab === 'candidates' ? 600 : 500, fontSize: 12.5, cursor: 'pointer',
-        }}>Candidates</button>
-        <button id="dlf-tab-trades" onClick={() => setTab('trades')} className={`dlf-tab${tab === 'trades' ? ' dlf-tab-active' : ''}`} style={{
-          padding: '10px 0', marginRight: 16, background: 'none', border: 'none',
-          borderBottom: tab === 'trades' ? '2px solid var(--accent)' : '2px solid transparent',
-          color: tab === 'trades' ? 'var(--ink)' : 'var(--ink-muted)',
-          fontWeight: tab === 'trades' ? 600 : 500, fontSize: 12.5, cursor: 'pointer',
-        }}>Recent Trades</button>
+        <button id="dlf-tab-cand" onClick={() => setTab('candidates')} className={`dlf-tab${tab === 'candidates' ? ' dlf-tab-active' : ''}`}>Candidates</button>
+        <button id="dlf-tab-trades" onClick={() => setTab('trades')} className={`dlf-tab${tab === 'trades' ? ' dlf-tab-active' : ''}`}>Recent Trades</button>
         <div style={{ flex: 1 }} />
       </div>
 

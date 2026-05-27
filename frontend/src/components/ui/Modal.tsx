@@ -9,12 +9,12 @@ interface ModalProps {
   size?: 'sm' | 'md' | 'lg' | 'xl' | 'full'
 }
 
-const sizeClass = {
-  sm:   'max-w-sm',
-  md:   'max-w-lg',
-  lg:   'max-w-2xl',
-  xl:   'max-w-4xl',
-  full: 'max-w-full m-4',
+const sizeMap: Record<string, string> = {
+  sm:   '420px',
+  md:   '560px',
+  lg:   '720px',
+  xl:   '960px',
+  full: 'calc(100vw - 32px)',
 }
 
 export function Modal({ open, onClose, title, children, size = 'md' }: ModalProps) {
@@ -29,19 +29,36 @@ export function Modal({ open, onClose, title, children, size = 'md' }: ModalProp
 
   return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-6"
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
       role="dialog"
       aria-modal="true"
+      style={{
+        position: 'fixed', inset: 0,
+        background: 'rgba(0,0,0,.7)',
+        zIndex: 1050,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 24,
+      }}
     >
       <div
-        className={`card w-full ${sizeClass[size]} max-h-[90vh] flex flex-col overflow-hidden`}
-        style={{ background: 'var(--surface)' }}
+        className="card"
+        style={{
+          background: 'var(--surface)',
+          width: '100%',
+          maxWidth: sizeMap[size] ?? sizeMap.md,
+          maxHeight: '90vh',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
       >
         {title && (
-          <div className="flex items-center justify-between px-5 py-4 border-b"
-               style={{ borderColor: 'var(--surface-rule)' }}>
-            <div className="font-semibold text-sm" style={{ color: 'var(--ink)' }}>{title}</div>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '16px 20px',
+            borderBottom: '1px solid var(--surface-rule)',
+          }}>
+            <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--ink)' }}>{title}</div>
             <button
               onClick={onClose}
               style={{ background: 'none', border: 'none', color: 'var(--ink-faint)',
@@ -49,7 +66,7 @@ export function Modal({ open, onClose, title, children, size = 'md' }: ModalProp
             >✕</button>
           </div>
         )}
-        <div className="overflow-auto flex-1">
+        <div style={{ overflow: 'auto', flex: 1 }}>
           {children}
         </div>
       </div>

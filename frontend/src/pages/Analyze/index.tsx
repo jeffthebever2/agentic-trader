@@ -462,9 +462,9 @@ export default function AnalyzePage() {
           {showAgent && (
             <div style={section}>
               <div style={label}>Analysts</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 8px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
                 {(['market', 'social', 'news', 'fundamentals'] as const).map(k => (
-                  <label key={k} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                  <label key={k} className="a-analyst-pill">
                     <input
                       type="checkbox"
                       checked={analysts[k]}
