@@ -366,7 +366,7 @@ export default function AnalyzePage() {
   // ── Styles ──────────────────────────────────────────────────────────────────
 
   const container: React.CSSProperties = {
-    display: 'flex', height: 'calc(100vh - 57px)', overflow: 'hidden',
+    display: 'flex', height: '100%', overflow: 'hidden',
   }
 
   const leftPanel: React.CSSProperties = {

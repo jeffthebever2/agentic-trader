@@ -767,3 +767,20 @@ body.theme-dark #ta-app-header {
 
 /* ── Font mono utility ───────────────────────────────────────────────────── */
 .font-mono { font-family: var(--font-mono) !important; }
+
+/* ── App header chrome ────────────────────────────────────────────────────── */
+.ta-page-kicker {
+  margin-top: 2px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--ink-faint);
+  font-weight: 700;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
+.ta-commandbar:focus-within {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(214,58,0,.14);
+}
+.ta-commandbar input::placeholder { color: var(--ink-faint); }
+.ta-header-actions { flex-shrink: 0; }
