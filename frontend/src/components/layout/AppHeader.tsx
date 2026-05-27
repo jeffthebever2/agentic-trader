@@ -98,6 +98,15 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
           <span style={{ display: 'block', width: 16, height: 1.5, background: 'var(--ink)', borderRadius: 2 }} />
         </button>
 
+        {/* Mobile logo — only visible on narrow screens */}
+        <img
+          className="ta-mobile-logo"
+          src="/static/agentic-trader-icon.png"
+          alt="Agentic Trader"
+          style={{ display: 'none' }}
+          onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+        />
+
         <div>
           <h1
             id="page-title"
@@ -130,6 +139,32 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
           )}
         </div>
       </div>
+
+      {/* Mobile search button — only visible on narrow screens, opens command palette */}
+      <button
+        id="ta-mobile-search-btn"
+        type="button"
+        aria-label="Search actions"
+        onClick={handleCmdFocus}
+        style={{
+          display: 'none', // shown via CSS at <980px
+          width: 36,
+          height: 36,
+          background: 'var(--surface-soft)',
+          border: '1px solid var(--surface-rule)',
+          borderRadius: 8,
+          cursor: 'pointer',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+          marginLeft: 'auto',
+        }}
+        className="mobile-search-btn"
+      >
+        <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+      </button>
 
       {/* Command bar */}
       <div

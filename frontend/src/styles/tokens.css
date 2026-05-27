@@ -309,6 +309,26 @@ body.theme-dark main::after {
   #current-datetime { display: none !important; }
 }
 
+/* ── Mobile logo + search ─────────────────────────────────────────────────── */
+.ta-mobile-logo { display: none; }
+.mobile-search-btn { display: none !important; }
+
+@media (max-width: 980px) {
+  .ta-mobile-logo {
+    display: block !important;
+    width: 32px !important;
+    height: 32px !important;
+    border-radius: 8px !important;
+    object-fit: cover !important;
+    border: 1px solid var(--surface-rule) !important;
+    background: var(--surface-soft) !important;
+    flex-shrink: 0 !important;
+  }
+  .mobile-search-btn {
+    display: flex !important;
+  }
+}
+
 /* ── Page panel enter animation ───────────────────────────────────────────── */
 @keyframes panelIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
 
