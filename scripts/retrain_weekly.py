@@ -148,7 +148,6 @@ def main():
         "--batch-size", "50",
         "--account-commission", str(args.account_commission),
         "--account-slippage-bps", str(args.account_slippage_bps),
-        "--min-risk-reward", str(args.min_risk_reward),
     ]
 
     # ── 2. Train command ────────────────────────────────────────────────────
