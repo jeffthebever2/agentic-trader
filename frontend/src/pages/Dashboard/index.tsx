@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueries } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { getPaperStatus } from '@/api/paper'
 import { getMarketChart, getQuotes } from '@/api/market'
@@ -455,40 +455,55 @@ function OpportunitiesPanel() {
 }
 
 interface NewsItem {
-  headline: string
+  title: string
   summary: string
   url: string
   source: string
-  published_at: string
+  published: string
 }
 
+interface NewsApiResponse {
+  symbol: string
+  news: NewsItem[]
+}
+
+function timeAgo(published: string) {
+  try {
+    const diff = Date.now() - new Date(published).getTime()
+    const h = Math.floor(diff / 3_600_000)
+    const m = Math.floor(diff / 60_000)
+    if (h >= 24) return `${Math.floor(h / 24)}d ago`
+    if (h >= 1) return `${h}h ago`
+    return `${m}m ago`
+  } catch { return '' }
+}
+
+// Market-wide symbols to aggregate news from
+const MARKET_NEWS_SYMBOLS = ['SPY', 'QQQ', 'IWM']
+
 function NewsPanel() {
-  const newsQ = useQuery({
-    queryKey: ['market', 'news'],
-    queryFn: () => api.get<NewsItem[]>('/market/news').then(r => r.data),
-    staleTime: 240_000,
-    refetchInterval: 300_000,
+  // Fetch news for market-wide symbols in parallel
+  const results = useQueries({
+    queries: MARKET_NEWS_SYMBOLS.map(sym => ({
+      queryKey: ['market', 'news', sym],
+      queryFn: () => api.get<NewsApiResponse>(`/market/news?symbol=${sym}`).then(r => r.data),
+      staleTime: 240_000,
+      refetchInterval: 300_000,
+    }))
   })
 
-  const items = Array.isArray(newsQ.data) ? newsQ.data.slice(0, 8) : []
-
-  function timeAgo(published_at: string) {
-    try {
-      const diff = Date.now() - new Date(published_at).getTime()
-      const h = Math.floor(diff / 3_600_000)
-      const m = Math.floor(diff / 60_000)
-      if (h >= 24) return `${Math.floor(h / 24)}d ago`
-      if (h >= 1) return `${h}h ago`
-      return `${m}m ago`
-    } catch {
-      return ''
-    }
-  }
+  const isLoading = results.some(r => r.isLoading)
+  // Combine + dedupe by title
+  const seen = new Set<string>()
+  const items: NewsItem[] = results
+    .flatMap(r => r.data?.news ?? [])
+    .filter(n => { if (seen.has(n.title)) return false; seen.add(n.title); return true })
+    .slice(0, 10)
 
   return (
     <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)', padding: '14px 20px' }}>
       <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 10 }}>Market News</div>
-      {newsQ.isLoading ? (
+      {isLoading ? (
         <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>Loading…</div>
       ) : items.length === 0 ? (
         <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>No news available</div>
@@ -507,10 +522,10 @@ function NewsPanel() {
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
             >
               <div style={{ fontSize: 10, color: 'var(--ink-faint)', marginBottom: 3 }}>
-                {it.source} • {timeAgo(it.published_at)}
+                {it.source} • {timeAgo(it.published)}
               </div>
               <div style={{ fontSize: 12, color: 'var(--ink)', fontWeight: 700, lineHeight: 1.4 }}>
-                {it.headline}
+                {it.title}
               </div>
             </div>
           ))}
@@ -862,37 +877,32 @@ function PortfolioExposure() {
 function PaperCandidatesPanel({ accounts }: { accounts: PaperAccount[] }) {
   const navigate = useNavigate()
 
-  // Fetch news once; filter by candidate tickers below
-  const newsQ = useQuery({
-    queryKey: ['market', 'news'],
-    queryFn: () => api.get<NewsItem[]>('/market/news').then(r => r.data),
-    staleTime: 240_000,
-    refetchInterval: 300_000,
-  })
-
   const candidates = accounts.flatMap(a =>
     (a.candidates?.rows ?? []).slice(0, 4).map(r => ({ ...r, _stratLabel: a.label, _strategy: a.strategy }))
   ).slice(0, 10)
 
-  // Filter news for candidate tickers
-  const candTickers = new Set(candidates.map(c => c.ticker?.toUpperCase()))
-  const candNews = (Array.isArray(newsQ.data) ? newsQ.data : [])
+  // Fetch news for top 4 unique candidate tickers in parallel
+  const candTickers = [...new Set(candidates.map(c => c.ticker?.toUpperCase()).filter(Boolean))].slice(0, 4) as string[]
+  const newsResults = useQueries({
+    queries: candTickers.map(sym => ({
+      queryKey: ['market', 'news', sym],
+      queryFn: () => api.get<NewsApiResponse>(`/market/news?symbol=${sym}`).then(r => r.data),
+      staleTime: 240_000,
+    }))
+  })
+
+  // Combine news, filter by candidate ticker mention, dedupe by title
+  const tickerSet = new Set(candTickers)
+  const seenTitles = new Set<string>()
+  const candNews: NewsItem[] = newsResults
+    .flatMap(r => r.data?.news ?? [])
     .filter(n => {
-      const text = (n.headline + ' ' + (n.summary ?? '')).toUpperCase()
-      return [...candTickers].some(t => text.includes(t))
+      if (seenTitles.has(n.title)) return false
+      seenTitles.add(n.title)
+      const text = (n.title + ' ' + (n.summary ?? '')).toUpperCase()
+      return [...tickerSet].some(t => text.includes(t))
     })
     .slice(0, 4)
-
-  function timeAgo(published_at: string) {
-    try {
-      const diff = Date.now() - new Date(published_at).getTime()
-      const h = Math.floor(diff / 3_600_000)
-      const m = Math.floor(diff / 60_000)
-      if (h >= 24) return `${Math.floor(h / 24)}d ago`
-      if (h >= 1) return `${h}h ago`
-      return `${m}m ago`
-    } catch { return '' }
-  }
 
   return (
     <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)' }}>
@@ -1017,10 +1027,10 @@ function PaperCandidatesPanel({ accounts }: { accounts: PaperAccount[] }) {
                 onMouseLeave={e => (e.currentTarget.style.background = 'var(--surface-soft)')}
               >
                 <div style={{ fontSize: 9, color: 'var(--ink-faint)', marginBottom: 2 }}>
-                  {n.source} · {timeAgo(n.published_at)}
+                  {n.source} · {timeAgo(n.published)}
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--ink)', fontWeight: 600, lineHeight: 1.35 }}>
-                  {n.headline}
+                  {n.title}
                 </div>
               </div>
             ))}

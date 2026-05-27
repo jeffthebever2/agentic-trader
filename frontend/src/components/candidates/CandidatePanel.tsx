@@ -338,7 +338,7 @@ export function CandidatePanel({ candidate, open, onClose, strategyColor = '#94a
   const newsQ = useQuery({
     queryKey: ['market', 'news', ticker],
     queryFn: () => getMarketNews(ticker),
-    enabled: open && tab === 'News' && !!ticker,
+    enabled: open && !!ticker,   // prefetch on open, not just when News tab active
     staleTime: 900_000,
   })
 
