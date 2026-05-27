@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
+import { Search, TrendingUp } from 'lucide-react'
 import { useOverlayStore } from '@/components/ui/GlobalOverlays'
 
 // ── Route → title / kicker ──────────────────────────────────────────────────
@@ -161,9 +162,7 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
         }}
         className="mobile-search-btn"
       >
-        <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-        </svg>
+        <Search size={18} strokeWidth={2} aria-hidden="true" />
       </button>
 
       {/* Command bar */}
@@ -187,9 +186,7 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
         }}
         onClick={handleCmdFocus}
       >
-        <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-        </svg>
+        <Search size={14} strokeWidth={2} aria-hidden="true" />
         <input
           ref={cmdRef}
           value={cmdValue}
@@ -266,9 +263,7 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
           onClick={openTVChart}
           style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px' }}
         >
-          <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="var(--accent)" strokeWidth="2" aria-hidden="true">
-            <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
-          </svg>
+          <TrendingUp size={13} strokeWidth={2} color="var(--accent)" aria-hidden="true" />
           Chart
         </button>
 

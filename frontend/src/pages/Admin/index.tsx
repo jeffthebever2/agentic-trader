@@ -1,8 +1,10 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '@/api/client'
 import { getAdminFlags, getDiagnostics, restartWeb, startTunnel, stopTunnel } from '@/api/admin'
 import { LoadingState } from '@/components/shared/LoadingState'
+import { useAuthStore } from '@/store/auth'
 import type { AdminFlags } from '@/types'
 
 const ADMIN_TABS = [
@@ -94,10 +96,21 @@ function OverviewTab() {
 
 // ── Users ─────────────────────────────────────────────────────────────────────
 
-interface UserRecord { email: string; role: string; created_at: string }
+interface UserRecord {
+  email: string
+  name?: string
+  role: 'admin' | 'user' | 'viewer' | string
+  created_at?: string
+  phone_number?: string
+  sms_verified?: boolean
+  onboarding_completed?: boolean
+  passkeys?: unknown[]
+}
 
 function UsersTab() {
   const qc = useQueryClient()
+  const navigate = useNavigate()
+  const { user, previewStandardUser } = useAuthStore()
   const { data, isLoading } = useQuery({
     queryKey: ['admin', 'users'],
     queryFn: () => api.get<{ users: UserRecord[] }>('/auth/users').then(r => r.data.users),
@@ -109,7 +122,7 @@ function UsersTab() {
     const role = pendingRoles[email]
     if (!role) return
     try {
-      await api.patch(`/auth/users/${encodeURIComponent(email)}/role`, { role })
+      await api.put(`/auth/users/${encodeURIComponent(email)}/role`, { role })
       setMsgs(m => ({ ...m, [email]: 'Saved' }))
       qc.invalidateQueries({ queryKey: ['admin', 'users'] })
     } catch {
@@ -117,23 +130,88 @@ function UsersTab() {
     }
   }
 
+  const deleteUser = async (email: string) => {
+    if (!window.confirm(`Permanently delete user ${email}? This cannot be undone.`)) return
+    try {
+      await api.delete(`/auth/users/${encodeURIComponent(email)}`)
+      setMsgs(m => ({ ...m, [email]: 'Deleted' }))
+      qc.invalidateQueries({ queryKey: ['admin', 'users'] })
+    } catch {
+      setMsgs(m => ({ ...m, [email]: 'Delete failed' }))
+    }
+  }
+
+  const users = data ?? []
+  const admins = users.filter(u => u.role === 'admin').length
+  const verified = users.filter(u => u.sms_verified).length
+  const onboarded = users.filter(u => u.onboarding_completed).length
+  const me = user?.actual_admin_email || user?.email || ''
+
   if (isLoading) return <LoadingState />
   return (
-    <div style={{ padding: 20 }}>
+    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div className="admin-stat-grid" style={{ flex: '1 1 520px', marginBottom: 0 }}>
+          {[
+            ['Total Users', users.length],
+            ['Admins', admins],
+            ['SMS Verified', verified],
+            ['Onboarded', onboarded],
+          ].map(([label, value]) => (
+            <div key={label} className="admin-stat">
+              <div className="admin-stat-label">{label}</div>
+              <div className="admin-stat-value">{value}</div>
+            </div>
+          ))}
+        </div>
+        <button
+          className="btn-secondary"
+          style={{ fontSize: 11, padding: '6px 10px', alignSelf: 'flex-start' }}
+          onClick={() => { previewStandardUser(); navigate('/') }}
+        >
+          Preview standard-user view
+        </button>
+      </div>
       <table style={tableStyle}>
         <thead>
           <tr>
             <th style={thStyle}>Email</th>
+            <th style={thStyle}>Name</th>
             <th style={thStyle}>Role</th>
+            <th style={thStyle}>Phone</th>
+            <th style={thStyle}>SMS</th>
+            <th style={thStyle}>Onboarded</th>
+            <th style={thStyle}>Passkeys</th>
             <th style={thStyle}>Created</th>
             <th style={thStyle}>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {(data ?? []).map(u => (
+          {users.map(u => {
+            const isMe = u.email.toLowerCase() === me.toLowerCase()
+            return (
             <tr key={u.email}>
-              <td style={tdStyle}>{u.email}</td>
-              <td style={tdStyle}>{u.role}</td>
+              <td style={{ ...tdStyle, fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+                {u.email}{isMe && <span style={{ color: 'var(--accent)', fontSize: 10, marginLeft: 4 }}>(you)</span>}
+              </td>
+              <td style={tdStyle}>{u.name || '—'}</td>
+              <td style={tdStyle}>
+                <span style={{
+                  display: 'inline-flex',
+                  padding: '2px 8px',
+                  borderRadius: 999,
+                  fontSize: 11,
+                  fontWeight: 800,
+                  background: u.role === 'admin' ? 'rgba(124,58,237,.16)' : 'var(--surface-soft)',
+                  color: u.role === 'admin' ? '#8b5cf6' : 'var(--ink-muted)',
+                }}>
+                  {u.role || 'user'}
+                </span>
+              </td>
+              <td style={tdStyle}>{u.phone_number || '—'}</td>
+              <td style={tdStyle}>{u.sms_verified ? <span style={{ color: '#059669' }}>✓</span> : '—'}</td>
+              <td style={tdStyle}>{u.onboarding_completed ? <span style={{ color: '#059669' }}>✓</span> : '—'}</td>
+              <td style={tdStyle}>{u.passkeys?.length ?? 0}</td>
               <td style={tdStyle}>{u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}</td>
               <td style={{ ...tdStyle, display: 'flex', gap: 8, alignItems: 'center' }}>
                 <select
@@ -142,15 +220,20 @@ function UsersTab() {
                   style={{ fontSize: 12, padding: '2px 6px', borderRadius: 4,
                            background: 'var(--surface-raised)', color: 'var(--ink)',
                            border: '1px solid var(--surface-rule)' }}
+                  disabled={isMe}
                 >
-                  {['user', 'admin', 'viewer'].map(r => <option key={r} value={r}>{r}</option>)}
+                  {['user', 'admin'].map(r => <option key={r} value={r}>{r}</option>)}
                 </select>
                 <button className="btn-secondary" style={{ fontSize: 11, padding: '3px 10px' }}
-                        onClick={() => saveRole(u.email)}>Save</button>
+                        onClick={() => saveRole(u.email)} disabled={isMe}>Save</button>
+                {!isMe && (
+                  <button className="btn-danger" style={{ fontSize: 11, padding: '3px 10px' }}
+                          onClick={() => deleteUser(u.email)}>Delete</button>
+                )}
                 {msgs[u.email] && <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{msgs[u.email]}</span>}
               </td>
             </tr>
-          ))}
+          )})}
         </tbody>
       </table>
     </div>
@@ -512,7 +595,7 @@ export default function AdminPage() {
           <JsonTab queryKey={['admin', 'security']} url="/auth/2fa/status" />
         )}
         {activeTab === 'history'      && (
-          <JsonTab queryKey={['admin', 'history']} url="/backtest/history" />
+          <JsonTab queryKey={['admin', 'history']} url="/paper/backtest-index" />
         )}
         {activeTab === 'runner'       && (
           <JsonTab queryKey={['admin', 'runner']} url="/paper/status" />

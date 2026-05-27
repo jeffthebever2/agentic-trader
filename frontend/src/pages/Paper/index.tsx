@@ -1,12 +1,16 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { getPaperStatus, getPaperEquity, startPaperRunner, stopPaperRunner } from '@/api/paper'
+import { getPaperStatus, getPaperEquity, getPaperAnalytics, startPaperRunner, stopPaperRunner, getPaperAutostart, setPaperAutostart } from '@/api/paper'
 import { Badge } from '@/components/ui/Badge'
 import { Drawer } from '@/components/ui/Drawer'
 import { LoadingState, ErrorState } from '@/components/shared/LoadingState'
 import { LineChart } from '@/components/charts/LineChart'
+import { EquityAreaChart } from '@/components/charts/EquityAreaChart'
+import { WinLossBar } from '@/components/charts/WinLossBar'
+import type { StrategyMetric } from '@/components/charts/WinLossBar'
 import { useToast } from '@/components/ui/Toast'
 import { useAuthStore } from '@/store/auth'
+import { CandidatePanel } from '@/components/candidates/CandidatePanel'
 import type { PaperAccount, CandidateRow } from '@/types'
 
 const STRATEGY_COLORS: Record<string, string> = {
@@ -94,7 +98,7 @@ function AccountCard({ account, onClick }: { account: PaperAccount; onClick: () 
 }
 
 // ── Candidates Table ──────────────────────────────────────────────────────
-function CandidatesTable({ rows }: { rows: CandidateRow[] }) {
+function CandidatesTable({ rows, onSelect }: { rows: CandidateRow[]; onSelect: (r: CandidateRow) => void }) {
   if (!rows.length) {
     return <div style={{ padding: '24px 16px', color: 'var(--ink-faint)', fontSize: 12, textAlign: 'center' }}>No candidates</div>
   }
@@ -103,10 +107,10 @@ function CandidatesTable({ rows }: { rows: CandidateRow[] }) {
       <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
         <thead>
           <tr style={{ borderBottom: '1px solid var(--surface-rule)' }}>
-            {['Strategy','Ticker','Entry','Target','Stop','Score','R:R','ML%','Loss%','E.Return','Reason'].map(h => (
+            {['Strategy','Ticker','Entry','Target','Stop','Score','R:R','ML%','Loss%','E.Return','Gate'].map(h => (
               <th key={h} style={{ padding: '8px 12px', fontWeight: 500,
                                    color: 'var(--ink-faint)', whiteSpace: 'nowrap',
-                                   textAlign: h === 'Strategy' || h === 'Ticker' || h === 'Reason' ? 'left' : 'right' }}>
+                                   textAlign: h === 'Strategy' || h === 'Ticker' || h === 'Gate' ? 'left' : 'right' }}>
                 {h}
               </th>
             ))}
@@ -118,8 +122,11 @@ function CandidatesTable({ rows }: { rows: CandidateRow[] }) {
             const rr = (e > 0 && e > s) ? ((t - e) / (e - s)).toFixed(2) : '—'
             const rrColor = rr === '—' ? 'var(--ink-faint)' : Number(rr) >= 2 ? '#4ade80' : Number(rr) >= 1 ? '#fbbf24' : '#f87171'
             const llp = Number(row.large_loss_probability)
+            const gateStatus = row.gate_status ?? ''
+            const gateBg   = gateStatus === 'PASS' ? '#4ade8022' : '#fbbf2422'
+            const gateText = gateStatus === 'PASS' ? '#4ade80'   : '#fbbf24'
             return (
-              <tr key={i} className="tr-hover" style={{ borderBottom: '1px solid var(--surface-rule)', cursor: 'pointer' }}>
+              <tr key={i} className="tr-hover" onClick={() => onSelect(row)} style={{ borderBottom: '1px solid var(--surface-rule)', cursor: 'pointer' }}>
                 <td style={{ padding: '7px 12px', color: 'var(--ink-faint)' }}>{row._stratLabel || row.account || ''}</td>
                 <td style={{ padding: '7px 12px', fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{row.ticker}</td>
                 <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>${Number(row.entry).toFixed(2)}</td>
@@ -132,8 +139,13 @@ function CandidatesTable({ rows }: { rows: CandidateRow[] }) {
                   {row.large_loss_probability != null ? fmtPct(llp) : '—'}
                 </td>
                 <td style={{ padding: '7px 12px', textAlign: 'right', color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{fmtPct(Number(row.expected_return))}</td>
-                <td style={{ padding: '7px 12px', color: 'var(--ink-faint)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {row.decision_reason || row.gate_status || ''}
+                <td style={{ padding: '7px 12px' }}>
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+                    background: gateBg, color: gateText,
+                  }}>
+                    {gateStatus || '—'}
+                  </span>
                 </td>
               </tr>
             )
@@ -232,9 +244,39 @@ function RunnerControls({ running }: { running: boolean }) {
   const [aiPicks, setAiPicks]     = useState('5')
   const [model, setModel]         = useState('openai/gpt-4o-mini')
   const [tickerFile, setTickerFile] = useState('all_tickers.txt')
-  const [holdOvernight, setHoldOvernight] = useState(true)
-  const [includeAi, setIncludeAi] = useState(true)
-  const [expanded, setExpanded]   = useState(false)
+  const [holdOvernight, setHoldOvernight]     = useState(true)
+  const [includeAi, setIncludeAi]             = useState(true)
+  const [tradeFidelity, setTradeFidelity]     = useState(false)
+  const [executeReal, setExecuteReal]         = useState(false)
+  const [mlRetMin, setMlRetMin]               = useState('0.0')
+  const [takeProfitPct, setTakeProfitPct]     = useState('0')
+  const [stopLossPct, setStopLossPct]         = useState('0')
+  const [highConfThresh, setHighConfThresh]   = useState('0.80')
+  const [maxTickers, setMaxTickers]           = useState('0')
+  const [modelBundle, setModelBundle]         = useState('ml_models/stock_universe_candidate_20260512/model_bundle.joblib')
+  const [smsNumber, setSmsNumber]             = useState('')
+  const [expanded, setExpanded]               = useState(false)
+  const [autostartEnabled, setAutostartEnabled] = useState(false)
+  const [warmupMins, setWarmupMins]           = useState('30')
+
+  // Load autostart config
+  const autostartQ = useQuery({
+    queryKey: ['paper', 'autostart'],
+    queryFn: getPaperAutostart,
+    staleTime: 60_000,
+  })
+  useEffect(() => {
+    const cfg = autostartQ.data as { enabled?: boolean; premarket_warmup_minutes?: number } | undefined
+    if (cfg) {
+      setAutostartEnabled(cfg.enabled ?? false)
+      setWarmupMins(String(cfg.premarket_warmup_minutes ?? 30))
+    }
+  }, [autostartQ.data])
+
+  const autostartMut = useMutation({
+    mutationFn: (enabled: boolean) => setPaperAutostart(enabled),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['paper', 'autostart'] }),
+  })
 
   const startMut = useMutation({
     mutationFn: () => startPaperRunner({
@@ -245,12 +287,21 @@ function RunnerControls({ running }: { running: boolean }) {
       max_open_positions: Number(maxPos) || 5,
       ml_probability_threshold: Number(mlThresh) || 0.72,
       ml_loss_max: Number(mlLossMax) || 0.25,
+      ml_return_min: Number(mlRetMin) || 0,
+      take_profit_pct: Number(takeProfitPct) || 0,
+      stop_loss_pct: Number(stopLossPct) || 0,
+      high_conf_threshold: Number(highConfThresh) || 0.80,
+      max_tickers: Number(maxTickers) || 0,
+      model_bundle: modelBundle,
       ai_shortlist: Number(aiShortlist) || 30,
       ai_picks: Number(aiPicks) || 5,
       openrouter_model: model,
       ticker_file: tickerFile,
+      sms_number: smsNumber || undefined,
       hold_overnight: holdOvernight,
       include_pure_ai: includeAi,
+      trade_fidelity: tradeFidelity,
+      execute_real_trades: executeReal,
     }),
     onSuccess: () => { toast.success('Runner started'); qc.invalidateQueries({ queryKey: ['paper', 'status'] }) },
     onError: (e: unknown) => toast.error((e as Error)?.message ?? 'Start failed'),
@@ -278,7 +329,7 @@ function RunnerControls({ running }: { running: boolean }) {
       </div>
 
       {/* Main action row */}
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: expanded ? 14 : 0 }}>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: expanded ? 14 : 0 }}>
         {!running ? (
           <button id="paper-start-btn"
             style={{ padding: '8px 22px', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}
@@ -291,6 +342,31 @@ function RunnerControls({ running }: { running: boolean }) {
             onClick={() => stopMut.mutate()} disabled={stopMut.isPending}>
             {stopMut.isPending ? 'Stopping…' : '■ Stop Runner'}
           </button>
+        )}
+        {/* Autostart toggle */}
+        <label id="paper-autostart-enabled" style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--ink-muted)', cursor: 'pointer', marginLeft: 8 }}>
+          <input
+            type="checkbox"
+            checked={autostartEnabled}
+            onChange={e => { setAutostartEnabled(e.target.checked); autostartMut.mutate(e.target.checked) }}
+          />
+          Auto-start on boot
+        </label>
+        {autostartEnabled && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--ink-faint)' }}>
+            <label htmlFor="paper-premarket-warmup" style={{ whiteSpace: 'nowrap' }}>Warmup</label>
+            <input
+              id="paper-premarket-warmup"
+              type="number"
+              min="0"
+              max="120"
+              step="5"
+              value={warmupMins}
+              onChange={e => setWarmupMins(e.target.value)}
+              style={{ ...inp, width: 60 }}
+            />
+            <span>min</span>
+          </div>
         )}
       </div>
 
@@ -315,18 +391,40 @@ function RunnerControls({ running }: { running: boolean }) {
             <input id="paper-ai-shortlist" type="number" min="1" step="1" value={aiShortlist} onChange={e => setAiShortlist(e.target.value)} style={inp} /></div>
           <div><label style={lbl}>AI Picks</label>
             <input id="paper-ai-picks" type="number" min="1" step="1" value={aiPicks} onChange={e => setAiPicks(e.target.value)} style={inp} /></div>
+          <div><label style={lbl}>ML Return Min</label>
+            <input id="paper-ml-ret-min" type="number" min="-0.5" max="0.5" step="0.01" value={mlRetMin} onChange={e => setMlRetMin(e.target.value)} style={inp} /></div>
+          <div><label style={lbl}>Take Profit %</label>
+            <input id="paper-take-profit-pct" type="number" min="0" max="50" step="0.5" value={takeProfitPct} onChange={e => setTakeProfitPct(e.target.value)} style={inp} /></div>
+          <div><label style={lbl}>Stop Loss %</label>
+            <input id="paper-stop-loss-pct" type="number" min="0" max="50" step="0.5" value={stopLossPct} onChange={e => setStopLossPct(e.target.value)} style={inp} /></div>
+          <div><label style={lbl}>High Conf Threshold</label>
+            <input id="paper-high-conf-threshold" type="number" min="0.5" max="0.99" step="0.01" value={highConfThresh} onChange={e => setHighConfThresh(e.target.value)} style={inp} /></div>
+          <div><label style={lbl}>Max Tickers (0=all)</label>
+            <input id="paper-max-tickers" type="number" min="0" step="1" value={maxTickers} onChange={e => setMaxTickers(e.target.value)} style={inp} /></div>
           <div style={{ gridColumn: 'span 2' }}><label style={lbl}>OpenRouter Model</label>
             <input id="paper-openrouter-model" type="text" value={model} onChange={e => setModel(e.target.value)} style={{ ...inp, fontFamily: 'var(--font-mono)' }} /></div>
           <div style={{ gridColumn: 'span 2' }}><label style={lbl}>Ticker File</label>
             <input id="paper-tickers" type="text" value={tickerFile} onChange={e => setTickerFile(e.target.value)} style={{ ...inp, fontFamily: 'var(--font-mono)' }} /></div>
+          <div style={{ gridColumn: '1 / -1' }}><label style={lbl}>Model Bundle Path</label>
+            <input id="paper-new-model-bundle" type="text" value={modelBundle} onChange={e => setModelBundle(e.target.value)} style={{ ...inp, fontFamily: 'var(--font-mono)' }} placeholder="ml_models/..." /></div>
+          <div style={{ gridColumn: '1 / -1' }}><label style={lbl}>SMS Number (override .env)</label>
+            <input id="paper-sms-number" type="text" value={smsNumber} onChange={e => setSmsNumber(e.target.value)} style={{ ...inp, fontFamily: 'var(--font-mono)' }} placeholder="Uses TEXTNOW_PHONE or PAPER_SMS_NUMBER from .env if blank" /></div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, gridColumn: '1 / -1' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--ink-muted)', cursor: 'pointer' }}>
-              <input id="paper-hold-overnight" type="checkbox" checked={holdOvernight} onChange={e => setHoldOvernight(e.target.checked)} />
-              Hold overnight (swing trading)
+              <input id="paper-include-ai" type="checkbox" checked={includeAi} onChange={e => setIncludeAi(e.target.checked)} />
+              Pure AI
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--ink-muted)', cursor: 'pointer' }}>
-              <input id="paper-include-ai" type="checkbox" checked={includeAi} onChange={e => setIncludeAi(e.target.checked)} />
-              Include Pure AI strategy
+              <input id="paper-hold-overnight" type="checkbox" checked={holdOvernight} onChange={e => setHoldOvernight(e.target.checked)} />
+              Hold overnight to avoid day trading
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--ink-muted)', cursor: 'pointer' }}>
+              <input id="paper-trade-fidelity" type="checkbox" checked={tradeFidelity} onChange={e => setTradeFidelity(e.target.checked)} />
+              Send to Fidelity API (Preview Only)
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 12, color: '#f87171', fontWeight: 600, cursor: 'pointer' }} title="Actually clicks Place Order on Fidelity API with real money! Requires SMS HIL approval">
+              <input id="paper-trade-fidelity-execute" type="checkbox" checked={executeReal} onChange={e => setExecuteReal(e.target.checked)} />
+              Execute Real Money Trades (Requires SMS HIL)
             </label>
           </div>
         </div>
@@ -338,6 +436,7 @@ function RunnerControls({ running }: { running: boolean }) {
 export default function PaperPage() {
   const [drawerAccount, setDrawerAccount] = useState<PaperAccount | null>(null)
   const [candFilter, setCandFilter] = useState<string>('all')
+  const [selectedCand, setSelectedCand] = useState<CandidateRow | null>(null)
   const { user } = useAuthStore()
   const isAdmin = user?.role === 'admin'
 
@@ -399,6 +498,9 @@ export default function PaperPage() {
       {/* Equity Chart */}
       <EquityChartPanel accounts={accounts} />
 
+      {/* Analytics Panel */}
+      <AnalyticsPanel accounts={accounts} />
+
       {/* Candidates */}
       <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, overflow: 'hidden' }}>
         <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--surface-rule)',
@@ -428,7 +530,7 @@ export default function PaperPage() {
             ))}
           </div>
         </div>
-        <CandidatesTable rows={filteredCands} />
+        <CandidatesTable rows={filteredCands} onSelect={(r) => setSelectedCand(r)} />
       </div>
 
       {/* Runner log */}
@@ -448,6 +550,14 @@ export default function PaperPage() {
         account={drawerAccount}
         open={!!drawerAccount}
         onClose={() => setDrawerAccount(null)}
+      />
+
+      {/* Candidate detail panel */}
+      <CandidatePanel
+        candidate={selectedCand}
+        open={selectedCand !== null}
+        onClose={() => setSelectedCand(null)}
+        strategyColor={selectedCand ? (STRATEGY_COLORS[selectedCand._strategy ?? ''] ?? '#94a3b8') : undefined}
       />
     </div>
   )
@@ -470,7 +580,7 @@ function EquityChartPanel({ accounts }: { accounts: PaperAccount[] }) {
     byStrategy[pt.strategy].push({ x: pt.t.slice(0, 16).replace('T', ' '), y: pt.v })
   })
 
-  const datasets = accounts
+  const series = accounts
     .filter(a => byStrategy[a.strategy]?.length > 1)
     .map(a => ({
       label: a.label,
@@ -478,19 +588,63 @@ function EquityChartPanel({ accounts }: { accounts: PaperAccount[] }) {
       color: STRATEGY_COLORS[a.strategy] ?? '#94a3b8',
     }))
 
-  if (!datasets.length) return null
+  if (!series.length) return null
 
   return (
     <div id="paper-equity-chart-panel"
          style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, padding: 16 }}>
       <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', marginBottom: 12 }}>Equity Curve</div>
       <canvas id="paper-equity-chart" style={{ display: 'none' }} />
-      <LineChart
-        datasets={datasets}
+      <EquityAreaChart
+        series={series}
         height={200}
-        showLegend={true}
         yFormatter={v => '$' + Math.round(v).toLocaleString()}
       />
+    </div>
+  )
+}
+
+// ── Analytics panel ───────────────────────────────────────────────────────
+function AnalyticsPanel({ accounts }: { accounts: PaperAccount[] }) {
+  const analyticsQ = useQuery({
+    queryKey: ['paper', 'analytics'],
+    queryFn: getPaperAnalytics,
+    staleTime: 60_000,
+  })
+
+  const data = analyticsQ.data
+  if (!data) return null
+
+  const byStrategy = data.by_strategy as Record<string, {
+    win_rate?: number
+    trades?: number
+    total_pnl?: number
+    max_drawdown_pct?: number
+    sharpe?: number | null
+    profit_factor?: number | null
+  }>
+
+  const metrics: StrategyMetric[] = accounts
+    .map(a => {
+      const s = byStrategy?.[a.strategy] ?? {}
+      return {
+        strategy: a.strategy,
+        label: a.label,
+        win_rate: s.win_rate ?? 0,
+        trades: s.trades ?? 0,
+        total_pnl: s.total_pnl ?? 0,
+        max_drawdown_pct: s.max_drawdown_pct ?? 0,
+        sharpe: s.sharpe ?? null,
+        profit_factor: s.profit_factor ?? null,
+      }
+    })
+    .filter(m => m.trades > 0)
+
+  if (!metrics.length) return null
+
+  return (
+    <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, padding: 16 }}>
+      <WinLossBar metrics={metrics} />
     </div>
   )
 }

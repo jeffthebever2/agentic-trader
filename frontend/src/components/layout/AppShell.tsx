@@ -14,7 +14,7 @@ interface AppShellProps {
 }
 
 export function AppShell({ children }: AppShellProps) {
-  const { user } = useAuthStore()
+  const { user, realUser, restoreAdminView } = useAuthStore()
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
@@ -62,6 +62,32 @@ export function AppShell({ children }: AppShellProps) {
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
         <AppHeader onToggleSidebar={() => setSidebarOpen(o => !o)} />
+        {realUser && (
+          <div
+            id="view-as-banner"
+            style={{
+              background: 'rgba(224,62,0,.09)',
+              borderBottom: '1px solid rgba(224,62,0,.22)',
+              padding: '8px 24px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              flexShrink: 0,
+              color: 'var(--ink)',
+              fontSize: 12,
+              fontWeight: 700,
+            }}
+          >
+            <div>
+              Viewing as <span id="view-as-email" style={{ fontFamily: 'var(--font-mono)' }}>{user?.email ?? 'standard user'}</span>
+              <span id="view-as-admin" style={{ color: 'var(--ink-faint)', fontWeight: 500 }}> from {realUser.email}</span>
+            </div>
+            <button className="btn-secondary" style={{ fontSize: 11, padding: '4px 10px' }} onClick={restoreAdminView}>
+              Return to admin
+            </button>
+          </div>
+        )}
         <main id="main-content" style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden' }}>
           {children}
         </main>

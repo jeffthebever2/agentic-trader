@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { Eye, EyeOff, Check } from 'lucide-react'
 import api from '@/api/client'
 import { useThemeStore } from '@/store/theme'
 import { useAuthStore } from '@/store/auth'
@@ -139,10 +140,7 @@ function ApiKeyRow({ envKey, label, desc, isSet, value, onChange }: {
           title="Show/hide"
           style={{ padding: '0 10px', flexShrink: 0 }}
         >
-          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-            <circle cx="12" cy="12" r="3" />
-          </svg>
+          {show ? <EyeOff size={16} strokeWidth={2} /> : <Eye size={16} strokeWidth={2} />}
         </button>
       </div>
       {isSet
@@ -534,9 +532,7 @@ export default function SettingsPage() {
           borderRadius: 8, border: '1px solid rgba(6,78,59,.8)',
           background: 'rgba(6,78,59,.2)', color: '#34d399', fontSize: 13, marginBottom: 16,
         }}>
-          <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5} style={{ flexShrink: 0 }}>
-            <path d="M20 6L9 17l-5-5" />
-          </svg>
+          <Check size={16} strokeWidth={2.5} style={{ flexShrink: 0 }} />
           Settings saved successfully
         </div>
       )}
@@ -987,7 +983,7 @@ export default function SettingsPage() {
               </div>
             </div>
             <div style={{ marginTop: 12, height: 8, borderRadius: 4, background: 'var(--surface-soft, #0f172a)', overflow: 'hidden' }}>
-              <div style={{ height: '100%', borderRadius: 4, background: orBarColor, width: `${orPct.toFixed(1)}%`, transition: 'width .4s' }} />
+	              <div style={{ height: '100%', borderRadius: 4, background: orBarColor, width: '100%', transformOrigin: 'left center', transform: `scaleX(${orPct / 100})`, transition: 'transform .4s var(--ease-out)' }} />
             </div>
             <div style={{ marginTop: 8, fontSize: 12, color: 'var(--ink-faint)' }}>
               Remaining: {orRemaining.toLocaleString()}{orSourceText ? ' · ' + orSourceText : ''}

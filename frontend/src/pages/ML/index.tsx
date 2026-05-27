@@ -7,6 +7,7 @@ import { WS_ML_TRAIN } from '@/api/ws'
 import type { WsMessage } from '@/api/ws'
 import type { PaperAccount } from '@/types'
 import { Badge } from '@/components/ui/Badge'
+import { FeatureImportanceBar } from '@/components/charts/FeatureImportanceBar'
 
 // ── Internal types ────────────────────────────────────────────────────────────
 
@@ -447,8 +448,8 @@ export default function MLPage() {
                     </div>
                   </div>
                   <div style={{ height: 8, borderRadius: 99, background: 'var(--surface-raised)', overflow: 'hidden', display: 'flex' }}>
-                    <div style={{ width: `${settledPct}%`, background: '#4ade80', transition: 'width .3s' }} />
-                    <div style={{ width: `${unsettledPct}%`, background: '#facc15', transition: 'width .3s' }} />
+	                    <div style={{ width: `${settledPct}%`, background: '#4ade80' }} />
+	                    <div style={{ width: `${unsettledPct}%`, background: '#facc15' }} />
                   </div>
                 </div>
               )
@@ -511,23 +512,7 @@ export default function MLPage() {
               {(mlData.feature_importance?.length ?? 0) > 0 && (
                 <div id="ml-fi-bars">
                   <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', marginBottom: 12 }}>Feature Importance (top 15)</div>
-                  {mlData.feature_importance.slice(0, 15).map((fi, i) => {
-                    const max = mlData.feature_importance[0].importance
-                    const pct = max > 0 ? (fi.importance / max) * 100 : 0
-                    return (
-                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-                        <div style={{ width: 160, fontSize: 11, color: 'var(--ink-faint)', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0 }}>
-                          {fi.feature}
-                        </div>
-                        <div style={{ flex: 1, height: 10, background: 'var(--surface-raised)', borderRadius: 99 }}>
-                          <div style={{ width: `${pct}%`, height: '100%', background: 'var(--accent)', borderRadius: 99, transition: 'width .3s' }} />
-                        </div>
-                        <div style={{ width: 56, fontSize: 11, color: 'var(--ink-muted)', textAlign: 'right', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>
-                          {fi.importance.toFixed(4)}
-                        </div>
-                      </div>
-                    )
-                  })}
+                  <FeatureImportanceBar features={mlData.feature_importance} topN={15} />
                 </div>
               )}
             </>

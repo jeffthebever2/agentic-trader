@@ -3,11 +3,15 @@ export interface User {
   email: string
   name: string
   role: 'admin' | 'user' | 'viewer'
+  is_admin?: boolean
   hil_disclosure_accepted?: boolean
   phone?: string
+  phone_number?: string
   onboarding_completed?: boolean
   legal_accepted?: boolean
   sms_verified?: boolean
+  viewed_by_admin?: boolean
+  actual_admin_email?: string
 }
 
 export interface AuthFeatures {

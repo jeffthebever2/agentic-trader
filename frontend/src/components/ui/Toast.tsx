@@ -5,6 +5,7 @@
  */
 import { useRef } from 'react'
 import { create } from 'zustand'
+import { CheckCircle, XCircle, AlertTriangle, Info } from 'lucide-react'
 
 type ToastType = 'success' | 'error' | 'warning' | 'info'
 
@@ -50,11 +51,18 @@ export function useToast() {
   }
 }
 
-const ICONS: Record<ToastType, string> = {
+const ICON_COLOR: Record<ToastType, string> = {
   success: '#10b981',
   error:   '#ef4444',
   warning: '#f59e0b',
   info:    'var(--accent)',
+}
+
+const ICON_CMP: Record<ToastType, React.ElementType> = {
+  success: CheckCircle,
+  error:   XCircle,
+  warning: AlertTriangle,
+  info:    Info,
 }
 
 const LABELS: Record<ToastType, string> = {
@@ -67,6 +75,7 @@ const LABELS: Record<ToastType, string> = {
 function ToastItem({ item }: { item: ToastItem }) {
   const { remove } = useToastStore()
   const ref = useRef<HTMLDivElement>(null)
+  const IconCmp = ICON_CMP[item.type]
 
   return (
     <div
@@ -80,13 +89,7 @@ function ToastItem({ item }: { item: ToastItem }) {
         animation: 'toast-in .2s ease-out',
       }}
     >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-           stroke={ICONS[item.type]} strokeWidth="2.5" style={{ flexShrink: 0, marginTop: 1 }}>
-        {item.type === 'success' && <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7"/>}
-        {item.type === 'error'   && <><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/></>}
-        {item.type === 'warning' && <><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01"/><circle cx="12" cy="12" r="10"/></>}
-        {item.type === 'info'    && <><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></>}
-      </svg>
+      <IconCmp size={16} strokeWidth={2.5} color={ICON_COLOR[item.type]} style={{ flexShrink: 0, marginTop: 1 }} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontWeight: 700, color: 'var(--ink)', marginBottom: 2 }}>
           {item.title || LABELS[item.type]}

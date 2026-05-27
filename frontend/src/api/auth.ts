@@ -14,7 +14,7 @@ export const getUsers = () => api.get('/auth/users').then(r => r.data)
 export const getUserByEmail = (email: string) =>
   api.get(`/auth/users/${encodeURIComponent(email)}`).then(r => r.data)
 export const updateUserRole = (email: string, role: string) =>
-  api.patch(`/auth/users/${encodeURIComponent(email)}/role`, { role })
+  api.put(`/auth/users/${encodeURIComponent(email)}/role`, { role })
 
 export const enrollTOTP  = () => api.post('/auth/2fa/totp/enroll').then(r => r.data)
 export const activateTOTP = (code: string) => api.post('/auth/2fa/totp/activate', { code })

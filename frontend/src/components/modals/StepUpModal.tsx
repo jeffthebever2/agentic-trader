@@ -4,6 +4,7 @@
  */
 import { useState } from 'react'
 import { create } from 'zustand'
+import { Lock } from 'lucide-react'
 import api from '@/api/client'
 
 // ── Global store so any component can trigger step-up ─────────────────────────
@@ -88,10 +89,7 @@ export function StepUpModal() {
     <div style={overlay} onClick={e => { if (e.target === e.currentTarget) cancel() }}>
       <div style={dialog}>
         <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', gap: 10 }}>
-          <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="var(--accent)" strokeWidth="2">
-            <rect x="3" y="11" width="18" height="11" rx="2" />
-            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          </svg>
+          <Lock size={18} strokeWidth={2} color="var(--accent)" />
           <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)' }}>{title}</div>
         </div>
         <div style={{ padding: '22px 24px' }}>

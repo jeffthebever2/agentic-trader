@@ -8,6 +8,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { create } from 'zustand'
 import { useNavigate } from 'react-router-dom'
+import { Calculator, Search } from 'lucide-react'
 import { showToast } from './Toast'
 
 // ── Store ─────────────────────────────────────────────────────────────────────
@@ -91,10 +92,7 @@ export function PositionSizer() {
       <div style={{ ...boxStyle, width: 'min(400px, 100%)' }}>
         <div style={headerStyle}>
           <h2 style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)', margin: 0, display: 'flex', alignItems: 'center', gap: 8 }}>
-            <svg width="15" height="15" fill="none" viewBox="0 0 24 24" stroke="var(--accent)" strokeWidth="2">
-              <rect x="4" y="2" width="16" height="20" rx="2"/>
-              <path d="M8 6h8M8 10h2M14 10h2M8 14h2M14 14h2M8 18h2M14 18h2"/>
-            </svg>
+            <Calculator size={15} strokeWidth={2} color="var(--accent)" />
             Position Sizer
           </h2>
           <button style={closeBtn} onClick={() => setSizer(false)}>×</button>
@@ -146,11 +144,12 @@ export function PositionSizer() {
             <div style={{ gridColumn: '1 / -1' }}>
               <div style={{ fontSize: 10, color: 'var(--ink-faint)', marginBottom: 6 }}>Portfolio Allocation</div>
               <div style={{ height: 8, background: 'var(--surface-rule)', borderRadius: 99, overflow: 'hidden' }}>
-                <div style={{
-                  height: '100%', borderRadius: 99, transition: 'width .3s, background .3s',
-                  width: result ? Math.min(result.pct, 100) + '%' : '0%',
-                  background: !result ? 'var(--accent)' : result.pct > 25 ? '#ef4444' : result.pct > 15 ? '#f59e0b' : 'var(--accent)',
-                }} />
+	                <div style={{
+	                  height: '100%', width: '100%', borderRadius: 99, transformOrigin: 'left center',
+	                  transform: `scaleX(${result ? Math.min(result.pct, 100) / 100 : 0})`,
+	                  transition: 'transform .3s var(--ease-out), background .3s var(--ease-out)',
+	                  background: !result ? 'var(--accent)' : result.pct > 25 ? '#ef4444' : result.pct > 15 ? '#f59e0b' : 'var(--accent)',
+	                }} />
               </div>
             </div>
           </div>
@@ -282,9 +281,7 @@ export function CommandPalette() {
          onClick={e => { if (e.target === e.currentTarget) setCmd(false) }}>
       <div style={{ ...boxStyle, width: 'min(560px, 100%)', maxHeight: '60vh', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', gap: 8 }}>
-          <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="var(--ink-faint)" strokeWidth="2">
-            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
-          </svg>
+          <Search size={14} strokeWidth={2} color="var(--ink-faint)" />
           <input
             ref={inputRef}
             value={q}

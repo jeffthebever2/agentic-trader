@@ -5,9 +5,15 @@ import { getPaperStatus } from '@/api/paper'
 import { getMarketChart, getQuotes } from '@/api/market'
 import { getDiagnostics } from '@/api/admin'
 import { getMlStatus } from '@/api/ml'
-import { LineChart } from '@/components/charts/LineChart'
+import { CandlestickChart } from '@/components/charts/CandlestickChart'
 import api from '@/api/client'
 import type { Quote, Portfolio, PaperAccount, CandidateRow } from '@/types'
+
+interface FidelitySummary {
+  total_value?: string | null
+  daily_change?: string | null
+  daily_change_pct?: string | null
+}
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const STRATEGY_COLORS: Record<string, string> = {
@@ -153,14 +159,39 @@ function StatRow({ paperQ }: { paperQ: ReturnType<typeof useQuery<ReturnType<typ
     const val = Number(a.summary?.total_value ?? a.summary?.cash ?? 0)
     return s + (start ? val - start : Number(a.summary?.realized_pnl ?? 0))
   }, 0)
-  const totalAnalyses = accounts.reduce((s, a) => s + (a.candidates?.count ?? 0), 0)
   const totalCash = accounts.reduce((s, a) => s + Number(a.summary?.cash ?? 0), 0)
 
+  const logsQ = useQuery({
+    queryKey: ['logs', 'stats'],
+    queryFn: () => api.get<{ total_analyses: number; unique_tickers: number }>('/logs/stats').then(r => r.data),
+    staleTime: 300_000,
+    refetchInterval: 300_000,
+  })
+  const totalAnalyses = logsQ.data?.total_analyses ?? 0
+  const uniqueTickers = logsQ.data?.unique_tickers ?? 0
+
+  // Overlay Fidelity data if connected
+  const fidelityQ = useQuery({
+    queryKey: ['fidelity', 'summary'],
+    queryFn: () => api.get<{ summary?: FidelitySummary }>('/fidelity/summary').then(r => r.data),
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+    retry: false,
+  })
+  const fidSummary = fidelityQ.data?.summary
+
+  const portfolioValue = fidSummary?.total_value ?? (paperQ.isLoading ? '—' : fmt$(totalValue))
+  const portfolioSub   = fidSummary?.total_value ? 'via Fidelity' : 'Paper trading'
+  const dayPnlValue    = fidSummary?.daily_change ?? (paperQ.isLoading ? '—' : fmt$(totalPnl))
+  const dayPnlColor    = fidSummary?.daily_change
+    ? (fidSummary.daily_change.startsWith('-') ? '#f87171' : '#4ade80')
+    : pnlColor(totalPnl)
+
   const stats = [
-    { id: 'stat-portfolio', label: 'Portfolio Value', value: paperQ.isLoading ? '—' : fmt$(totalValue), color: 'var(--ink)', sub: 'Paper trading' },
-    { id: 'stat-daypnl',    label: 'Day P&L',         value: paperQ.isLoading ? '—' : fmt$(totalPnl),   color: pnlColor(totalPnl), sub: 'Since open' },
-    { id: 'stat-analyses',  label: 'Total Analyses',  value: paperQ.isLoading ? '—' : String(totalAnalyses), color: 'var(--ink)', sub: 'LLM signals' },
-    { id: 'stat-cash',      label: 'Cash Available',  value: paperQ.isLoading ? '—' : fmt$(totalCash),   color: 'var(--ink)', sub: 'Across strategies' },
+    { id: 'stat-portfolio', label: 'Portfolio Value', value: portfolioValue, color: 'var(--ink)', sub: portfolioSub },
+    { id: 'stat-daypnl',    label: 'Day P&L',         value: dayPnlValue,   color: dayPnlColor, sub: fidSummary?.daily_change_pct ?? 'Since open' },
+    { id: 'stat-analyses',  label: 'Total Analyses',  value: logsQ.isLoading ? '—' : String(totalAnalyses), color: 'var(--ink)', sub: 'LLM signals' },
+    { id: 'stat-cash',      label: 'Cash Available',  value: paperQ.isLoading ? '—' : fmt$(totalCash),   color: 'var(--ink)', sub: `${uniqueTickers} tickers analyzed` },
   ]
 
   return (
@@ -191,29 +222,24 @@ function StatRow({ paperQ }: { paperQ: ReturnType<typeof useQuery<ReturnType<typ
   )
 }
 
+type ChartPeriod = '5d' | '30d' | '90d' | '1y'
+const CHART_PERIODS: ChartPeriod[] = ['5d', '30d', '90d', '1y']
+
 function MarketChartPanel() {
   const [symbol, setSymbol] = useState<ChartSymbol>('SPY')
+  const [period, setPeriod] = useState<ChartPeriod>('30d')
 
   const chartQ = useQuery({
-    queryKey: ['market', 'chart', symbol],
-    queryFn: () => getMarketChart(symbol, '30d', '1d'),
+    queryKey: ['market', 'chart', symbol, period],
+    queryFn: () => getMarketChart(symbol, period, '1d'),
     staleTime: 300_000,
   })
-
-  const datasets = (chartQ.data?.dates?.length)
-    ? [{
-        label: symbol,
-        data: chartQ.data.dates.map((d, i) => ({ x: d.slice(0, 10), y: chartQ.data!.close[i] ?? 0 })),
-        color: '#60a5fa',
-        fill: true,
-      }]
-    : []
 
   return (
     <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)', padding: '16px 20px 12px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 0 }}>Market Overview</div>
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
           {CHART_SYMBOLS.map(s => (
             <button key={s} id={`dcb-${s}`} onClick={() => setSymbol(s)} className={`dash-chart-btn${symbol === s ? ' active' : ''}`} style={{
               padding: '3px 10px',
@@ -228,17 +254,32 @@ function MarketChartPanel() {
               {s}
             </button>
           ))}
+          <div style={{ width: 1, background: 'var(--surface-rule)', margin: '0 2px' }} />
+          {CHART_PERIODS.map(p => (
+            <button key={p} id={`dcp-${p}`} onClick={() => setPeriod(p)} style={{
+              padding: '3px 10px',
+              borderRadius: 4,
+              border: '1px solid var(--surface-rule)',
+              background: period === p ? 'var(--surface-soft)' : 'var(--surface-raised)',
+              color: period === p ? 'var(--ink)' : 'var(--ink-muted)',
+              fontSize: 11,
+              fontWeight: period === p ? 700 : 500,
+              cursor: 'pointer',
+            }}>
+              {p}
+            </button>
+          ))}
         </div>
       </div>
-      <div id="dash-market-canvas" style={{ position: 'relative', height: 200 }}>
+      <div id="dash-market-canvas" style={{ position: 'relative', minHeight: 240 }}>
         {chartQ.isLoading ? (
           <div id="dash-chart-loading" style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: 'var(--ink-faint)' }}>
             Loading chart…
           </div>
-        ) : datasets.length > 0 ? (
-          <LineChart datasets={datasets} height={200} yFormatter={v => '$' + v.toFixed(0)} />
+        ) : chartQ.data?.dates?.length ? (
+          <CandlestickChart data={chartQ.data} height={240} />
         ) : (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--ink-faint)', fontSize: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 240, color: 'var(--ink-faint)', fontSize: 12 }}>
             No data
           </div>
         )}
@@ -248,6 +289,7 @@ function MarketChartPanel() {
 }
 
 function OpportunitiesPanel() {
+  const navigate = useNavigate()
   const [mode, setMode] = useState<OpportunityMode>('gainers')
 
   const oppQ = useQuery({
@@ -298,12 +340,18 @@ function OpportunitiesPanel() {
             const pct = it.change_pct ?? it.changePct
             const col = pct == null ? 'var(--ink-muted)' : pct >= 0 ? '#4ade80' : '#f87171'
             return (
-              <div key={i} className="dash-opp-card" style={{
-                background: 'var(--surface-soft)',
-                border: '1px solid var(--surface-rule)',
-                borderRadius: 6,
-                padding: '8px 10px',
-              }}>
+              <div
+                key={i}
+                className="dash-opp-card"
+                onClick={() => navigate(`/analyze?ticker=${encodeURIComponent(ticker)}`)}
+                style={{
+                  background: 'var(--surface-soft)',
+                  border: '1px solid var(--surface-rule)',
+                  borderRadius: 6,
+                  padding: '8px 10px',
+                  cursor: 'pointer',
+                }}
+              >
                 <div style={{ fontWeight: 700, fontSize: 12, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{ticker}</div>
                 <div style={{ fontSize: 11, color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
                   {price != null ? `$${price.toFixed(2)}` : '—'}
@@ -591,13 +639,15 @@ function PortfolioStats({ accounts }: { accounts: PaperAccount[] }) {
             </div>
             {/* Win rate bar */}
             <div style={{ height: 3, background: 'var(--surface-soft)', borderRadius: 2, overflow: 'hidden' }}>
-              <div style={{
-                height: '100%',
-                width: `${r.wr != null ? Math.min(r.wr * 100, 100) : 0}%`,
-                background: r.wr != null ? winRateColor(r.wr) : 'var(--surface-rule)',
-                borderRadius: 2,
-                transition: 'width 0.4s ease',
-              }} />
+	              <div style={{
+	                height: '100%',
+	                width: '100%',
+	                transformOrigin: 'left center',
+	                transform: `scaleX(${r.wr != null ? Math.min(r.wr, 1) : 0})`,
+	                background: r.wr != null ? winRateColor(r.wr) : 'var(--surface-rule)',
+	                borderRadius: 2,
+	                transition: 'transform .4s var(--ease-out)',
+	              }} />
             </div>
           </div>
         ))}
@@ -608,12 +658,17 @@ function PortfolioStats({ accounts }: { accounts: PaperAccount[] }) {
 
 function PortfolioExposure() {
   const portfolioQ = useQuery({
-    queryKey: ['broker', 'portfolio'],
-    queryFn: () => api.get<Portfolio>('/broker/portfolio').then(r => r.data),
+    queryKey: ['portfolio'],
+    queryFn: () => api.get<Portfolio>('/portfolio').then(r => r.data),
     staleTime: 120_000,
   })
 
-  const sectors = portfolioQ.data?.sector_exposure ?? {}
+  const sectors = portfolioQ.data?.sector_exposure ?? portfolioQ.data?.positions?.reduce<Record<string, number>>((acc, pos) => {
+    const sector = pos.sector || 'Unknown'
+    acc[sector] = (acc[sector] ?? 0) + (pos.market_value || 0)
+    return acc
+  }, {}) ?? {}
+  const totalExposure = Object.values(sectors).reduce((sum, value) => sum + value, 0)
   const sectorEntries = Object.entries(sectors).sort((a, b) => b[1] - a[1])
   const maxVal = sectorEntries.length ? sectorEntries[0][1] : 1
 
@@ -632,7 +687,9 @@ function PortfolioExposure() {
             <div key={sector} style={{ marginBottom: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
                 <span style={{ fontSize: 11, color: 'var(--ink)', fontWeight: 500 }}>{sector}</span>
-                <span style={{ fontSize: 11, color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>{(pct * 100).toFixed(1)}%</span>
+                <span style={{ fontSize: 11, color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>
+                  {totalExposure > 0 ? ((pct / totalExposure) * 100).toFixed(1) : '0.0'}%
+                </span>
               </div>
               <div style={{ height: 4, background: 'var(--surface-soft)', borderRadius: 2, overflow: 'hidden' }}>
                 <div style={{
@@ -684,6 +741,7 @@ function PaperCandidatesPanel({ accounts }: { accounts: PaperAccount[] }) {
 }
 
 function WatchlistPanel() {
+  const navigate = useNavigate()
   const watchlistQ = useQuery({
     queryKey: ['market', 'watchlist'],
     queryFn: () => api.get<WatchlistResponse | string[]>('/market/watchlist').then(r => {
@@ -718,7 +776,12 @@ function WatchlistPanel() {
           const pct = q?.change_pct ?? null
           const price = q?.price ?? null
           return (
-            <div key={t} style={{ padding: '8px 14px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div
+              key={t}
+              className="dash-watch-row"
+              onClick={() => navigate(`/analyze?ticker=${encodeURIComponent(t)}`)}
+              style={{ padding: '8px 14px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+            >
               <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{t}</span>
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontSize: 12, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>

@@ -22,7 +22,7 @@
 
   --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
 
   --radius:      0.5rem;
   --radius-sm:   0.25rem;
@@ -837,6 +837,18 @@ body.theme-dark #ta-app-header {
 .dash-chip.ok  .dash-chip-dot { background: #34d399; }
 .dash-chip.err { color: #f87171; border-color: rgba(248,113,113,.3); background: rgba(248,113,113,.08); }
 .dash-chip.err .dash-chip-dot { background: #f87171; }
+
+/* ── Skeleton shimmer ─────────────────────────────────────────────────────── */
+@keyframes skeleton-shimmer {
+  0%   { background-position: -400px 0 }
+  100% { background-position: 400px 0 }
+}
+.skeleton-pulse {
+  background: linear-gradient(90deg, var(--surface-raised) 25%, var(--surface-soft) 50%, var(--surface-raised) 75%);
+  background-size: 800px 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+}
 
 /* ── Dashboard watch/signal rows ─────────────────────────────────────────── */
 .dash-watch-item {

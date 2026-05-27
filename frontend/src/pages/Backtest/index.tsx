@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import api, { wsUrl } from '@/api/client'
-import { LineChart } from '@/components/charts/LineChart'
+import { EquityAreaChart } from '@/components/charts/EquityAreaChart'
+import { DrawdownChart } from '@/components/charts/DrawdownChart'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -281,7 +282,7 @@ function ScannerTab() {
           <div style={{ fontSize: 12, color: 'var(--ink-muted)', marginBottom: 4 }}>{status}</div>
           <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginBottom: 4 }}>Elapsed: {elapsed}s</div>
           <div style={progressBarWrap}>
-            <div style={{ width: `${progress}%`, height: '100%', background: 'var(--accent)', transition: 'width .3s' }} />
+            <div style={{ width: '100%', height: '100%', background: 'var(--accent)', transformOrigin: 'left center', transform: `scaleX(${progress / 100})`, transition: 'transform .3s var(--ease-out)' }} />
           </div>
           <div style={{ display: 'flex', gap: 20, marginTop: 10, flexWrap: 'wrap' }}>
             {[
@@ -659,7 +660,7 @@ function AlgoTab() {
             <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginLeft: 'auto' }}>Elapsed: {elapsed}s</div>
           </div>
           <div style={progressBarWrap}>
-            <div style={{ width: `${progress}%`, height: '100%', background: 'var(--accent)', transition: 'width .3s' }} />
+            <div style={{ width: '100%', height: '100%', background: 'var(--accent)', transformOrigin: 'left center', transform: `scaleX(${progress / 100})`, transition: 'transform .3s var(--ease-out)' }} />
           </div>
           <div style={{ fontSize: 11, color: 'var(--ink-faint)', textAlign: 'right', marginTop: 2 }}>{progress}%</div>
           {log && (
@@ -695,10 +696,20 @@ function AlgoTab() {
           {equity.length > 0 && (
             <div style={{ ...card, paddingBottom: 8 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', marginBottom: 10 }}>Equity Curve</div>
-              <LineChart
-                datasets={[{ label: 'Account Value', data: equity, color: 'var(--accent)', fill: true }]}
+              <EquityAreaChart
+                series={[{ label: 'Account Value', data: equity, color: 'var(--accent)' }]}
                 height={220}
                 yFormatter={v => `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+              />
+            </div>
+          )}
+
+          {equity.length > 1 && (
+            <div style={{ ...card, paddingBottom: 8 }}>
+              <DrawdownChart
+                equityData={equity}
+                startingCash={stats.account_final / (1 + stats.account_return) || 10000}
+                height={120}
               />
             </div>
           )}
@@ -897,7 +908,7 @@ function LlmTab() {
             <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginLeft: 'auto' }}>Elapsed: {elapsed}s</div>
           </div>
           <div style={progressBarWrap}>
-            <div style={{ width: `${progress}%`, height: '100%', background: 'var(--accent)', transition: 'width .3s' }} />
+            <div style={{ width: '100%', height: '100%', background: 'var(--accent)', transformOrigin: 'left center', transform: `scaleX(${progress / 100})`, transition: 'transform .3s var(--ease-out)' }} />
           </div>
         </div>
       )}
@@ -953,7 +964,7 @@ function ResultsTab() {
   const [err, setErr] = useState('')
 
   useEffect(() => {
-    api.get('/backtest/history')
+    api.get('/backtest/results')
       .then(r => setItems(r.data?.results ?? r.data ?? []))
       .catch(e => setErr(e.message))
       .finally(() => setLoading(false))

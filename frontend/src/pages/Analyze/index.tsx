@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { Loader2, Play } from 'lucide-react'
 import { wsUrl } from '@/api/client'
 
 // ── Provider model map ────────────────────────────────────────────────────────
@@ -42,24 +43,16 @@ interface LiveMessage {
 
 const TODAY = new Date().toISOString().split('T')[0]
 
-// ── Spinner SVG ───────────────────────────────────────────────────────────────
+// ── Spinner ───────────────────────────────────────────────────────────────────
 
 function Spinner() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 12 12" style={{ animation: 'spin 0.8s linear infinite', display: 'inline-block' }}>
-      <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.5" fill="none" strokeDasharray="14 6" />
-    </svg>
-  )
+  return <Loader2 size={12} strokeWidth={2} style={{ animation: 'spin 0.8s linear infinite', display: 'inline-block' }} />
 }
 
-// ── Play icon SVG ─────────────────────────────────────────────────────────────
+// ── Play icon ─────────────────────────────────────────────────────────────────
 
 function PlayIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor" style={{ marginRight: 6 }}>
-      <polygon points="3,1 13,7 3,13" />
-    </svg>
-  )
+  return <Play size={14} fill="currentColor" strokeWidth={0} style={{ marginRight: 6 }} />
 }
 
 // ── TradingView Modal ─────────────────────────────────────────────────────────

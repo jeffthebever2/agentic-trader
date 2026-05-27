@@ -4,7 +4,7 @@ import { getMe, getFeatures } from '@/api/auth'
 import { useAuthStore } from '@/store/auth'
 
 export function useAuth() {
-  const { user, features, loading, isAdmin, setUser, setFeatures, setLoading } = useAuthStore()
+  const { user, realUser, features, loading, isAdmin, setUser, setFeatures, setLoading } = useAuthStore()
 
   const meQuery = useQuery({
     queryKey: ['auth', 'me'],
@@ -21,10 +21,10 @@ export function useAuth() {
   })
 
   useEffect(() => {
-    if (meQuery.data)       setUser(meQuery.data)
+    if (meQuery.data && !realUser) setUser(meQuery.data)
     if (featuresQuery.data) setFeatures(featuresQuery.data)
     setLoading(meQuery.isLoading || featuresQuery.isLoading)
-  }, [meQuery.data, meQuery.isLoading, featuresQuery.data, featuresQuery.isLoading])
+  }, [meQuery.data, meQuery.isLoading, featuresQuery.data, featuresQuery.isLoading, realUser])
 
   return { user, features, loading, isAdmin: isAdmin(), error: meQuery.error }
 }
