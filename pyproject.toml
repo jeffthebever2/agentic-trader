@@ -66,9 +66,14 @@ web = [
 [project.scripts]
 tradingagents = "cli.main:app"
 agentic-restore = "cli.restore_runtime:main"
+ta = "ta:app"
+
+[tool.setuptools]
+py-modules = ["ta"]
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*"]
+
 
 [tool.setuptools.package-data]
 cli = ["static/*"]
