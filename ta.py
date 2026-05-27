@@ -510,205 +510,208 @@ def ml_predict(ticker: str = typer.Argument(..., help="Ticker to predict.")):
 
 @ml_app.command("retrain")
 def ml_retrain(
-    mode: str = typer.Option(
-        "quick", "--mode", "-m",
-        help="quick = use existing candidate CSV (minutes). full = re-download OHLCV data (hours).",
+    months: int = typer.Option(
+        84, "--months", "-m",
+        help="Rolling window in months. 84 = 7 years (recommended for full feature coverage).",
     ),
-    strategy: str = typer.Option(
-        "pullback", "--strategy", "-s",
-        help="Model strategy: pullback | breakout",
-    ),
-    hold: int = typer.Option(3, "--hold", help="Forward hold period in days for labels."),
-    threshold: float = typer.Option(0.60, "--threshold", "-t", help="ML probability gate threshold."),
     tickers: str = typer.Option(
-        "tickers_liquid.txt", "--tickers",
-        help="Ticker file for full mode (tickers_liquid.txt | tickers_quality.txt | all_tickers.txt).",
+        "all_tickers.txt", "--tickers", "-t",
+        help="Ticker file: all_tickers.txt | tickers_liquid.txt | tickers_quality.txt",
     ),
-    output_dir: str = typer.Option("", "--output-dir", "-o", help="Output dir (default: ml_models/latest)."),
-    no_walk_forward: bool = typer.Option(False, "--no-walk-forward", help="Skip walk-forward validation (faster)."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would run without executing."),
+    n_estimators: int = typer.Option(600, "--n-estimators", "-n"),
+    executed_weight: float = typer.Option(
+        20.0, "--executed-weight",
+        help="Sample weight for rule-passing rows vs rejected rows (20 = 20× upweight).",
+    ),
+    min_roc: float = typer.Option(0.56, "--min-roc", help="Minimum win AUC required to accept bundle."),
+    max_brier: float = typer.Option(0.24, "--max-brier", help="Maximum Brier score to accept bundle."),
+    threshold: float = typer.Option(0.60, "--threshold", help="Starting ML probability gate threshold."),
+    hold: int = typer.Option(3, "--hold", help="Forward hold period in days for labels."),
+    output_dir: str = typer.Option("ml_models/latest", "--output-dir", "-o"),
+    skip_holdout: bool = typer.Option(False, "--skip-holdout", help="Skip holdout validation step."),
+    skip_gates: bool = typer.Option(False, "--skip-gates", help="Skip ROC/Brier quality gates (dev only)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the full pipeline without running it."),
 ):
     """
-    Retrain ML gate models with the current feature set.
+    Full production ML retrain via retrain_weekly.py.
 
-    QUICK mode (default, ~5-20 min):
-      Uses the existing candidate CSV at ml_models/stock_universe_candidate_*/
-      — no data download needed. Best for iterating on hyperparameters.
+    Pipeline:
+      1. Backtest tickers over rolling window → export trades CSV
+      2. Train XGB+RF ensemble with executed-row weighting + calibration
+      3. Leakage check (abort if features leak future data)
+      4. Quality gates: ROC >= min_roc, Brier < max_brier
+      5. Swap bundle into output_dir, log to ml_models/retrain_history.jsonl
+      6. Holdout validation (diagnostic only)
 
-    FULL mode (~2-6 hours):
-      Re-downloads OHLCV data for all tickers, rebuilds candidate rows from
-      scratch with the latest backtest/feature code, then trains. Use this
-      to incorporate data since last dataset build.
+    Why 84 months / all_tickers / executed-weight 20:
+      New features (atr_expansion, spy_momentum_accel, setup_rr, stock_regime,
+      slope_sma20/50, obv_above_sma, pvt_above_sma, dmi_bull) require a wide
+      training window to see enough market regimes. Executed-weight=20 ensures
+      the model learns from actual rule-passing setups, not noisy rejected rows.
 
     Examples:
-      ta ml retrain                          # quick pullback retrain → ml_models/latest
-      ta ml retrain --mode full              # full fresh download
-      ta ml retrain --strategy breakout      # train breakout model
-      ta ml retrain --threshold 0.65         # tighter gate
-      ta ml retrain --output-dir ml_models/my_experiment
+      ta ml retrain                          # recommended defaults, ~4-8h
+      ta ml retrain --dry-run                # preview full command chain
+      ta ml retrain --tickers tickers_liquid.txt  # faster, liquid universe only
+      ta ml retrain --skip-holdout           # skip holdout, save ~30 min
     """
     import json as _json
 
-    out_dir = output_dir.strip() or "ml_models/latest"
-    out_path = ROOT / out_dir
+    retrain_script = ROOT / "scripts" / "retrain_weekly.py"
+    if not retrain_script.exists():
+        console.print(f"[red]retrain_weekly.py not found at {retrain_script}[/red]")
+        raise typer.Exit(1)
 
-    # ── Locate training data for quick mode ───────────────────────────────────
-    QUICK_CANDIDATES = [
-        ROOT / "ml_models" / "stock_universe_candidate_20260512" / "stock_candidate_training_data.csv",
-        ROOT / "ml_models" / "stock_universe" / "stock_candidate_training_data.csv",
-        ROOT / "ml_models" / "stock_universe" / "training_data_enriched.csv",
-    ]
+    ticker_file = ROOT / tickers
+    if not ticker_file.exists():
+        console.print(f"[red]Ticker file not found: {ticker_file}[/red]")
+        raise typer.Exit(1)
 
-    if mode == "quick":
-        csv_path = None
-        for p in QUICK_CANDIDATES:
-            if p.exists():
-                csv_path = p
-                break
-        if csv_path is None:
-            console.print("[red]No existing candidate CSV found. Run with --mode full to download.[/red]")
-            console.print("  Expected one of:")
-            for p in QUICK_CANDIDATES:
-                console.print(f"    {p}")
-            raise typer.Exit(1)
+    today = datetime.now().date()
+    from datetime import date
+    window_start = date(today.year, today.month, 1)  # approx
+    window_start_str = (datetime.now() - timedelta(days=months * 30)).strftime("%Y-%m-%d")
 
-        rows = sum(1 for _ in csv_path.open()) - 1  # fast line count
-        mtime = datetime.fromtimestamp(csv_path.stat().st_mtime)
-        age_days = (datetime.now() - mtime).days
+    # Count tickers
+    ticker_count = sum(1 for line in ticker_file.open() if line.strip())
 
     # ── Show plan ─────────────────────────────────────────────────────────────
     console.print()
     console.print(Panel(
-        f"Mode:       [bold cyan]{mode}[/bold cyan]\n"
-        f"Strategy:   [bold]{strategy}[/bold]  (hold={hold}d)\n"
-        f"Threshold:  {threshold}\n"
-        f"Output:     {out_path}\n"
-        + (
-            f"Dataset:    {csv_path.name}\n"
-            f"Rows:       {rows:,}\n"
-            f"Data age:   {age_days} days ({mtime.strftime('%Y-%m-%d')})"
-            if mode == "quick" else
-            f"Tickers:    {ROOT / tickers}\n"
-            f"Download:   fresh OHLCV from Yahoo Finance"
-        ),
-        title="ML Retrain Plan",
+        f"Script:        retrain_weekly.py\n"
+        f"Tickers:       {tickers}  ({ticker_count:,} symbols)\n"
+        f"Window:        {months} months  ({window_start_str} → today)\n"
+        f"Estimators:    {n_estimators}\n"
+        f"Exec-weight:   {executed_weight}×\n"
+        f"Threshold:     {threshold}\n"
+        f"Hold period:   {hold}d\n"
+        f"Gates:         ROC ≥ {min_roc}  |  Brier < {max_brier}\n"
+        f"Output:        {ROOT / output_dir}\n"
+        f"\n[bold]New features being trained:[/bold]\n"
+        f"  atr_expansion, spy_momentum_accel, setup_rr, stock_regime\n"
+        f"  slope_sma20, slope_sma50, obv_above_sma, pvt_above_sma, dmi_bull\n"
+        f"\n[bold yellow]Estimated time: 4-8 hours (all_tickers × 84 months)[/bold yellow]",
+        title="ML Retrain Plan — Production Pipeline",
         border_style="cyan",
     ))
 
+    cmd = [
+        sys.executable, str(retrain_script),
+        "--tickers",               tickers,
+        "--months",                str(months),
+        "--output-dir",            output_dir,
+        "--hold",                  str(hold),
+        "--n-estimators",          str(n_estimators),
+        "--ml-probability-threshold", str(threshold),
+        "--executed-weight",       str(executed_weight),
+        "--min-roc",               str(min_roc),
+        "--max-brier",             str(max_brier),
+    ]
+    if skip_holdout:
+        cmd.append("--skip-holdout")
+    if skip_gates:
+        cmd.append("--skip-gates")
+
     if dry_run:
-        console.print("[yellow]--dry-run: nothing executed.[/yellow]")
+        console.print("\n[yellow]--dry-run  Command that would run:[/yellow]")
+        console.print("  " + " \\\n    ".join(str(c) for c in cmd))
+        console.print()
+        # Also show retrain_weekly dry-run for full step breakdown
+        console.print("[dim]Full step preview from retrain_weekly.py --dry-run:[/dim]")
+        subprocess.run(cmd + ["--dry-run"], cwd=str(ROOT))
         return
 
-    if age_days > 14 and mode == "quick":
-        console.print(f"[yellow]Warning: dataset is {age_days} days old. Consider --mode full for fresh data.[/yellow]")
-
-    confirm = typer.prompt("Proceed?", default="Y").strip().upper()
+    console.print()
+    confirm = typer.prompt(
+        "This will run a 4-8 hour backtest + retrain. Proceed?", default="Y"
+    ).strip().upper()
     if confirm not in ("Y", "YES"):
         console.print("[dim]Aborted.[/dim]"); return
 
+    console.print("\n[cyan]Starting production retrain pipeline...[/cyan]")
+    console.print("[dim]Output streams live below. Ctrl+C to abort (won't auto-clean temp CSV).[/dim]\n")
+
     start_ts = time.time()
-
-    # ── Build command ─────────────────────────────────────────────────────────
-    if mode == "quick":
-        cmd = [
-            sys.executable, str(ROOT / "scripts" / "train_ml_models.py"),
-            "--input",  str(csv_path),
-            "--output-dir", str(out_path),
-            "--mode",  strategy,
-            "--hold",  str(hold),
-            "--ml-probability-threshold", str(threshold),
-            "--n-estimators", "600",
-            "--max-depth", "6",
-            "--min-samples-leaf", "25",
-            "--executed-weight", "20",
-            "--calibrate",
-        ]
-        if no_walk_forward:
-            cmd.append("--no-run-walk-forward")
-    else:  # full
-        ticker_file = ROOT / tickers
-        if not ticker_file.exists():
-            console.print(f"[red]Ticker file not found: {ticker_file}[/red]")
-            raise typer.Exit(1)
-        cmd = [
-            sys.executable, str(ROOT / "scripts" / "train_ml_from_stock_data.py"),
-            "--tickers", str(ticker_file),
-            "--output-dir", str(out_path),
-            "--hold",  str(hold),
-            "--reuse-dataset",      # reuse cached price pkl if present
-        ]
-
-    console.print(f"\n[cyan]Starting {mode} retrain...[/cyan]")
-    console.print(f"  [dim]{' '.join(str(c) for c in cmd[:6])} ...[/dim]\n")
-
-    # ── Run with live output ───────────────────────────────────────────────────
     result = subprocess.run(cmd, cwd=str(ROOT))
     elapsed = time.time() - start_ts
-    m, s = divmod(int(elapsed), 60)
+    h, rem = divmod(int(elapsed), 3600)
+    m, s = divmod(rem, 60)
+    elapsed_str = f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
 
     if result.returncode != 0:
-        console.print(f"\n[red]✗ Retrain failed[/red]  (exit {result.returncode}  {m}m{s}s)")
+        console.print(f"\n[red]✗ Retrain failed[/red]  (exit {result.returncode}  {elapsed_str})")
+        console.print("  Check output above for step that failed.")
+        console.print("  Retrain history: ml_models/retrain_history.jsonl")
         raise typer.Exit(result.returncode)
 
-    # ── Parse and display results ──────────────────────────────────────────────
-    report_path = out_path / "training_report.json"
-    console.print(f"\n[green]✓ Retrain complete[/green]  ({m}m{s}s)")
+    # ── Parse results from report ──────────────────────────────────────────────
+    report_path = ROOT / output_dir / "training_report.json"
+    console.print(f"\n[green]✓ Retrain complete[/green]  ({elapsed_str})")
 
     if report_path.exists():
         try:
-            report = _json.loads(report_path.read_text())
-            settings  = report.get("settings", {})
-            win_m     = report.get("models", {}).get("win_probability", {}).get("metrics", {})
-            ret_m     = report.get("models", {}).get("return_regression", {}).get("metrics", {})
-            thr_srch  = report.get("threshold_search", {})
-            rec_thr   = thr_srch.get("recommended_threshold")
-            wf        = report.get("walk_forward", {})
-            leakage   = report.get("leakage_check", {})
+            report   = _json.loads(report_path.read_text())
+            settings = report.get("settings", {})
+            win_m    = report.get("models", {}).get("win_probability", {}).get("metrics", {})
+            cal      = report.get("models", {}).get("win_probability", {}).get("calibration", {})
+            thr_srch = report.get("threshold_search", {})
+            rec_thr  = thr_srch.get("recommended_threshold")
+            wf       = report.get("walk_forward", {})
+            psi      = report.get("feature_psi", {})
+
+            auc = win_m.get("roc_auc", "—")
+            brier_after = cal.get("brier_after", "—")
+            auc_color = "green" if isinstance(auc, float) and auc >= min_roc else "yellow"
+            brier_color = "green" if isinstance(brier_after, float) and brier_after < max_brier else "red"
 
             summary = (
                 f"Rows used:    {settings.get('rows_used', '?'):,}\n"
                 f"Features:     {len(settings.get('feature_names', [])) or settings.get('feature_count', '?')}\n"
                 f"Test period:  {settings.get('test_period', '?')}\n"
                 f"Calibrated:   {settings.get('calibrated', False)}\n"
-                f"\n[bold]Win Probability model[/bold]\n"
-                f"  AUC:        {win_m.get('roc_auc', '—')}\n"
+                f"\n[bold]Win Probability[/bold]\n"
+                f"  AUC:        [{auc_color}]{auc}[/{auc_color}]  (gate ≥ {min_roc})\n"
+                f"  Brier:      [{brier_color}]{brier_after}[/{brier_color}]  (gate < {max_brier})\n"
                 f"  Precision:  {win_m.get('precision', '—')}\n"
                 f"  Recall:     {win_m.get('recall', '—')}\n"
-                f"  Brier:      {win_m.get('brier_score', '—')}\n"
             )
-
             if rec_thr:
                 rec = thr_srch.get(str(rec_thr), {})
                 summary += (
                     f"\n[bold]Recommended threshold:[/bold] {rec_thr}\n"
-                    f"  Win rate:  {rec.get('win_rate', '?')}\n"
-                    f"  Avg ret:   {rec.get('avg_return_pct', '?')}%\n"
-                    f"  N trades:  {rec.get('n', '?')}\n"
+                    f"  Win rate:   {rec.get('win_rate', '?')}\n"
+                    f"  Avg ret:    {rec.get('avg_return_pct', '?')}%\n"
+                    f"  N trades:   {rec.get('n', '?')}\n"
                 )
-
             if wf.get("roc_auc"):
+                wf_color = "green" if (wf.get("roc_auc", 0) or 0) >= min_roc else "yellow"
                 summary += (
-                    f"\n[bold]Walk-forward validation[/bold]\n"
-                    f"  AUC:            {wf['roc_auc']}\n"
-                    f"  High-conf WR:   {wf.get('high_conf_win_rate', '—')}\n"
-                    f"  High-conf N:    {wf.get('high_conf_n', '—')}\n"
+                    f"\n[bold]Walk-forward[/bold]\n"
+                    f"  AUC:          [{wf_color}]{wf['roc_auc']}[/{wf_color}]\n"
+                    f"  High-conf WR: {wf.get('high_conf_win_rate', '—')}\n"
+                    f"  High-conf N:  {wf.get('high_conf_n', '—')}\n"
                 )
-            elif wf.get("status"):
-                summary += f"\nWalk-forward: {wf['status']}\n"
-
-            if leakage.get("leaky_features"):
-                summary += f"\n[red]⚠ LEAKAGE: {leakage['leaky_features']}[/red]"
+            if psi.get("n_fail", 0) > 0:
+                summary += f"\n[yellow]PSI drift: {psi['n_fail']} features shifted[/yellow]"
             else:
-                summary += "\n[green]Leakage check: clean[/green]"
+                summary += "\n[green]PSI: no drift detected[/green]"
 
             console.print(Panel(summary, title="Training Results", border_style="green"))
         except Exception as e:
             console.print(f"[dim]Could not parse training report: {e}[/dim]")
 
-    console.print(f"  Bundle:  {out_path / 'model_bundle.joblib'}")
+    # ── Retrain history ────────────────────────────────────────────────────────
+    history_path = ROOT / "ml_models" / "retrain_history.jsonl"
+    if history_path.exists():
+        lines = history_path.read_text().strip().splitlines()
+        if lines:
+            last = _json.loads(lines[-1])
+            console.print(f"\n  History entry: [green]{last.get('outcome', '?')}[/green]  {last.get('retrain_date', '')}")
+
+    console.print(f"\n  Bundle:  {ROOT / output_dir / 'model_bundle.joblib'}")
     console.print(f"  Report:  {report_path}")
     console.print()
-    console.print("[dim]Restart server to load new model: ta server restart[/dim]")
+    console.print("[dim]Reload model in running server: ta server restart[/dim]")
 
 
 # ── TICKER ─────────────────────────────────────────────────────────────────────
