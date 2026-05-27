@@ -784,3 +784,72 @@ body.theme-dark #ta-app-header {
 }
 .ta-commandbar input::placeholder { color: var(--ink-faint); }
 .ta-header-actions { flex-shrink: 0; }
+
+/* ── Appearance toggle (slider) ──────────────────────────────────────────── */
+.appearance-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--surface-rule);
+  background: var(--surface-raised);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background .2s, border-color .2s;
+}
+.appearance-toggle-thumb {
+  position: absolute;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--ink-faint);
+  transition: transform .2s var(--ease-out), background .2s;
+}
+.appearance-toggle.dark .appearance-toggle-thumb {
+  transform: translateX(20px);
+  background: var(--accent);
+}
+
+/* ── Dashboard status chips ──────────────────────────────────────────────── */
+.dash-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 99px;
+  border: 1px solid var(--surface-rule);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-muted);
+  background: var(--surface-soft);
+  white-space: nowrap;
+}
+.dash-chip-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: #6b7280; }
+.dash-chip.ok  { color: #34d399; border-color: rgba(52,211,153,.3); background: rgba(52,211,153,.08); }
+.dash-chip.ok  .dash-chip-dot { background: #34d399; }
+.dash-chip.err { color: #f87171; border-color: rgba(248,113,113,.3); background: rgba(248,113,113,.08); }
+.dash-chip.err .dash-chip-dot { background: #f87171; }
+
+/* ── Dashboard watch/signal rows ─────────────────────────────────────────── */
+.dash-watch-item {
+  padding: 9px 10px; border-radius: 5px; cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between;
+  transition: background .12s; border: 1px solid transparent;
+}
+.dash-watch-item:hover { background: var(--surface-raised); border-color: var(--surface-rule); }
+
+.dash-watch-row {
+  display: flex; align-items: center; gap: 8px; padding: 8px 8px;
+  border-radius: 5px; cursor: pointer;
+  transition: background .12s; border: 1px solid transparent;
+}
+.dash-watch-row:hover { background: var(--surface-raised); border-color: var(--surface-rule); }
+
+.dash-signal-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border-radius: 5px; transition: background .12s; cursor: pointer;
+}
+.dash-signal-row:hover { background: var(--surface-raised); }

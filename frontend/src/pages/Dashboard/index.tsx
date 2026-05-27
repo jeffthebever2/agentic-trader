@@ -495,17 +495,11 @@ function SystemStatus() {
   const diag = diagQ.data as DiagData | undefined
 
   function chip(label: string, ok: boolean | null) {
-    const bg = ok == null ? 'var(--surface-soft)' : ok ? 'rgba(74,222,128,0.15)' : 'rgba(248,113,113,0.15)'
-    const color = ok == null ? 'var(--ink-muted)' : ok ? '#4ade80' : '#f87171'
-    const dot = ok == null ? '○' : ok ? '●' : '●'
+    const cls = ok == null ? 'dash-chip' : ok ? 'dash-chip ok' : 'dash-chip err'
     return (
-      <div key={label} style={{
-        display: 'inline-flex', alignItems: 'center', gap: 5,
-        background: bg, border: `1px solid ${color}30`,
-        borderRadius: 12, padding: '4px 10px', fontSize: 11, color,
-      }}>
-        <span>{dot}</span>
-        <span style={{ fontWeight: 600 }}>{label}</span>
+      <div key={label} className={cls}>
+        <span className="dash-chip-dot" />
+        <span>{label}</span>
       </div>
     )
   }

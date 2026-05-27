@@ -271,19 +271,11 @@ export function Sidebar({ onOpenOnboarding, mobileOpen, onMobileClose }: Sidebar
           <button
             onClick={toggle}
             title={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-            style={{
-              marginLeft: 'auto',
-              background: 'none',
-              border: 'none',
-              color: 'var(--ink-faint)',
-              fontSize: 13,
-              cursor: 'pointer',
-              padding: '2px 4px',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.color = 'var(--ink)')}
-            onMouseLeave={e => (e.currentTarget.style.color = 'var(--ink-faint)')}
+            className={`appearance-toggle${mode === 'dark' ? ' dark' : ''}`}
+            style={{ marginLeft: 'auto' }}
+            aria-label={mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
           >
-            {mode === 'dark' ? '☀' : '🌙'}
+            <span className="appearance-toggle-thumb" />
           </button>
         </div>
 
