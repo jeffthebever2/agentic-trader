@@ -104,7 +104,7 @@ function TickerTape() {
     const pctStr = it.changePct == null ? '' : ` ${arrow}${Math.abs(it.changePct).toFixed(2)}%`
     const priceStr = it.price != null ? ` $${it.price.toFixed(2)}` : ''
     return (
-      <span key={it.ticker} style={{ marginRight: 32, whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)', fontSize: 12 }}>
+      <span key={it.ticker} className="ticker-item" style={{ marginRight: 32, whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)', fontSize: 12, cursor: 'default' }}>
         <span style={{ fontWeight: 700, color: 'var(--ink)' }}>{it.ticker}</span>
         <span style={{ color: 'var(--ink-muted)', marginLeft: 4 }}>{priceStr}</span>
         <span style={{ color, marginLeft: 4 }}>{pctStr}</span>
@@ -113,29 +113,33 @@ function TickerTape() {
   })
 
   return (
-    <div style={{
-      background: 'var(--surface)',
-      border: '1px solid var(--surface-rule)',
-      borderRadius: 8,
+    <div id="dash-ticker-wrap" style={{
+      height: 44,
+      flexShrink: 0,
+      borderBottom: '1px solid var(--surface-rule)',
       overflow: 'hidden',
-      padding: '8px 0',
+      position: 'relative',
+      background: 'var(--surface)',
     }}>
-      <div style={{ overflow: 'hidden', position: 'relative' }}>
-        <style>{`
-          @keyframes tape-scroll {
-            0%   { transform: translateX(0); }
-            100% { transform: translateX(-50%); }
-          }
-          .tape-inner {
-            display: inline-flex;
-            animation: tape-scroll 40s linear infinite;
-            white-space: nowrap;
-          }
-          .tape-inner:hover { animation-play-state: paused; }
-        `}</style>
-        <div className="tape-inner" style={{ padding: '0 16px' }}>
-          {content}{content}
-        </div>
+      <style>{`
+        @keyframes tape-scroll {
+          0%   { transform: translateX(0); }
+          100% { transform: translateX(-50%); }
+        }
+        #dash-ticker-track {
+          display: inline-flex;
+          align-items: center;
+          height: 100%;
+          animation: tape-scroll 40s linear infinite;
+          white-space: nowrap;
+        }
+        #dash-ticker-track:hover { animation-play-state: paused; }
+      `}</style>
+      {/* Edge fades */}
+      <div style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: 18, background: 'var(--surface)', pointerEvents: 'none', zIndex: 2 }} />
+      <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: 18, background: 'var(--surface)', pointerEvents: 'none', zIndex: 2 }} />
+      <div id="dash-ticker-track" style={{ padding: '0 16px' }}>
+        {content}{content}
       </div>
     </div>
   )
@@ -160,18 +164,22 @@ function StatRow({ paperQ }: { paperQ: ReturnType<typeof useQuery<ReturnType<typ
   ]
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
-      {stats.map(s => (
-        <div key={s.id} id={s.id} style={{
-          background: 'var(--surface)',
-          border: '1px solid var(--surface-rule)',
-          borderRadius: 8,
-          padding: '14px 16px',
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'repeat(4, 1fr)',
+      flexShrink: 0,
+      borderBottom: '1px solid var(--surface-rule)',
+      background: 'var(--surface)',
+    }}>
+      {stats.map((s, i) => (
+        <div key={s.id} className="dash-stat-cell" id={s.id} style={{
+          padding: '12px 20px',
+          borderRight: i < 3 ? '1px solid var(--surface-rule)' : 'none',
         }}>
-          <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700 }}>
             {s.label}
           </div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: s.color, fontFamily: 'var(--font-mono)' }}>
+          <div className="dash-stat-num" style={{ fontSize: 22, fontWeight: 700, color: s.color, fontFamily: 'var(--font-mono)', letterSpacing: '-0.035em' }}>
             {s.value}
           </div>
         </div>
@@ -199,12 +207,12 @@ function MarketChartPanel() {
     : []
 
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, padding: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>Market Chart</div>
+    <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)', padding: '16px 20px 12px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 0 }}>Market Overview</div>
         <div style={{ display: 'flex', gap: 4 }}>
           {CHART_SYMBOLS.map(s => (
-            <button key={s} onClick={() => setSymbol(s)} style={{
+            <button key={s} id={`dcb-${s}`} onClick={() => setSymbol(s)} className={`dash-chart-btn${symbol === s ? ' active' : ''}`} style={{
               padding: '3px 10px',
               borderRadius: 4,
               border: '1px solid var(--surface-rule)',
@@ -213,7 +221,6 @@ function MarketChartPanel() {
               fontSize: 11,
               fontWeight: 600,
               cursor: 'pointer',
-              transition: 'all 0.15s',
             }}>
               {s}
             </button>
@@ -222,7 +229,7 @@ function MarketChartPanel() {
       </div>
       <div id="dash-market-canvas" style={{ position: 'relative', height: 200 }}>
         {chartQ.isLoading ? (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--ink-faint)', fontSize: 12 }}>
+          <div id="dash-chart-loading" style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: 'var(--ink-faint)' }}>
             Loading chart…
           </div>
         ) : datasets.length > 0 ? (
@@ -249,19 +256,19 @@ function OpportunitiesPanel() {
 
   const items = Array.isArray(oppQ.data) ? oppQ.data.slice(0, 12) : []
 
-  const tabs: { key: OpportunityMode; label: string }[] = [
-    { key: 'gainers', label: 'Gainers' },
-    { key: 'losers', label: 'Losers' },
-    { key: 'active', label: 'Movers' },
+  const tabs: { key: OpportunityMode; label: string; icon: string }[] = [
+    { key: 'gainers', label: 'Gainers', icon: '▲' },
+    { key: 'losers', label: 'Losers', icon: '▼' },
+    { key: 'active', label: 'Movers', icon: '⚡' },
   ]
 
   return (
-    <div id="dash-opportunities" style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, overflow: 'hidden' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid var(--surface-rule)' }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>Today's Opportunities</div>
-        <div style={{ display: 'flex', gap: 4 }}>
+    <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)', padding: '14px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 0 }}>Today's Opportunities</div>
+        <div style={{ display: 'flex', gap: 6 }}>
           {tabs.map(t => (
-            <button key={t.key} onClick={() => setMode(t.key)} style={{
+            <button key={t.key} id={`dob-${t.key}`} onClick={() => setMode(t.key)} className={`dash-opp-btn${mode === t.key ? ' active' : ''}`} style={{
               padding: '3px 10px',
               borderRadius: 4,
               border: '1px solid var(--surface-rule)',
@@ -271,41 +278,39 @@ function OpportunitiesPanel() {
               fontWeight: 600,
               cursor: 'pointer',
             }}>
-              {t.label}
+              {t.icon} {t.label}
             </button>
           ))}
         </div>
       </div>
-      <div style={{ padding: 12 }}>
+      <div id="dash-opportunities" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 4 }}>
         {oppQ.isLoading ? (
-          <div style={{ padding: '16px 4px', color: 'var(--ink-faint)', fontSize: 12 }}>Loading…</div>
+          <div style={{ gridColumn: '1 / -1', padding: '16px 4px', color: 'var(--ink-faint)', fontSize: 12 }}>Loading…</div>
         ) : items.length === 0 ? (
-          <div style={{ padding: '16px 4px', color: 'var(--ink-faint)', fontSize: 12 }}>No data available</div>
+          <div style={{ gridColumn: '1 / -1', padding: '16px 4px', color: 'var(--ink-faint)', fontSize: 12 }}>No data available</div>
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 8 }}>
-            {items.map((it, i) => {
-              const ticker = it.ticker ?? it.symbol ?? '—'
-              const price = it.price ?? it.last_price
-              const pct = it.change_pct ?? it.changePct
-              const col = pct == null ? 'var(--ink-muted)' : pct >= 0 ? '#4ade80' : '#f87171'
-              return (
-                <div key={i} style={{
-                  background: 'var(--surface-raised)',
-                  border: '1px solid var(--surface-rule)',
-                  borderRadius: 6,
-                  padding: '10px 12px',
-                }}>
-                  <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{ticker}</div>
-                  <div style={{ fontSize: 12, color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
-                    {price != null ? `$${price.toFixed(2)}` : '—'}
-                  </div>
-                  <div style={{ fontSize: 12, color: col, fontWeight: 600, marginTop: 2 }}>
-                    {pct != null ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'}
-                  </div>
+          items.map((it, i) => {
+            const ticker = it.ticker ?? it.symbol ?? '—'
+            const price = it.price ?? it.last_price
+            const pct = it.change_pct ?? it.changePct
+            const col = pct == null ? 'var(--ink-muted)' : pct >= 0 ? '#4ade80' : '#f87171'
+            return (
+              <div key={i} className="dash-opp-card" style={{
+                background: 'var(--surface-soft)',
+                border: '1px solid var(--surface-rule)',
+                borderRadius: 6,
+                padding: '8px 10px',
+              }}>
+                <div style={{ fontWeight: 700, fontSize: 12, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{ticker}</div>
+                <div style={{ fontSize: 11, color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)', marginTop: 2 }}>
+                  {price != null ? `$${price.toFixed(2)}` : '—'}
                 </div>
-              )
-            })}
-          </div>
+                <div style={{ fontSize: 11, color: col, fontWeight: 600, marginTop: 2 }}>
+                  {pct != null ? `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'}
+                </div>
+              </div>
+            )
+          })
         )}
       </div>
     </div>
@@ -330,27 +335,25 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
   )
 
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, overflow: 'hidden' }}>
-      <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--surface-rule)' }}>
-        {(['candidates', 'trades'] as FeedTab[]).map(t => (
-          <button key={t} onClick={() => setTab(t)} style={{
-            flex: 1,
-            padding: '10px 0',
-            background: 'none',
-            border: 'none',
-            borderBottom: tab === t ? '2px solid var(--accent)' : '2px solid transparent',
-            color: tab === t ? 'var(--accent)' : 'var(--ink-muted)',
-            fontWeight: tab === t ? 700 : 500,
-            fontSize: 13,
-            cursor: 'pointer',
-            textTransform: 'capitalize',
-          }}>
-            {t === 'candidates' ? `Candidates (${candidates.length})` : 'Recent Trades'}
-          </button>
-        ))}
+    <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', background: 'var(--surface-soft)' }}>
+      {/* Tab bar */}
+      <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--surface-rule)', padding: '0 20px', flexShrink: 0, background: 'var(--surface)' }}>
+        <button id="dlf-tab-cand" onClick={() => setTab('candidates')} className={`dlf-tab${tab === 'candidates' ? ' dlf-tab-active' : ''}`} style={{
+          padding: '10px 0', marginRight: 16, background: 'none', border: 'none',
+          borderBottom: tab === 'candidates' ? '2px solid var(--accent)' : '2px solid transparent',
+          color: tab === 'candidates' ? 'var(--ink)' : 'var(--ink-muted)',
+          fontWeight: tab === 'candidates' ? 600 : 500, fontSize: 12.5, cursor: 'pointer',
+        }}>Candidates</button>
+        <button id="dlf-tab-trades" onClick={() => setTab('trades')} className={`dlf-tab${tab === 'trades' ? ' dlf-tab-active' : ''}`} style={{
+          padding: '10px 0', marginRight: 16, background: 'none', border: 'none',
+          borderBottom: tab === 'trades' ? '2px solid var(--accent)' : '2px solid transparent',
+          color: tab === 'trades' ? 'var(--ink)' : 'var(--ink-muted)',
+          fontWeight: tab === 'trades' ? 600 : 500, fontSize: 12.5, cursor: 'pointer',
+        }}>Recent Trades</button>
+        <div style={{ flex: 1 }} />
       </div>
 
-      <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 20px 14px' }}>
         {tab === 'candidates' ? (
           candidates.length === 0 ? (
             <div style={{ padding: 20, color: 'var(--ink-faint)', fontSize: 12, textAlign: 'center' }}>No candidates today</div>
@@ -440,8 +443,8 @@ function QuickAnalyze() {
   }
 
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, padding: 16 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', marginBottom: 12 }}>Quick Analyze</div>
+    <div style={{ padding: 16, borderBottom: '1px solid var(--surface-rule)', flexShrink: 0 }}>
+      <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 10 }}>Quick Analyze</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <input
           type="text"
@@ -522,8 +525,8 @@ function SystemStatus() {
     : null
 
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, padding: 16 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', marginBottom: 10 }}>System Status</div>
+    <div style={{ padding: 16, borderBottom: '1px solid var(--surface-rule)', flexShrink: 0 }}>
+      <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 10 }}>System Status</div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {chip('Fidelity', fidelityOk)}
         {chip('Market Data', marketDataOk)}
@@ -564,9 +567,10 @@ function PortfolioStats({ accounts }: { accounts: PaperAccount[] }) {
   })
 
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, overflow: 'hidden' }}>
-      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--surface-rule)', fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
-        Portfolio Stats
+    <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px 10px' }}>
+        <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 0 }}>Portfolio Stats</div>
+        <button style={{ fontSize: 11, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 700 }}>↻</button>
       </div>
       {/* Summary strip */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 0, borderBottom: '1px solid var(--surface-rule)' }}>
@@ -627,9 +631,9 @@ function PortfolioExposure() {
   const maxVal = sectorEntries.length ? sectorEntries[0][1] : 1
 
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, overflow: 'hidden' }}>
-      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--surface-rule)', fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
-        Portfolio Exposure
+    <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)' }}>
+      <div style={{ padding: '12px 16px 10px' }}>
+        <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)' }}>Portfolio Exposure</div>
       </div>
       <div style={{ padding: '10px 14px' }}>
         {portfolioQ.isLoading ? (
@@ -665,10 +669,10 @@ function PaperCandidatesPanel({ accounts }: { accounts: PaperAccount[] }) {
   ).slice(0, 8)
 
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, overflow: 'hidden' }}>
-      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--surface-rule)', fontSize: 13, fontWeight: 600, color: 'var(--ink)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span>Paper Candidates</span>
-        <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{candidates.length} shown</span>
+    <div style={{ flexShrink: 0, borderBottom: '1px solid var(--surface-rule)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px 10px' }}>
+        <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 0 }}>Paper Candidates</div>
+        <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{candidates.length}</span>
       </div>
       <div id="dash-candidates">
         {candidates.length === 0 ? (
@@ -717,9 +721,9 @@ function WatchlistPanel() {
   const quotes = quotesQ.data ?? {}
 
   return (
-    <div style={{ background: 'var(--surface)', border: '1px solid var(--surface-rule)', borderRadius: 8, overflow: 'hidden' }}>
-      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--surface-rule)', fontSize: 13, fontWeight: 600, color: 'var(--ink)' }}>
-        Watchlist
+    <div style={{ flexShrink: 0 }}>
+      <div style={{ padding: '12px 16px 10px' }}>
+        <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)' }}>Watchlist</div>
       </div>
       <div>
         {tickers.slice(0, 10).map(t => {
@@ -769,29 +773,30 @@ export default function DashboardPage() {
   }, [])
 
   return (
-    <div id="panel-dashboard" style={{ padding: 20, maxWidth: 1400, margin: '0 auto' }}>
-      {/* Ticker tape — full width */}
-      <div style={{ marginBottom: 16 }}>
-        <TickerTape />
-      </div>
+    <div id="panel-dashboard" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+      {/* Ticker tape — full width, flush */}
+      <TickerTape />
 
-      {/* Two-column layout */}
-      <div style={{
+      {/* Stat row — full width, flush */}
+      <StatRow paperQ={paperQ} />
+
+      {/* Main grid: left 1fr | right 320px */}
+      <div id="dash-main-grid" style={{
         display: 'grid',
         gridTemplateColumns: narrow ? '1fr' : '1fr 320px',
-        gap: 16,
-        alignItems: 'start',
+        flex: 1,
+        overflow: 'hidden',
+        minHeight: 0,
       }}>
-        {/* Left column */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minWidth: 0 }}>
-          <StatRow paperQ={paperQ} />
+        {/* LEFT COLUMN */}
+        <div style={{ borderRight: narrow ? 'none' : '1px solid var(--surface-rule)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <MarketChartPanel />
           <OpportunitiesPanel />
           <LiveFeedPanel accounts={accounts} />
         </div>
 
-        {/* Right column */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {/* RIGHT COLUMN */}
+        <div style={{ overflowY: 'auto', background: 'var(--surface)', display: 'flex', flexDirection: 'column' }}>
           <QuickAnalyze />
           <SystemStatus />
           <PortfolioStats accounts={accounts} />

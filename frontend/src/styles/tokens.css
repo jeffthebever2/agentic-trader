@@ -161,12 +161,182 @@ html, body {
   font-weight: 500;
   color: var(--ink-muted);
   cursor: pointer;
-  transition: color .15s, background .15s;
+  transition: color .15s var(--ease-out), background .15s var(--ease-out), transform .12s var(--ease-out);
   width: 100%;
   text-align: left;
   border: none;
   background: none;
+  text-decoration: none;
 }
 .nav-item:hover { color: var(--ink); background: var(--surface-raised); }
-.nav-item.active { color: var(--ink); background: var(--accent-subtle); font-weight: 600; }
+.nav-item.active {
+  color: var(--ink);
+  background: var(--accent-subtle);
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(224,62,0,.14);
+}
 .nav-item.active svg { color: var(--accent); }
+
+/* ── Nav stagger entrance ─────────────────────────────────────────────────── */
+@keyframes navIn { from { opacity:0; transform:translateX(-6px); } to { opacity:1; transform:translateX(0); } }
+.nav-item { animation: navIn .4s var(--ease-out) both; }
+.nav-item:nth-child(1)  { animation-delay: .02s }
+.nav-item:nth-child(2)  { animation-delay: .05s }
+.nav-item:nth-child(3)  { animation-delay: .08s }
+.nav-item:nth-child(4)  { animation-delay: .11s }
+.nav-item:nth-child(5)  { animation-delay: .14s }
+.nav-item:nth-child(6)  { animation-delay: .17s }
+.nav-item:nth-child(7)  { animation-delay: .20s }
+.nav-item:nth-child(8)  { animation-delay: .23s }
+.nav-item:nth-child(9)  { animation-delay: .26s }
+.nav-item:nth-child(10) { animation-delay: .29s }
+.nav-item:nth-child(11) { animation-delay: .32s }
+
+/* ── Sonar ping on connected status dot ───────────────────────────────────── */
+@keyframes sonar { 0% { transform:scale(1); opacity:.6 } 100% { transform:scale(2.8); opacity:0 } }
+#api-status.live .ta-status-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  animation: sonar 1.8s var(--ease-out) infinite;
+}
+
+/* ── Mobile sidebar ───────────────────────────────────────────────────────── */
+.mobile-menu-btn { display: none !important; }
+
+@media (max-width: 980px) {
+  .mobile-menu-btn { display: flex !important; }
+  #ta-sidebar {
+    position: fixed !important;
+    left: -220px;
+    top: 0;
+    height: 100dvh;
+    transition: left .28s var(--ease-out);
+    z-index: 20;
+  }
+  #ta-sidebar[data-mobile-open="true"] {
+    left: 0;
+    box-shadow: 4px 0 24px rgba(0,0,0,.18);
+  }
+  .mobile-backdrop { display: block !important; }
+  /* Header wraps on mobile */
+  #ta-app-header { gap: 10px; flex-wrap: wrap; padding-top: 8px !important; padding-bottom: 8px !important; }
+  .ta-commandbar { order: 3; width: 100% !important; min-width: 0 !important; }
+  .ta-header-actions { margin-left: auto; }
+  .ta-market-chip { display: none !important; }
+}
+
+@media (max-width: 640px) {
+  #current-datetime { display: none !important; }
+}
+
+/* ── Page panel enter animation ───────────────────────────────────────────── */
+@keyframes panelIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+
+/* ── Selection color ──────────────────────────────────────────────────────── */
+::selection { background: rgba(214,58,0,.22); color: var(--ink); }
+
+/* ── Focus ring ───────────────────────────────────────────────────────────── */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+:focus:not(:focus-visible) { outline: none; }
+
+/* ── Press feedback ───────────────────────────────────────────────────────── */
+button:active, [role="button"]:active { transform: scale(.965); }
+.btn-primary:active, .btn-secondary:active { filter: brightness(.97); }
+
+/* ── Value flash ──────────────────────────────────────────────────────────── */
+@keyframes flashUp   { 0%{background:rgba(52,211,153,.28)} 100%{background:transparent} }
+@keyframes flashDown { 0%{background:rgba(248,113,113,.28)} 100%{background:transparent} }
+.val-up   { animation: flashUp .9s var(--ease-out); border-radius: 3px; }
+.val-down { animation: flashDown .9s var(--ease-out); border-radius: 3px; }
+
+/* ── Stat swap ────────────────────────────────────────────────────────────── */
+.stat-swap { animation: statSwap .42s var(--ease-out); }
+@keyframes statSwap {
+  0%   { opacity: .35; filter: blur(3px); transform: translateY(3px); }
+  100% { opacity: 1;   filter: blur(0);   transform: none; }
+}
+
+/* ── Spinner ──────────────────────────────────────────────────────────────── */
+.spin { animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Reduced motion ───────────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+/* ── Dashboard section labels with [ ] brackets ─────────────────────────── */
+.dash-section-label::before { content: "[ "; color: var(--ink-faint); }
+.dash-section-label::after  { content: " ]"; color: var(--ink-faint); }
+
+/* ── Dashboard chart buttons ─────────────────────────────────────────────── */
+.dash-chart-btn {
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--surface-rule);
+  background: var(--surface-raised);
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s var(--ease-out);
+}
+.dash-chart-btn.active,
+.dash-chart-btn:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* ── Opportunity buttons ──────────────────────────────────────────────────── */
+.dash-opp-btn {
+  padding: 3px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--surface-rule);
+  background: var(--surface-raised);
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s var(--ease-out);
+}
+.dash-opp-btn.active,
+.dash-opp-btn:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.dash-opp-card {
+  background: var(--surface-soft);
+  border: 1px solid var(--surface-rule);
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: default;
+  transition: box-shadow .15s var(--ease-out);
+}
+
+/* ── Live feed tabs ───────────────────────────────────────────────────────── */
+.dlf-tab {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+/* ── Header light/dark ────────────────────────────────────────────────────── */
+#ta-app-header {
+  background: #FFFFFF !important;
+}
+body.theme-dark #ta-app-header {
+  background: #14151A !important;
+  border-bottom: 1px solid rgba(255,255,255,.06) !important;
+}
