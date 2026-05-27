@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
 import { AppHeader } from './AppHeader'
 import { OnboardingModal } from '@/components/modals/OnboardingModal'
@@ -16,6 +17,8 @@ export function AppShell({ children }: AppShellProps) {
   const { user } = useAuthStore()
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const location = useLocation()
+  const prevPath = useRef(location.pathname)
 
   // Trigger onboarding when user is loaded and hasn't completed it
   useEffect(() => {
@@ -23,6 +26,17 @@ export function AppShell({ children }: AppShellProps) {
       setShowOnboarding(true)
     }
   }, [user])
+
+  // Nav curtain + progress on route change
+  useEffect(() => {
+    if (location.pathname === prevPath.current) return
+    prevPath.current = location.pathname
+
+    const progress = document.getElementById('nav-progress')
+    const curtain  = document.getElementById('nav-curtain')
+    if (progress) { progress.classList.remove('run'); void progress.offsetWidth; progress.classList.add('run') }
+    if (curtain)  { curtain.classList.remove('run');  void curtain.offsetWidth;  curtain.classList.add('run') }
+  }, [location.pathname])
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--canvas)' }}>
@@ -59,6 +73,10 @@ export function AppShell({ children }: AppShellProps) {
       <HilToast />
       <ToastRegion />
       <GlobalOverlays />
+
+      {/* Nav chrome — CSS-animated, outside the layout flow */}
+      <div id="nav-progress" />
+      <div id="nav-curtain" />
     </div>
   )
 }

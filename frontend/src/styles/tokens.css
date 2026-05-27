@@ -62,6 +62,10 @@ body.theme-dark {
 /* ── Base ────────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
 
+html {
+  scroll-behavior: smooth;
+}
+
 html, body {
   height: 100%;
   margin: 0;
@@ -71,7 +75,69 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Subtle film grain — kills digital flatness without touching DOM */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: .025;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+body.theme-dark::after { mix-blend-mode: screen; opacity: .035; }
+
+/* CRT scanline — dark mode only */
+body.theme-dark main::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  pointer-events: none;
+  opacity: .35;
+  mix-blend-mode: overlay;
+  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.10) 2px, rgba(0,0,0,.10) 3px);
+}
+
 #root { height: 100%; }
+
+/* ── Nav curtain + progress ───────────────────────────────────────────────── */
+#nav-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: 100%;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  transform: scaleX(0);
+  transform-origin: left;
+  z-index: 10000;
+  pointer-events: none;
+  opacity: 0;
+}
+#nav-progress.run { animation: navsweep .6s var(--ease-out); }
+@keyframes navsweep {
+  0%   { opacity:1; transform:scaleX(0); }
+  60%  { opacity:1; transform:scaleX(1); transform-origin:left; }
+  100% { opacity:0; transform:scaleX(1); transform-origin:right; }
+}
+
+#nav-curtain {
+  position: fixed;
+  inset: 52px 0 0 220px;
+  z-index: 9997;
+  pointer-events: none;
+  opacity: 0;
+  contain: paint;
+  background: var(--canvas);
+}
+#nav-curtain.run { animation: curtain .18s var(--ease-out); }
+@keyframes curtain {
+  0%   { opacity: .18; }
+  100% { opacity: 0; }
+}
+@media (max-width: 980px) { #nav-curtain { inset: 0; } }
 
 /* ── Card ────────────────────────────────────────────────────────────────── */
 .card {
@@ -149,6 +215,17 @@ html, body {
 
 /* ── Font mono ───────────────────────────────────────────────────────────── */
 .font-mono { font-family: var(--font-mono); }
+
+/* ── Label ───────────────────────────────────────────────────────────────── */
+.label {
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  font-weight: 600;
+  margin-bottom: 5px;
+  display: block;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
 
 /* ── Nav item ────────────────────────────────────────────────────────────── */
 .nav-item {
