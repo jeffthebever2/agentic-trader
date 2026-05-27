@@ -25,10 +25,14 @@ def send_telegram_notification(message: str) -> bool:
         print("[Telegram] Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured in .env")
         return False
         
-    # SSL Bypass for Mac certificate issues
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    # Verified TLS — the bot token travels in the URL, so never disable cert
+    # checks (that would let a MITM steal it). Use certifi's CA bundle on macOS
+    # where the system store is often missing.
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        ctx = ssl.create_default_context()
     
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     params = {

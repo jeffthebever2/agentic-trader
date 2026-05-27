@@ -3,16 +3,19 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import platform
 import shutil
 import subprocess
 import sys
 import time
+
+logger = logging.getLogger("agentic.admin")
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -113,7 +116,10 @@ def _run_capture(cmd: list[str], timeout: int = 5) -> dict[str, Any]:
             "stderr": proc.stderr[-4000:],
         }
     except Exception as exc:
-        return {"ok": False, "return_code": None, "stdout": "", "stderr": str(exc)}
+        # Log full detail server-side; return a generic message so internal
+        # exception/stack info is never exposed in an HTTP response.
+        logger.exception("_run_capture failed for %r", cmd)
+        return {"ok": False, "return_code": None, "stdout": "", "stderr": "command execution failed"}
 
 
 def _tail(path: Path, lines: int = 80) -> list[str]:
@@ -121,8 +127,9 @@ def _tail(path: Path, lines: int = 80) -> list[str]:
         if not path.exists():
             return []
         return path.read_text(errors="ignore").splitlines()[-lines:]
-    except Exception as exc:
-        return [f"Could not read {path.name}: {exc}"]
+    except Exception:
+        logger.exception("Could not read %s", path.name)
+        return [f"Could not read {path.name}"]
 
 
 def _port_pids(port: int = 8001) -> list[str]:
@@ -147,6 +154,21 @@ def _cloudflared_pids() -> list[str]:
 class RuntimeActionBody(BaseModel):
     port: int = 8001
     tunnel: bool = False
+
+
+def _safe_port(value: Any) -> int:
+    """Coerce + bounds-check a port before it is ever placed near a subprocess.
+
+    Pydantic already types `port` as int, but this is an explicit defense so the
+    value reaching any command is provably an integer in the valid TCP range.
+    """
+    try:
+        p = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="Invalid port")
+    if not (1 <= p <= 65535):
+        raise HTTPException(status_code=422, detail="Port out of range")
+    return p
 
 
 @router.get("/admin/audit")
@@ -300,18 +322,18 @@ async def admin_runtime_web_restart(
     body: RuntimeActionBody,
     admin: dict[str, Any] = Depends(require_admin),
 ):
-    record_audit_event("runtime_web_restart", admin["email"], detail=f"Requested web restart on port {body.port}.")
+    port = _safe_port(body.port)
+    record_audit_event("runtime_web_restart", admin["email"], detail=f"Requested web restart on port {port}.")
     tunnel_flag = [] if body.tunnel else ["--no-tunnel"]
+    py = shutil.which("python3") or sys.executable
+    # The shell string is a CONSTANT; the program and all args are passed
+    # positionally and run via `exec "$@"`, so no argument (port/flags) is ever
+    # interpreted as shell code — eliminates command injection by construction.
     cmd = [
-        "bash",
-        "-lc",
-        (
-            "sleep 1; "
-            f"{shutil.which('python3') or sys.executable} "
-            "cli/restore_runtime.py start --restart "
-            f"--port {int(body.port)} {' '.join(tunnel_flag)} "
-            ">> tmp/runtime-admin-actions.log 2>&1"
-        ),
+        "bash", "-lc",
+        'sleep 1; exec "$@" >> tmp/runtime-admin-actions.log 2>&1',
+        "_",  # $0 placeholder
+        py, "cli/restore_runtime.py", "start", "--restart", "--port", str(port), *tunnel_flag,
     ]
     subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return {"success": True, "message": "Restart scheduled. Refresh in a few seconds."}
@@ -323,7 +345,7 @@ async def admin_runtime_tunnel_start(
     admin: dict[str, Any] = Depends(require_admin),
 ):
     record_audit_event("runtime_tunnel_start", admin["email"], detail="Requested Cloudflare tunnel start.")
-    cmd = [sys.executable, "cli/restore_runtime.py", "start", "--port", str(body.port)]
+    cmd = [sys.executable, "cli/restore_runtime.py", "start", "--port", str(_safe_port(body.port))]
     proc = _run_capture(cmd, timeout=15)
     return {"success": proc["ok"], "result": proc}
 

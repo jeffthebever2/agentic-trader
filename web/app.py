@@ -116,11 +116,19 @@ async def _paper_autostart_loop():
 app = FastAPI(title="Agentic Trader Web UI", version="1.0.0")
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# The SPA is served by this same FastAPI app, so it is same-origin and needs no
+# CORS grant. A wildcard ("*") would let any external site call the API, so we
+# restrict to an explicit allow-list. Override in prod via ALLOWED_ORIGINS
+# (comma-separated). Defaults cover local development only.
+import os as _os
+_default_origins = "http://localhost:8001,http://127.0.0.1:8001"
+_allowed_origins = [o.strip() for o in _os.getenv("ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_allowed_origins,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 import os
@@ -154,6 +162,49 @@ class AuthContextMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 app.add_middleware(AuthContextMiddleware)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Defense-in-depth HTTP security headers (clickjacking, MIME-sniff, XSS).
+
+    The SPA is a single inline HTML/JS bundle, so the CSP must permit
+    'unsafe-inline'/'unsafe-eval' for scripts to function; even so, the policy
+    still meaningfully restricts script/connect/frame *origins*, forbids object
+    embeds and <base> hijacking, and blocks framing — narrowing the blast radius
+    of any injected markup that slips past server-side escaping/DOMPurify.
+    """
+
+    # Origins the app legitimately loads from (fonts, DOMPurify CDN, TradingView).
+    _CSP = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+        "https://cdnjs.cloudflare.com https://s3.tradingview.com https://www.tradingview.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' data: https://fonts.gstatic.com; "
+        "img-src 'self' data: blob: https:; "
+        "connect-src 'self' https://s3.tradingview.com https://www.tradingview.com; "
+        "frame-src 'self' https://s3.tradingview.com https://www.tradingview.com; "
+        "worker-src 'self' blob:; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
+    )
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("Content-Security-Policy", self._CSP)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        response.headers.setdefault(
+            "Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()"
+        )
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(twofa_router, prefix="/api")

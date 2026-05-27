@@ -47,7 +47,12 @@ class StockTradingEnv:
     max_position_size:
         Max fraction of portfolio per position (default 0.10).
     transaction_cost:
-        Round-trip cost fraction per trade (default 0.001 = 10bps).
+        Round-trip commission cost fraction per trade (default 0.001 = 10bps).
+        Models flat/percentage commission (e.g. IB tiered, Webull zero-fee spread).
+    slippage_bps:
+        One-way slippage in basis points applied to each buy (adds cost) and
+        sell (reduces proceeds). Default 5bps = 0.05% per side, 10bps round-trip.
+        Models bid/ask spread and imperfect market-order fill.
     longs_only:
         When True, negative actions are treated as 0 (no shorts).
     """
@@ -61,6 +66,7 @@ class StockTradingEnv:
         starting_cash: float = 100_000.0,
         max_position_size: float = 0.10,
         transaction_cost: float = 0.001,
+        slippage_bps: float = 5.0,
         longs_only: bool = True,
     ):
         self.tickers = [t.upper() for t in tickers]
@@ -68,6 +74,7 @@ class StockTradingEnv:
         self.starting_cash = starting_cash
         self.max_position_size = max_position_size
         self.transaction_cost = transaction_cost
+        self.slippage_bps = float(slippage_bps)
         self.longs_only = longs_only
 
         # Align and store price data
@@ -200,35 +207,62 @@ class StockTradingEnv:
         target_fractions: np.ndarray,
         portfolio_value: float,
     ) -> float:
-        """Execute trades to reach target_fractions; return total transaction cost."""
+        """Execute trades to reach target_fractions; return COMMISSION cost fraction only.
+
+        IMPORTANT — slippage accounting:
+          Slippage is embedded directly in fill prices (buys at ask, sells at bid),
+          which changes `self._cash` and thus `self._shares` values. Because the
+          portfolio value already reflects these fill-price losses, slippage must NOT
+          also be subtracted from the reward — that would double-count it.
+
+          Only the FLAT COMMISSION (transaction_cost) is returned as a separate reward
+          penalty because it represents a pure out-of-pocket cost not already embedded
+          in mark-to-market portfolio value at mid prices.
+
+        Known limitation: trades execute at today's Close price. In practice,
+        EOD decisions execute at the next day's Open. This gives the agent
+        unrealistic intraday precision. The effect is small for daily strategies
+        but should be fixed for intraday RL by using next_open prices.
+        TODO: add `next_open_prices` parameter to step() for more realistic fills.
+        """
+        slip_frac = self.slippage_bps / 10_000.0  # per-side fraction
+
+        # Enforce max_position_size: clip target fractions
+        target_fractions = np.clip(target_fractions, 0.0, self.max_position_size)
+
         target_values = target_fractions * portfolio_value
         target_shares = target_values / np.where(prices > 0, prices, 1.0)
 
         delta_shares = target_shares - self._shares
         trade_values = np.abs(delta_shares * prices)
-        total_cost_fraction = float(np.sum(trade_values)) * self.transaction_cost / portfolio_value
+
+        # Commission cost fraction (returned for reward penalty — NOT double-counted)
+        commission_cost = float(np.sum(trade_values)) * self.transaction_cost / max(portfolio_value, 1.0)
 
         for i, ticker in enumerate(self.tickers):
             price = prices[i]
             if price <= 0:
                 continue
             delta = delta_shares[i]
-            if delta > 0:  # buy
-                cost = delta * price
+            if delta > 0:  # buy at ask (price + slip) — slippage already in cash deduction
+                fill_price = price * (1.0 + slip_frac)
+                cost = delta * fill_price
                 if cost <= self._cash:
                     self._cash -= cost
                     self._shares[i] += delta
                 else:
-                    # Buy as many as cash allows
-                    affordable = self._cash / price
-                    self._cash -= affordable * price
+                    # Buy as many as cash allows at ask price
+                    affordable = self._cash / fill_price
+                    self._cash -= affordable * fill_price
                     self._shares[i] += affordable
-            elif delta < 0:  # sell
+            elif delta < 0:  # sell at bid (price - slip) — slippage already in proceeds
+                fill_price = price * (1.0 - slip_frac)
                 sell_shares = min(abs(delta), self._shares[i])
-                self._cash += sell_shares * price
+                self._cash += sell_shares * fill_price
                 self._shares[i] -= sell_shares
 
-        return total_cost_fraction
+        # Return only commission (not slippage — already in fill prices above)
+        return commission_cost
 
     def _get_obs(self) -> np.ndarray:
         """Build state vector for the current timestep."""

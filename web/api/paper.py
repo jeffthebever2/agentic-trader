@@ -69,7 +69,7 @@ DEFAULT_AUTOSTART_CONFIG = {
     "hil_auto_reject": True,
     "sms_on_fills": False,
 }
-STRATEGIES = ["algorithm", "machine_learning", "ml_new", "combined", "pure_ai", "long_hold"]
+STRATEGIES = ["algorithm", "machine_learning", "ml_new", "combined", "pure_ai", "long_hold", "unified_brain"]
 STRATEGY_LABELS = {
     "algorithm": "Algorithm",
     "machine_learning": "ML Old",
@@ -77,6 +77,7 @@ STRATEGY_LABELS = {
     "combined": "Algorithm + ML",
     "pure_ai": "Pure AI",
     "long_hold": "Long Hold",
+    "unified_brain": "Unified Brain",
 }
 
 router = APIRouter()
@@ -325,9 +326,15 @@ from fastapi.responses import HTMLResponse
 import yfinance as yf
 import ssl
 
-# Fix for macOS yfinance SSL issues
+# macOS frequently lacks system CA certs for yfinance/requests. Point HTTPS at
+# certifi's bundle so connections stay *verified* — never disable verification
+# (ssl._create_unverified_context), which would expose the whole process to MITM.
 try:
-    ssl._create_default_https_context = ssl._create_unverified_context
+    import certifi
+    _ca = certifi.where()
+    os.environ.setdefault("SSL_CERT_FILE", _ca)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", _ca)
+    ssl._create_default_https_context = lambda *a, **k: ssl.create_default_context(cafile=_ca)
 except Exception:
     pass
 
@@ -868,11 +875,54 @@ def _process_status() -> dict[str, Any]:
         return status
 
 
+def _collect_unified_brain_candidates(strategy_dir: Path, data_dir: Path) -> dict[str, Any]:
+    """Read accepted candidates from unified brain audit JSONL for the current day."""
+    import datetime as _dt
+    today_str = _dt.date.today().strftime("%Y%m%d")
+    audit_path = strategy_dir / f"unified_brain_audit_{today_str}.jsonl"
+    if not audit_path.exists():
+        # Try any audit file in the dir
+        found = sorted(strategy_dir.glob("unified_brain_audit_*.jsonl"))
+        if not found:
+            return {"count": 0, "rows": []}
+        audit_path = found[-1]
+    rows = []
+    try:
+        for line in audit_path.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+                if rec.get("decision") == "ACCEPT":
+                    rows.append({
+                        "ticker":                rec.get("ticker", ""),
+                        "entry":                 rec.get("entry", ""),
+                        "target":                rec.get("take_profit", ""),
+                        "stop":                  rec.get("stop", ""),
+                        "atr":                   rec.get("atr", ""),
+                        "score":                 round(rec.get("alpha_score", 0) * 100, 1),
+                        "ml_probability":        rec.get("confidence", ""),
+                        "large_loss_probability":rec.get("large_loss_prob", ""),
+                        "expected_return":       rec.get("expected_return", ""),
+                        "target_before_stop_probability": rec.get("tbs_prob", ""),
+                        "gate_status":           rec.get("tier", ""),
+                        "decision_reason":       rec.get("reason", ""),
+                        "ai_reason":             "",
+                        "account":               "Unified Brain",
+                    })
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {"count": len(rows), "rows": rows[:25]}
+
+
 def _collect_account(strategy: str, data_dir: Path) -> dict[str, Any]:
     strategy_dir = data_dir / strategy
     summary = _read_json(strategy_dir / "summary.json")
     state = _read_json(strategy_dir / "state.json")
-    candidates = _read_candidates(data_dir / f"{strategy}_candidates.csv")
+    if strategy == "unified_brain":
+        candidates = _collect_unified_brain_candidates(strategy_dir, data_dir)
+    else:
+        candidates = _read_candidates(data_dir / f"{strategy}_candidates.csv")
     events = _tail_jsonl(strategy_dir / "events.jsonl")
 
     if summary is None and isinstance(state, dict):

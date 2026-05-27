@@ -42,6 +42,10 @@ def _load_status() -> dict:
 
     try:
         import joblib
+        # joblib.load unpickles. BUNDLE_PATH is a FIXED server-side path written
+        # only by the local training pipeline — no endpoint accepts an uploaded or
+        # caller-specified path, so this is not a remote deserialization vector
+        # (exploiting it requires filesystem write access to MODEL_DIR).
         bundle = joblib.load(BUNDLE_PATH)
         created_at_raw = bundle.get("created_at")
         status["created_at"] = created_at_raw

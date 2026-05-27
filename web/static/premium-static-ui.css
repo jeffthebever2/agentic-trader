@@ -1,237 +1,253 @@
 /* ============================================
-   TradingAgents Premium Static UI Layer
-   Works with plain HTML/CSS/vanilla JS.
+   TradingAgents UI Layer
+   Financial terminal token system.
+   No gradient blobs. No glassmorphism. No glow.
    ============================================ */
 
 :root {
-  color-scheme: dark;
+  /* Semantic financial colors — WCAG AA on light surfaces */
+  --ta-up:        #047857;
+  --ta-up-soft:   rgba(4, 120, 87, 0.09);
+  --ta-down:      #b91c1c;
+  --ta-down-soft: rgba(185, 28, 28, 0.09);
+  --ta-warn:      #92400e;
+  --ta-warn-soft: rgba(245, 158, 11, 0.10);
+  --ta-info:      #1d4ed8;
+  --ta-info-soft: rgba(29, 78, 216, 0.09);
 
-  --ta-bg: #06070a;
-  --ta-bg-soft: #090b11;
-  --ta-surface: rgba(15, 23, 42, 0.72);
-  --ta-surface-strong: rgba(15, 23, 42, 0.94);
-  --ta-surface-hover: rgba(30, 41, 59, 0.78);
-  --ta-border: rgba(148, 163, 184, 0.16);
-  --ta-border-strong: rgba(148, 163, 184, 0.28);
+  /* State tokens */
+  --ta-stale:    rgba(245, 158, 11, 0.08);
+  --ta-disabled: var(--ink-faint, #736C61);
+  --ta-selected: var(--accent-subtle, rgba(214, 58, 0, 0.09));
 
-  --ta-text: #e5edf8;
-  --ta-muted: #94a3b8;
-  --ta-muted-2: #64748b;
+  /* Motion — purposeful only */
+  --ta-t-fast:      90ms;
+  --ta-t-base:      140ms;
+  --ta-t-slow:      180ms;
+  --ta-t-very-slow: 240ms;
+  --ta-ease:        cubic-bezier(0.16, 1, 0.3, 1);
 
-  --ta-primary: #38bdf8;
-  --ta-primary-soft: rgba(56, 189, 248, 0.14);
-  --ta-success: #22c55e;
-  --ta-success-soft: rgba(34, 197, 94, 0.14);
-  --ta-warning: #f59e0b;
-  --ta-warning-soft: rgba(245, 158, 11, 0.15);
-  --ta-danger: #ef4444;
-  --ta-danger-soft: rgba(239, 68, 68, 0.15);
+  /* Radius */
+  --ta-r-sm:  3px;
+  --ta-r-md:  5px;
+  --ta-r-lg:  7px;
 
-  --ta-radius-sm: 0.5rem;
-  --ta-radius-md: 0.75rem;
-  --ta-radius-lg: 1rem;
-  --ta-radius-xl: 1.25rem;
-
-  --ta-shadow-card: 0 18px 50px rgba(0, 0, 0, 0.28);
-  --ta-shadow-soft: 0 8px 30px rgba(0, 0, 0, 0.22);
-
-  --ta-ease: cubic-bezier(0.16, 1, 0.3, 1);
-  --ta-fast: 160ms var(--ta-ease);
-  --ta-med: 260ms var(--ta-ease);
+  /* Shadows — restrained */
+  --ta-shadow-sm: 0 1px 2px rgba(26, 23, 20, 0.06);
+  --ta-shadow-md: 0 2px 6px rgba(26, 23, 20, 0.08);
 }
 
-html {
-  background:
-    radial-gradient(circle at top left, rgba(56, 189, 248, 0.08), transparent 30rem),
-    radial-gradient(circle at 80% 10%, rgba(99, 102, 241, 0.08), transparent 28rem),
-    var(--ta-bg);
+/* Dark mode adjustments — semantic financial colors on dark surfaces */
+.theme-dark {
+  --ta-up:        #34d399;
+  --ta-up-soft:   rgba(52, 211, 153, 0.10);
+  --ta-down:      #f87171;
+  --ta-down-soft: rgba(248, 113, 113, 0.10);
+  --ta-warn:      #fbbf24;
+  --ta-warn-soft: rgba(251, 191, 36, 0.10);
+  --ta-info:      #60a5fa;
+  --ta-info-soft: rgba(96, 165, 250, 0.10);
 }
 
-body {
-  background: transparent;
-  color: var(--ta-text);
-}
-
-/* Premium animated background section. Add class="ta-mesh-bg" to hero/header panels. */
-.ta-mesh-bg {
-  position: relative;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 20% 20%, rgba(56, 189, 248, 0.18), transparent 32rem),
-    radial-gradient(circle at 80% 30%, rgba(99, 102, 241, 0.16), transparent 30rem),
-    radial-gradient(circle at 45% 90%, rgba(34, 197, 94, 0.08), transparent 24rem),
-    linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.98));
-  background-size: 140% 140%;
-  animation: taMeshShift 18s ease-in-out infinite alternate;
-}
-
-@keyframes taMeshShift {
-  from { background-position: 0% 45%; }
-  to { background-position: 100% 55%; }
-}
-
-/* Fixed mouse-reactive spotlight. Injected automatically by premium-static-ui.js. */
-.ta-spotlight {
-  position: fixed;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-  background:
-    radial-gradient(
-      620px circle at var(--ta-mouse-x, 50%) var(--ta-mouse-y, 50%),
-      rgba(56, 189, 248, 0.075),
-      transparent 42%
-    );
-  opacity: 0.9;
-  mix-blend-mode: screen;
-}
-
-/* Keep main app above spotlight when needed, but don't break fixed overlays. */
-body > aside,
-body > .flex-1 {
-  position: relative;
-  z-index: 2;
-}
-
-/* Premium cards. Use on existing dashboard panels as class="ta-card". */
+/* ── PANEL / CARD ──────────────────────────────────────────────────
+   Flat opaque surface. No blur, no lift, no glow.
+   Use on panels that need explicit surface context.
+   ──────────────────────────────────────────────────────────────── */
 .ta-card {
-  background: var(--ta-surface);
-  border: 1px solid var(--ta-border);
-  border-radius: var(--ta-radius-lg);
-  box-shadow: var(--ta-shadow-card);
-  backdrop-filter: blur(16px);
-  transition:
-    transform var(--ta-med),
-    border-color var(--ta-med),
-    background var(--ta-med),
-    box-shadow var(--ta-med);
+  background: var(--surface, #FCFBFA);
+  border: 1px solid var(--surface-rule, #E2DFD8);
+  border-radius: var(--ta-r-lg);
 }
 
-.ta-card:hover {
-  transform: translateY(-2px);
-  border-color: var(--ta-border-strong);
-  background: var(--ta-surface-hover);
-  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.34);
+/* ── BADGE ─────────────────────────────────────────────────────────
+   Compact status tags. Use semantic variants for financial states.
+   ──────────────────────────────────────────────────────────────── */
+.ta-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: var(--ta-r-sm);
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
 }
 
-.ta-glass {
-  background: rgba(15, 23, 42, 0.62);
-  border: 1px solid var(--ta-border);
-  backdrop-filter: blur(18px);
+.ta-badge-up {
+  color: var(--ta-up);
+  background: var(--ta-up-soft);
+  border-color: color-mix(in srgb, var(--ta-up) 22%, transparent);
 }
 
+.ta-badge-down {
+  color: var(--ta-down);
+  background: var(--ta-down-soft);
+  border-color: color-mix(in srgb, var(--ta-down) 22%, transparent);
+}
+
+.ta-badge-warn {
+  color: var(--ta-warn);
+  background: var(--ta-warn-soft);
+  border-color: color-mix(in srgb, var(--ta-warn) 22%, transparent);
+}
+
+.ta-badge-neutral {
+  color: var(--ink-muted, #534E47);
+  background: var(--surface-raised, #EBE9E4);
+  border-color: var(--surface-rule, #E2DFD8);
+}
+
+/* Keep these for backward compat with existing code */
+.ta-badge-success { color: var(--ta-up); background: var(--ta-up-soft); border-color: color-mix(in srgb, var(--ta-up) 22%, transparent); }
+.ta-badge-warning { color: var(--ta-warn); background: var(--ta-warn-soft); border-color: color-mix(in srgb, var(--ta-warn) 22%, transparent); }
+.ta-badge-danger  { color: var(--ta-down); background: var(--ta-down-soft); border-color: color-mix(in srgb, var(--ta-down) 22%, transparent); }
+
+/* ── BUTTON ────────────────────────────────────────────────────────
+   Flat surface button with explicit property transitions.
+   ──────────────────────────────────────────────────────────────── */
 .ta-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.45rem;
-  min-height: 2.5rem;
-  border-radius: var(--ta-radius-md);
-  border: 1px solid var(--ta-border);
-  padding: 0.6rem 0.95rem;
-  color: var(--ta-text);
-  background: rgba(30, 41, 59, 0.62);
+  gap: 6px;
+  min-height: 32px;
+  padding: 5px 12px;
+  border: 1px solid var(--surface-rule, #E2DFD8);
+  border-radius: var(--ta-r-md);
+  background: var(--surface, #FCFBFA);
+  color: var(--ink-muted, #534E47);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
   transition:
-    transform var(--ta-fast),
-    border-color var(--ta-fast),
-    background var(--ta-fast),
-    box-shadow var(--ta-fast);
+    background-color var(--ta-t-fast) var(--ta-ease),
+    border-color     var(--ta-t-fast) var(--ta-ease),
+    color            var(--ta-t-fast) var(--ta-ease);
 }
 
 .ta-btn:hover {
-  transform: translateY(-1px);
-  border-color: rgba(56, 189, 248, 0.34);
-  background: rgba(51, 65, 85, 0.78);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.22);
+  background: var(--surface-raised, #EBE9E4);
+  border-color: var(--ink-faint, #736C61);
+  color: var(--ink, #1A1714);
 }
 
 .ta-btn:active {
-  transform: translateY(0) scale(0.985);
+  transform: translateY(1px);
+}
+
+.ta-btn:focus-visible {
+  outline: 2px solid var(--accent, #D63A00);
+  outline-offset: 2px;
+}
+
+.ta-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
 }
 
 .ta-btn-primary {
-  border-color: rgba(56, 189, 248, 0.34);
-  background: linear-gradient(135deg, rgba(14, 165, 233, 0.92), rgba(37, 99, 235, 0.92));
-  color: white;
+  background: var(--accent, #D63A00);
+  border-color: var(--accent, #D63A00);
+  color: #fff;
 }
 
-.ta-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  border-radius: 999px;
-  border: 1px solid var(--ta-border);
-  padding: 0.22rem 0.55rem;
-  font-size: 0.78rem;
-  font-weight: 650;
-  color: var(--ta-muted);
-  background: rgba(15, 23, 42, 0.62);
+.ta-btn-primary:hover {
+  background: var(--accent-hover, #B83100);
+  border-color: var(--accent-hover, #B83100);
+  color: #fff;
 }
 
-.ta-badge-success {
-  color: #86efac;
-  border-color: rgba(34, 197, 94, 0.28);
-  background: var(--ta-success-soft);
+.ta-btn-danger {
+  background: var(--ta-down, #b91c1c);
+  border-color: var(--ta-down, #b91c1c);
+  color: #fff;
 }
 
-.ta-badge-warning {
-  color: #fcd34d;
-  border-color: rgba(245, 158, 11, 0.28);
-  background: var(--ta-warning-soft);
+.ta-btn-danger:hover {
+  background: #991b1b;
+  border-color: #991b1b;
+  color: #fff;
 }
 
-.ta-badge-danger {
-  color: #fca5a5;
-  border-color: rgba(239, 68, 68, 0.28);
-  background: var(--ta-danger-soft);
-}
-
-/* Skeletons */
+/* ── SKELETON / LOADING ────────────────────────────────────────────
+   Legitimate loading state. Not decorative.
+   ──────────────────────────────────────────────────────────────── */
 .ta-skeleton {
-  border-radius: var(--ta-radius-sm);
+  border-radius: var(--ta-r-sm);
   background:
     linear-gradient(
       90deg,
-      rgba(30, 41, 59, 0.55) 25%,
-      rgba(51, 65, 85, 0.72) 45%,
-      rgba(30, 41, 59, 0.55) 65%
+      var(--surface-raised, #EBE9E4) 25%,
+      var(--surface-soft,   #F2F1ED) 45%,
+      var(--surface-raised, #EBE9E4) 65%
     );
   background-size: 240% 100%;
   animation: taShimmer 1.45s ease-in-out infinite;
 }
 
 @keyframes taShimmer {
-  0% { background-position: 120% 0; }
+  0%   { background-position: 120% 0; }
   100% { background-position: -120% 0; }
 }
 
-/* Empty/error/success state containers */
+.theme-dark .ta-skeleton {
+  background:
+    linear-gradient(
+      90deg,
+      rgba(30, 32, 38, 0.8) 25%,
+      rgba(40, 43, 52, 0.9) 45%,
+      rgba(30, 32, 38, 0.8) 65%
+    );
+  background-size: 240% 100%;
+  animation: taShimmer 1.45s ease-in-out infinite;
+}
+
+/* ── STATE CONTAINERS ──────────────────────────────────────────────
+   Empty, error, and info states. Functional, not decorative.
+   ──────────────────────────────────────────────────────────────── */
 .ta-state {
-  border: 1px dashed var(--ta-border-strong);
-  border-radius: var(--ta-radius-xl);
-  padding: 2rem;
+  border: 1px solid var(--surface-rule, #E2DFD8);
+  border-radius: var(--ta-r-lg);
+  padding: 24px 20px;
   text-align: center;
-  background: rgba(15, 23, 42, 0.38);
+  background: var(--surface-soft, #F2F1ED);
 }
 
 .ta-state-title {
-  margin: 0 0 0.45rem;
-  color: var(--ta-text);
-  font-weight: 750;
+  margin: 0 0 6px;
+  color: var(--ink, #1A1714);
+  font-size: 13.5px;
+  font-weight: 650;
 }
 
 .ta-state-text {
   margin: 0 auto;
-  max-width: 38rem;
-  color: var(--ta-muted);
+  max-width: 36rem;
+  color: var(--ink-muted, #534E47);
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 
-/* Tables */
+.ta-state-error {
+  border-color: color-mix(in srgb, var(--ta-down) 30%, transparent);
+  background: var(--ta-down-soft);
+}
+
+.ta-state-warn {
+  border-color: color-mix(in srgb, var(--ta-warn) 30%, transparent);
+  background: var(--ta-warn-soft);
+}
+
+/* ── TABLES ────────────────────────────────────────────────────────
+   Data-first: compact, readable, no decorative row colors.
+   ──────────────────────────────────────────────────────────────── */
 .ta-table-wrap {
   overflow: auto;
-  border: 1px solid var(--ta-border);
-  border-radius: var(--ta-radius-lg);
-  background: rgba(15, 23, 42, 0.44);
+  border: 1px solid var(--surface-rule, #E2DFD8);
+  border-radius: var(--ta-r-lg);
+  background: var(--surface, #FCFBFA);
 }
 
 .ta-table-wrap table {
@@ -243,51 +259,70 @@ body > .flex-1 {
   position: sticky;
   top: 0;
   z-index: 1;
-  color: var(--ta-muted);
-  background: rgba(15, 23, 42, 0.92);
-  backdrop-filter: blur(12px);
+  background: var(--surface-raised, #EBE9E4);
+  color: var(--ink-faint, #736C61);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .ta-table-wrap th,
 .ta-table-wrap td {
-  padding: 0.85rem 1rem;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--surface-rule, #E2DFD8);
+  text-align: left;
 }
 
-.ta-table-wrap tr {
-  transition: background var(--ta-fast);
+.ta-table-wrap tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.ta-table-wrap tbody tr {
+  transition: background-color var(--ta-t-fast) var(--ta-ease);
 }
 
 .ta-table-wrap tbody tr:hover {
-  background: rgba(56, 189, 248, 0.045);
+  background: var(--surface-soft, #F2F1ED);
 }
 
-/* Toast / tooltip polish */
+/* ── TOAST POLISHING ───────────────────────────────────────────────
+   Keep notyf but use flat color, not gradient.
+   ──────────────────────────────────────────────────────────────── */
 .notyf__toast {
-  border-radius: var(--ta-radius-md) !important;
-  box-shadow: var(--ta-shadow-soft) !important;
+  border-radius: var(--ta-r-md) !important;
+  box-shadow: var(--ta-shadow-md) !important;
 }
 
-.tippy-box {
-  border-radius: var(--ta-radius-sm);
-  font-size: 0.82rem;
-}
-
-/* Command palette shell, if you build one later */
+/* ── COMMAND PALETTE SHELL ─────────────────────────────────────────
+   For future use. Flat, not glass.
+   ──────────────────────────────────────────────────────────────── */
 .ta-command-palette {
   position: fixed;
-  top: 12vh;
+  top: 10vh;
   left: 50%;
-  width: min(680px, calc(100vw - 2rem));
+  width: min(640px, calc(100vw - 2rem));
   transform: translateX(-50%);
-  border: 1px solid var(--ta-border-strong);
-  border-radius: var(--ta-radius-xl);
-  background: rgba(2, 6, 23, 0.88);
-  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.46);
-  backdrop-filter: blur(22px);
+  border: 1px solid var(--surface-rule, #E2DFD8);
+  border-radius: var(--ta-r-lg);
+  background: var(--surface, #FCFBFA);
+  box-shadow:
+    0 4px 6px rgba(26, 23, 20, 0.06),
+    0 12px 32px rgba(26, 23, 20, 0.12);
   z-index: 9999;
 }
 
+.theme-dark .ta-command-palette {
+  background: var(--surface, #0D0E12);
+  border-color: var(--surface-rule, #252832);
+  box-shadow:
+    0 4px 6px rgba(0, 0, 0, 0.3),
+    0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+/* ── REDUCED MOTION ────────────────────────────────────────────────
+   Kill all animation for users who requested it.
+   ──────────────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -296,19 +331,5 @@ body > .flex-1 {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
-  }
-
-  .ta-spotlight {
-    display: none;
-  }
-}
-
-@media (max-width: 760px) {
-  .ta-card:hover {
-    transform: none;
-  }
-
-  .ta-spotlight {
-    display: none;
   }
 }

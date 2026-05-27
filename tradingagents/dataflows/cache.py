@@ -32,7 +32,7 @@ class DataCache:
         args_str = json.dumps(args, sort_keys=True, default=str)
         kwargs_str = json.dumps(kwargs, sort_keys=True, default=str)
         content = f"{func_name}:{args_str}:{kwargs_str}"
-        return hashlib.md5(content.encode()).hexdigest()
+        return hashlib.md5(content.encode(), usedforsecurity=False).hexdigest()
 
     def _get_cache_path(self, key: str) -> Path:
         """Get the file path for a cache key."""

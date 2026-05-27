@@ -203,7 +203,7 @@ function safeHtml(html) {
   --info: #3b82f6;
 }
 * { box-sizing: border-box; }
-body { font-family: var(--font-sans); font-variant-numeric: tabular-nums; font-size: .875rem; -webkit-font-smoothing: antialiased; font-kerning: normal; }
+body { font-family: var(--font-sans); font-variant-numeric: tabular-nums; font-size: .875rem; font-kerning: normal; }
 code, kbd, samp, pre, .tool-call, .ta-k, .prose-dark code, .prose-dark pre { font-family: var(--font-mono) !important; }
 [style*="monospace"] { font-family: var(--font-mono) !important; }
 ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -297,9 +297,9 @@ label:has(input[type="checkbox"]) { min-height: 40px; align-items: center; }
 .blink { animation: blink 1.2s ease-in-out infinite; }
 .skeleton { background: linear-gradient(90deg, #F1F2F4 25%, #E1E1E4 50%, #F1F2F4 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 4px; }
 @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-@keyframes ticker-scroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
-.ticker-track { display: flex; width: max-content; animation: ticker-scroll 60s linear infinite; will-change: transform; }
-.ticker-item { display: flex; flex-shrink: 0; align-items: center; gap: 8px; padding: 0 20px; white-space: nowrap; border-right: 1px solid var(--surface-rule); height: 44px; font-size: 12px; cursor: default; transition: background .12s; }
+@keyframes ticker-scroll { 0% { transform: translate3d(0, 0, 0); } 100% { transform: translate3d(-50%, 0, 0); } }
+.ticker-track { display: inline-block; white-space: nowrap; animation: ticker-scroll 60s linear infinite; animation-iteration-count: infinite !important; will-change: transform; transform: translateZ(0); backface-visibility: hidden; contain: layout paint; }
+.ticker-item { display: inline-flex; vertical-align: top; flex-shrink: 0; align-items: center; gap: 8px; padding: 0 20px; white-space: nowrap; border-right: 1px solid var(--surface-rule); height: 44px; font-size: 12px; cursor: default; transition: background .12s; }
 .ticker-item:hover { background: var(--surface-raised); }
 .ticker-sym { font-weight: 700; color: var(--ink); letter-spacing: .02em; font-size: 12px; }
 .ticker-price { color: var(--ink-muted); font-variant-numeric: tabular-nums; }
@@ -359,7 +359,7 @@ body,
 .bg-slate-900\/50,
 .bg-slate-900\/30 { background: var(--surface-soft) !important; color: var(--ink) !important; }
 aside.bg-slate-900 { background: #FFFFFF !important; }
-header.bg-slate-900\/80 { background: rgba(255,255,255,.92) !important; backdrop-filter: blur(10px); }
+header.bg-slate-900\/80 { background: #FFFFFF !important; }
 .text-slate-100, .text-slate-200 { color: var(--ink) !important; }
 .text-slate-300, .text-slate-400 { color: var(--ink-muted) !important; }
 .text-slate-500, .text-slate-600 { color: var(--ink-faint) !important; }
@@ -446,7 +446,7 @@ body.theme-dark .appearance-toggle { background: var(--surface-raised); }
 body.theme-dark .appearance-toggle-thumb { transform: translateX(22px); background: var(--accent); }
 .admin-tab { padding: 6px 14px; font-size: 12px; border-radius: 4px 4px 0 0; cursor: pointer; background: transparent; border: 1px solid transparent; color: var(--ink-muted); transition: color .15s var(--ease-out), background-color .15s var(--ease-out), border-color .15s var(--ease-out), transform .12s var(--ease-out); margin-bottom: -1px; }
 .admin-tab:hover { color: var(--ink); background: var(--surface-raised); }
-.admin-tab-active { background: var(--surface-raised) !important; border-color: var(--surface-rule) var(--surface-rule) transparent !important; color: #c4b5fd !important; font-weight: 600; }
+.admin-tab-active { background: var(--surface-raised) !important; border-color: var(--surface-rule) var(--surface-rule) transparent !important; color: var(--accent) !important; font-weight: 600; }
 .admin-panel-content { padding: 12px 0; }
 .hil-preset { border: 1px solid var(--surface-rule); background: var(--surface-soft); border-radius: 8px; padding: 12px 14px; cursor: pointer; transition: border-color .15s var(--ease-out), background-color .15s var(--ease-out), transform .12s var(--ease-out); }
 .hil-preset:hover { border-color: var(--accent); background: var(--surface-raised); }
@@ -976,27 +976,27 @@ table thead th, .admin-table th {
    True glassmorphism (blur + 1px inner refraction border + inner highlight),
    restricted to fixed/sticky/overlay layers only (impeccable: never default). */
 
+/* NOTE: backdrop-filter removed from always-visible chrome (header, thead).
+   The ticker scrolls continuously -> the page composites every frame -> any
+   backdrop-filter would re-run a GPU filter pass over that region 60x/sec,
+   which janks weak GPUs (and everything sharing the compositor, incl. the
+   ticker). Opaque backgrounds give the same look at zero per-frame GPU cost. */
 header {
-  background: rgba(255,255,255,.72) !important;
-  backdrop-filter: blur(18px) saturate(1.6);
-  -webkit-backdrop-filter: blur(18px) saturate(1.6);
-  border-bottom: 1px solid rgba(255,255,255,.5) !important;
+  background: #FFFFFF !important;
+  border-bottom: 1px solid var(--surface-rule) !important;
   box-shadow: inset 0 1px 0 rgba(255,255,255,.6), 0 1px 0 var(--surface-rule);
 }
 .theme-dark header {
-  background: rgba(19,20,26,.62) !important;
-  backdrop-filter: blur(18px) saturate(1.4);
-  -webkit-backdrop-filter: blur(18px) saturate(1.4);
+  background: #14151A !important;
   border-bottom: 1px solid rgba(255,255,255,.06) !important;
   box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 1px 0 rgba(0,0,0,.4);
 }
-/* Sticky table headers ride as frosted glass over scrolling rows */
+/* Sticky table headers — opaque, no per-frame blur */
 thead {
-  background: rgba(237,238,242,.78) !important;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  background: #EDEEF2 !important;
   box-shadow: inset 0 -1px 0 var(--surface-rule);
 }
+.theme-dark thead { background: #1C1E26 !important; }
 .theme-dark thead {
   background: rgba(28,30,38,.78) !important;
 }
@@ -1029,22 +1029,8 @@ details[open] > *:not(summary) {
 }
 @keyframes popIn { from { opacity:0; transform:scaleY(.96) translateY(-4px); } to { opacity:1; transform:none; } }
 
-/* emil: liquid hover wash — accent fills from where pointer is (CSS var fed by JS) */
-.nav-item, .dash-chart-btn, .report-tab, .btn-secondary { position: relative; overflow: hidden; }
-.nav-item::after, .dash-chart-btn::after, .report-tab::after, .btn-secondary::after {
-  content: ""; position: absolute; left: var(--mx,50%); top: var(--my,50%);
-  width: 0; height: 0; border-radius: 50%;
-  background: radial-gradient(circle, rgba(224,62,0,.16), transparent 70%);
-  transform: translate(-50%,-50%); pointer-events: none;
-  transition: width .45s var(--ease-out), height .45s var(--ease-out), opacity .3s;
-  opacity: 0;
-}
-@media (hover: hover) and (pointer: fine) {
-  .nav-item:hover::after, .dash-chart-btn:hover::after,
-  .report-tab:hover::after, .btn-secondary:hover::after {
-    width: 240px; height: 240px; opacity: 1;
-  }
-}
+/* nav/button hover — background transition only, no pointer-position gradient */
+.nav-item, .dash-chart-btn, .report-tab, .btn-secondary { position: relative; }
 
 /* emil: blur-masked state crossfade on verdict cards (two states never look like 2 objects) */
 .verdict-card-buy, .verdict-card-strong-buy, .verdict-card-hold,
@@ -1052,12 +1038,7 @@ details[open] > *:not(summary) {
   transition: border-color .3s var(--ease-out), background-color .3s var(--ease-out);
 }
 
-/* emil: staggered list entrance for dashboard rows (interruptible transition feel) */
-.dash-watch-row, .dash-signal-row, .dash-opp-card, .ticker-item {
-  animation: rowIn .4s var(--ease-out) both;
-}
-.dash-watch-row:nth-child(n),.dash-signal-row:nth-child(n){animation-delay:calc(var(--i,0)*40ms)}
-@keyframes rowIn { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+/* dashboard rows — no decorative entrance animation */
 
 /* emil: hold-to-confirm affordance on danger buttons (slow press, snappy release) */
 .btn-danger { position: relative; overflow: hidden; }
@@ -1145,21 +1126,16 @@ button:not(:disabled):active { filter: brightness(.97); }
   60%  { opacity:1; transform:scaleX(1); transform-origin:left; }
   100% { opacity:0; transform:scaleX(1); transform-origin:right; }
 }
-/* Page-switch curtain — accent wipe sweeps across content on navigate */
+/* Page-switch: minimal opacity flash, no gradient */
 #nav-curtain {
   position: fixed; inset: 52px 0 0 220px; z-index: 9997;
-  pointer-events: none; opacity: 0; overflow: hidden; contain: paint;
-  background: linear-gradient(105deg,
-    transparent 0%, var(--accent-subtle) 42%,
-    rgba(224,62,0,.10) 50%, var(--accent-subtle) 58%, transparent 100%);
-  transform: translateX(0);
-  clip-path: inset(0 100% 0 0);
+  pointer-events: none; opacity: 0; contain: paint;
+  background: var(--canvas, #F5F4F1);
 }
-#nav-curtain.run { animation: curtain .42s var(--ease-in-out); }
+#nav-curtain.run { animation: curtain .18s var(--ease-out); }
 @keyframes curtain {
-  0%   { opacity:1; clip-path: inset(0 100% 0 0); }
-  45%  { opacity:1; clip-path: inset(0 0 0 0); }
-  100% { opacity:0; clip-path: inset(0 0 0 100%); }
+  0%   { opacity:.18; }
+  100% { opacity:0; }
 }
 @media (max-width: 980px) { #nav-curtain { inset: 0; } }
 @media (prefers-reduced-motion: reduce) { #nav-curtain { display:none !important; } }
@@ -1253,20 +1229,9 @@ button:not(.nav-item):not(.report-tab):not(.dash-opp-btn):not(.admin-tab):not(.d
   box-shadow: inset 0 1px 2px rgba(14,17,24,.25), 0 0 0 0 #C6CAD3 !important;
   filter: brightness(.97);
 }
-/* Cards get a tilt stage for JS parallax */
-.card, .dash-opp-card { transform-style: preserve-3d; will-change: transform; }
-.tilt-3d { transition: transform .2s var(--ease-out); position: relative; }
-.tilt-glare::after {
-  content: ""; position: absolute; inset: 0; border-radius: inherit;
-  pointer-events: none; z-index: 2; opacity: .55;
-  background: radial-gradient(420px circle at var(--gx,50%) var(--gy,50%),
-    rgba(255,255,255,.28), rgba(255,255,255,0) 45%);
-  transition: opacity .2s var(--ease-out);
-}
-.theme-dark .tilt-glare::after {
-  background: radial-gradient(420px circle at var(--gx,50%) var(--gy,50%),
-    rgba(255,255,255,.12), rgba(255,255,255,0) 45%);
-}
+/* Cards — no tilt, no glare overlay */
+.tilt-3d { position: relative; }
+.tilt-glare::after { display: none !important; }
 
 @media (prefers-reduced-motion: reduce) {
   .btn-primary,.btn-secondary,.btn-danger,.dash-chart-btn,.report-tab,
@@ -1663,7 +1628,6 @@ body>.flex-1.flex.flex-col.overflow-hidden{
 }
 .ta-app-header{
   gap:18px;
-  backdrop-filter:saturate(1.08);
 }
 .ta-title-block{min-width:178px;}
 .ta-page-kicker{
@@ -1996,7 +1960,6 @@ input[type=date], progress{ accent-color:var(--accent); }
    motion here degrades to instant, comprehension unaffected. */
 </style>
 <style id="ta-no-gradient-repair">
-:root,
 body.theme-dark{
   --canvas:#090A0D;
   --surface:#0D0E12;
@@ -2011,7 +1974,6 @@ body.theme-dark{
   --accent-subtle:rgba(226,67,18,.14);
   --shadow-card:none;
 }
-body,
 body.theme-dark{
   background:var(--canvas)!important;
   color:var(--ink)!important;
@@ -2374,6 +2336,215 @@ body>aside{
   }
 }
 </style>
+
+<style id="ta-v3">
+/* ════════════════════════════════════════════════════════
+   ta-v3 — Instrument-grade finish pass
+   Fixes: theme cascade, monospace numerics, grain, sidebar,
+   section labels, stat numbers, admin purple, dark polish.
+   Rule: no !important overuse — only where specificity fights
+   pre-existing inline styles.
+   ════════════════════════════════════════════════════════ */
+
+/* ── Light-mode authoritative token reset ──────────────────
+   Now that :root is no longer hijacked by dark values,
+   establish the canonical warm-paper light palette here.
+   This wins over #ta-redesign (same :root, later source). */
+:root {
+  --canvas: #F5F4F1;
+  --surface: #FCFBFA;
+  --surface-soft: #F0EFE9;
+  --surface-raised: #E8E6DF;
+  --surface-rule: #DEDAD0;
+  --ink: #1A1714;
+  --ink-muted: #534E47;
+  --ink-faint: #736C61;
+  --accent: #D63A00;
+  --accent-hover: #B83100;
+  --accent-subtle: rgba(214,58,0,.09);
+  --shadow-card: 0 1px 2px rgba(26,23,20,.04), 0 4px 14px -6px rgba(26,23,20,.08);
+  --shadow-1: 0 1px 3px rgba(26,23,20,.06), 0 2px 8px -4px rgba(26,23,20,.09);
+  --shadow-2: 0 2px 5px rgba(26,23,20,.07), 0 10px 24px -8px rgba(26,23,20,.14);
+}
+
+/* ── Body: warm canvas, no flat slate ─────────────────────── */
+body {
+  background: var(--canvas) !important;
+  color: var(--ink) !important;
+}
+
+/* ── Film grain — instrument panel texture ─────────────────
+   Fixed pointer-events-none pseudo so it never intercepts
+   clicks. GPU layer via will-change:transform. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.028'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 200px 200px;
+  will-change: transform;
+  opacity: 1;
+}
+body.theme-dark::before {
+  opacity: 0.018;
+}
+@media (prefers-reduced-motion: reduce) {
+  body::before { display: none; }
+}
+
+/* ── Stat numbers — JetBrains Mono mandatory ───────────────
+   Per DESIGN.md: all numbers at cockpit density.             */
+.dash-stat-num {
+  font-family: var(--font-mono) !important;
+  font-size: 22px !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.03em !important;
+  font-feature-settings: "tnum", "zero" !important;
+  color: var(--ink) !important;
+}
+#dash-stats-wr,
+#dash-stats-pnl,
+#dash-stats-trades {
+  font-family: var(--font-mono) !important;
+  font-feature-settings: "tnum", "zero" !important;
+  color: var(--ink) !important;
+}
+
+/* ── Sidebar — distinctive instrument rail ─────────────────
+   Slightly cooler-toned from the main canvas.
+   Active item: confident background, no side-stripe.
+   Accent dot before active text (box-shadow trick, not border). */
+body > aside {
+  background: var(--surface) !important;
+  border-right: 1px solid var(--surface-rule) !important;
+}
+.nav-item.active {
+  background: var(--accent-subtle) !important;
+  color: var(--accent) !important;
+  font-weight: 600 !important;
+  box-shadow: inset 3px 0 0 var(--accent) !important;
+}
+body.theme-dark .nav-item.active {
+  box-shadow: inset 3px 0 0 var(--accent) !important;
+}
+.nav-item.active svg {
+  color: var(--accent) !important;
+  opacity: 1 !important;
+}
+
+/* Sidebar brand — tighter, more distinctive lockup */
+.ta-brand-mark {
+  border-radius: 10px !important;
+  box-shadow: 0 0 0 1px var(--surface-rule) !important;
+}
+
+/* ── Section labels — instrument-panel eyebrows ────────────
+   More tracking, slightly heavier, with a tiny leading mark. */
+.dash-section-label {
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  letter-spacing: .14em !important;
+  color: var(--ink-faint) !important;
+  text-transform: uppercase !important;
+}
+
+/* ── Header — cleaner chrome ──────────────────────────────── */
+.ta-app-header,
+.flex-1.flex.flex-col.overflow-hidden > header {
+  background: var(--surface) !important;
+  border-bottom: 1px solid var(--surface-rule) !important;
+}
+#page-title {
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  letter-spacing: -.02em !important;
+  color: var(--ink) !important;
+}
+
+/* ── Dashboard: canvas background ──────────────────────────── */
+#panel-dashboard {
+  background: var(--canvas) !important;
+}
+#dash-main-grid {
+  background: var(--canvas) !important;
+}
+#dash-main-grid > div {
+  background: var(--surface) !important;
+}
+
+/* ── Ticker tape — crisp, no seam ─────────────────────────── */
+#panel-dashboard > div:first-child {
+  background: var(--surface) !important;
+  border-color: var(--surface-rule) !important;
+}
+.dash-stat-cell {
+  background: var(--surface) !important;
+}
+
+/* ── Opportunity cards — less identical, more data-forward ─── */
+.dash-opp-card {
+  border-color: var(--surface-rule) !important;
+  background: var(--surface) !important;
+}
+.dash-opp-card:hover {
+  border-color: rgba(214,58,0,.4) !important;
+  background: rgba(214,58,0,.03) !important;
+}
+
+/* ── Admin tabs — accent, not purple ──────────────────────── */
+.admin-tab-active {
+  color: var(--accent) !important;
+}
+
+/* ── Connection card: warm connected state ─────────────────── */
+.ta-connection-card[data-state="connected"] {
+  background: rgba(22,163,74,.08) !important;
+  border-color: rgba(22,163,74,.22) !important;
+}
+.ta-connection-card[data-state="connected"] .ta-status-dot {
+  background: #16a34a !important;
+}
+.ta-connection-card[data-state="connected"] .ta-status-value {
+  color: #15803d !important;
+}
+
+/* ── Dark mode — inherit from body.theme-dark token set ─────
+   Most dark styles come from #ta-no-gradient-repair (now
+   correctly scoped to body.theme-dark). Just patch leftovers. */
+body.theme-dark #dash-main-grid > div {
+  background: var(--surface) !important;
+}
+body.theme-dark .dash-stat-cell {
+  background: var(--surface) !important;
+}
+body.theme-dark #panel-dashboard > div:first-child {
+  background: var(--surface) !important;
+}
+body.theme-dark .ta-connection-card[data-state="connected"] .ta-status-value {
+  color: #34d399 !important;
+}
+
+/* ── Scrollbar — warm, matches canvas ───────────────────────  */
+::-webkit-scrollbar-track { background: var(--surface-soft) !important; }
+::-webkit-scrollbar-thumb { background: #C9C3B4 !important; }
+::-webkit-scrollbar-thumb:hover { background: #A89F8A !important; }
+
+/* ── Input border — warm neutral, not Tailwind cool gray ───── */
+.input { border-color: var(--surface-rule) !important; }
+body.theme-dark .input { border-color: #3A3D4A !important; }
+
+/* ── Prose dark — warmer code blocks in light mode ─────────── */
+body:not(.theme-dark) .prose-dark code { background: #EDE9E0 !important; }
+body:not(.theme-dark) .prose-dark pre { background: #EFEAE0 !important; }
+
+/* ── Reduced motion: all at-rest ────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none !important; }
+}
+</style>
 </head>
 <body class="bg-slate-50 text-slate-950 flex overflow-hidden" style="height:100dvh">
 <a href="#main-content" class="sr-only focus:not-sr-only focus:absolute focus:p-4 focus:bg-surface focus:text-ink focus:z-[9999] focus:outline-none focus:ring-2 focus:ring-accent">Skip to main content</a>
@@ -2641,19 +2812,21 @@ body>aside{
                 <button onclick="navigate('ml')" style="font-size:10px;color:var(--accent);background:none;border:none;cursor:pointer">All →</button>
               </div>
             </div>
-            <!-- Aggregate line -->
-            <div id="dash-stats-agg" style="display:flex;gap:10px;margin-bottom:10px">
-              <div style="flex:1;border-radius:8px;padding:8px 10px;background:var(--surface-soft);text-align:center">
-                <div id="dash-stats-wr" style="font-size:16px;font-weight:700;color:#6b7280">—</div>
-                <div style="font-size:10px;color:var(--ink-faint);margin-top:1px">Win Rate</div>
+            <!-- Aggregate strip — divider-separated, no equal card boxes -->
+            <div id="dash-stats-agg" style="display:grid;grid-template-columns:1fr 1px 1fr 1px 1fr;margin-bottom:12px;border:1px solid var(--surface-rule);border-radius:8px;overflow:hidden">
+              <div style="padding:10px 10px 9px;text-align:center">
+                <div id="dash-stats-wr" style="font-size:17px;font-weight:700;color:var(--ink);font-family:var(--font-mono);letter-spacing:-.02em;line-height:1.1">—</div>
+                <div style="font-size:10px;color:var(--ink-faint);margin-top:2px;font-weight:600;letter-spacing:.06em;text-transform:uppercase">Win Rate</div>
               </div>
-              <div style="flex:1;border-radius:8px;padding:8px 10px;background:var(--surface-soft);text-align:center">
-                <div id="dash-stats-pnl" style="font-size:16px;font-weight:700;color:#6b7280">—</div>
-                <div style="font-size:10px;color:var(--ink-faint);margin-top:1px">Total P&amp;L</div>
+              <div style="background:var(--surface-rule)"></div>
+              <div style="padding:10px 10px 9px;text-align:center">
+                <div id="dash-stats-pnl" style="font-size:17px;font-weight:700;color:var(--ink);font-family:var(--font-mono);letter-spacing:-.02em;line-height:1.1">—</div>
+                <div style="font-size:10px;color:var(--ink-faint);margin-top:2px;font-weight:600;letter-spacing:.06em;text-transform:uppercase">Total P&amp;L</div>
               </div>
-              <div style="flex:1;border-radius:8px;padding:8px 10px;background:var(--surface-soft);text-align:center">
-                <div id="dash-stats-trades" style="font-size:16px;font-weight:700;color:#94a3b8">—</div>
-                <div style="font-size:10px;color:var(--ink-faint);margin-top:1px">Trades</div>
+              <div style="background:var(--surface-rule)"></div>
+              <div style="padding:10px 10px 9px;text-align:center">
+                <div id="dash-stats-trades" style="font-size:17px;font-weight:700;color:var(--ink);font-family:var(--font-mono);letter-spacing:-.02em;line-height:1.1">—</div>
+                <div style="font-size:10px;color:var(--ink-faint);margin-top:2px;font-weight:600;letter-spacing:.06em;text-transform:uppercase">Trades</div>
               </div>
             </div>
             <!-- Per-strategy rows -->
@@ -3748,7 +3921,7 @@ body>aside{
         </div>
 
         <div class="2xl:col-span-2 space-y-5">
-          <div id="paper-accounts" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4"></div>
+          <div id="paper-accounts" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7 gap-4"></div>
 
           <div class="card overflow-hidden">
             <div class="p-4 border-b border-slate-800 flex items-center justify-between gap-3">
@@ -6143,8 +6316,8 @@ function fmtPct(n) { if (n==null||isNaN(n)) return '—'; const v=Number(n); ret
 function pnlClass(n) { return n>=0?'text-emerald-400':'text-red-400'; }
 function decisionBadge(d) {
   const r = RATING_MAP[d];
-  if (r) return `<span class="badge ${DECISION_COLORS[d]||'badge-pending'}">${r.label}</span>`;
-  return `<span class="badge ${DECISION_COLORS[d]||'badge-pending'}">${d||'—'}</span>`;
+  if (r) return `<span class="badge ${DECISION_COLORS[d]||'badge-pending'}">${escHtml(r.label)}</span>`;
+  return `<span class="badge ${DECISION_COLORS[d]||'badge-pending'}">${d?escHtml(d):'—'}</span>`;
 }
 function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 // Strict whitelist sanitizers for values interpolated into inline JS (onclick).
@@ -6153,7 +6326,17 @@ function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'
 function safeSym(s){ return String(s==null?'':s).toUpperCase().replace(/[^A-Z0-9.\-]/g,'').slice(0,12); }
 function safeId(s){ return String(s==null?'':s).replace(/[^A-Za-z0-9._\-]/g,'').slice(0,64); }
 function safeFile(s){ return String(s==null?'':s).replace(/[^A-Za-z0-9._\-]/g,'').slice(0,128); }
-function renderMd(md) { try { return marked.parse(md||''); } catch(e) { return escHtml(md||''); } }
+// marked.parse() emits raw HTML from markdown (including <script>, onerror=, and
+// javascript: links), so its output MUST be sanitized before hitting innerHTML.
+// LLM/report content is untrusted (prompt-injectable). Always run through DOMPurify;
+// if it isn't loaded yet, fall back to escaped plaintext rather than raw HTML.
+function renderMd(md) {
+  try {
+    var html = marked.parse(md||'');
+    if (typeof DOMPurify !== 'undefined') return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
+    return escHtml(md||'');
+  } catch(e) { return escHtml(md||''); }
+}
 
 function applyTheme(theme) {
   const isDark = theme === 'dark';
@@ -6312,7 +6495,7 @@ async function initDashTicker() {
     }).join('');
     track.innerHTML = html + html;
     const w = track.scrollWidth / 2;
-    track.style.animationDuration = Math.max(30, Math.round(w / 100)) + 's';
+    track.style.setProperty('animation-duration', Math.max(30, Math.round(w / 100)) + 's', 'important');
     // Populate opportunities once quotes are loaded
     showOpportunities(_dashOppMode);
     setChip('chip-market', true, `Data (${_dashQuotes.length})`);
@@ -6710,11 +6893,17 @@ async function loadDashLiveFeed() {
 }
 
 async function loadDashboard() {
+  // Ticker first (it owns the visible animation). Heavier/non-critical renders are
+  // staggered off the critical path so their synchronous render bursts don't pile
+  // into the same frames and stutter the ticker during initial load.
   initDashTicker().then(updateStatusChips).catch(()=>{});
-  loadDashChart('SPY');
   updateStatusChips();
-  refreshWatchlist();
-  loadDashCandidates();
+  // setTimeout (not requestIdleCallback) so each loader lands in its own frame
+  // with predictable spacing instead of bunching into a single idle slot.
+  const _defer = (fn, ms) => setTimeout(fn, ms);
+  _defer(() => loadDashChart('SPY'), 80);
+  _defer(refreshWatchlist, 160);
+  _defer(loadDashCandidates, 260);
 
   try {
     const [stats, port, hist] = await Promise.all([
@@ -6730,11 +6919,11 @@ async function loadDashboard() {
     }
 
   } catch(e) { console.warn('dashboard load error', e); }
-  loadDashLiveFeed();
-  loadDashStats();
+  _defer(loadDashLiveFeed, 360);
+  _defer(loadDashStats, 480);
 
-  // Fidelity overlay
-  apiFetch('/fidelity/status').then(s => {
+  // Fidelity overlay (deferred — not first-paint critical)
+  _defer(() => apiFetch('/fidelity/status').then(s => {
     if (!s.connected) return;
     apiFetch('/fidelity/summary').then(r => {
       if (!r?.summary) return;
@@ -6752,7 +6941,7 @@ async function loadDashboard() {
         pe.textContent = sum.daily_change_pct || ''; pe.style.color = col;
       }
     }).catch(()=>{});
-  }).catch(()=>{});
+  }).catch(()=>{}), 600);
 }
 
 async function loadDashStats() {
@@ -7436,7 +7625,7 @@ async function loadPortfolio() {
     } else {
       tbody.innerHTML = data.positions.map(p => `
         <tr class="tr-hover border-b border-slate-800/50">
-          <td class="px-4 py-3 font-mono font-bold text-slate-100">${p.ticker}</td>
+          <td class="px-4 py-3 font-mono font-bold text-slate-100">${escHtml(p.ticker)}</td>
           <td class="px-4 py-3 text-right text-slate-300">${p.shares.toFixed(2)}</td>
           <td class="px-4 py-3 text-right text-slate-400">${fmt$(p.entry_price)}</td>
           <td class="px-4 py-3 text-right text-slate-200">${fmt$(p.current_price)}</td>
@@ -7548,7 +7737,7 @@ function startAlgoBacktest() {
     max_price: parseFloat(document.getElementById('ab-max-price').value) || null,
     account_size: parseFloat(document.getElementById('ab-account').value) || 10000,
     primary_hold: parseInt(document.getElementById('ab-primary-hold').value) || 3,
-    hold_periods: [1,2,3,5],
+    hold_periods: [3,5,10],
     no_cache: document.getElementById('ab-no-cache').checked,
     no_ml: document.getElementById('ab-no-ml').checked,
     no_charts: true,
@@ -7818,7 +8007,7 @@ async function runScreener() {
     document.getElementById('sc-results').classList.remove('hidden');
     const tbody = document.getElementById('sc-tbody');
     tbody.innerHTML = data.results.map(r => {
-      if (r.error) return `<tr class="tr-hover border-b border-slate-800/50"><td class="px-4 py-3 font-mono font-bold text-slate-500">${r.ticker}</td><td colspan="10" class="px-4 py-3 text-red-400 text-xs">${escHtml(r.error)}</td></tr>`;
+      if (r.error) return `<tr class="tr-hover border-b border-slate-800/50"><td class="px-4 py-3 font-mono font-bold text-slate-500">${escHtml(r.ticker)}</td><td colspan="10" class="px-4 py-3 text-red-400 text-xs">${escHtml(r.error)}</td></tr>`;
       const sc = r.score||0;
       const sc_color = sc>=threshold?'text-emerald-400':sc>=threshold*.85?'text-amber-400':'text-red-400';
       const sig = r.signals||{};
@@ -7826,7 +8015,7 @@ async function runScreener() {
       const status_html = r.passed ? '<span class="badge badge-buy">PASS ✓</span>' : '<span class="text-slate-600 text-xs">skip</span>';
       return `<tr class="tr-hover border-b border-slate-800/50">
         <td class="px-4 py-3 font-mono font-bold text-slate-200">
-          <button class="hover:text-cyan-400 transition-colors" onclick="openTVChart('${safeSym(r.ticker)}')" title="Open chart">${r.ticker}</button>
+          <button class="hover:text-cyan-400 transition-colors" onclick="openTVChart('${safeSym(r.ticker)}')" title="Open chart">${escHtml(r.ticker)}</button>
         </td>
         <td class="px-4 py-3 text-right font-bold ${sc_color}">${sc.toFixed(1)}</td>
         <td class="px-4 py-3 text-right text-slate-400">${(sig.trend||0).toFixed(0)}</td>
@@ -8044,22 +8233,24 @@ async function loadHistory(page=1) {
     if (!data.entries.length) {
       tbody.innerHTML = '<tr><td colspan="5" class="px-5 py-8 text-center text-slate-600">No entries found.</td></tr>';
     } else {
-      tbody.innerHTML = data.entries.map(e => `
-        <tr class="tr-hover border-b border-slate-800/50 cursor-pointer" onclick="toggleHistoryRow('${safeSym(e.ticker)}','${safeId(e.date)}', this)">
-          <td class="px-5 py-3 font-mono font-bold text-slate-100">${e.ticker}</td>
-          <td class="px-5 py-3 text-slate-400 text-sm">${e.date}</td>
+      tbody.innerHTML = data.entries.map(e => {
+        const sym = safeSym(e.ticker), dt = safeId(e.date);
+        return `
+        <tr class="tr-hover border-b border-slate-800/50 cursor-pointer" onclick="toggleHistoryRow('${sym}','${dt}', this)">
+          <td class="px-5 py-3 font-mono font-bold text-slate-100">${escHtml(e.ticker)}</td>
+          <td class="px-5 py-3 text-slate-400 text-sm">${escHtml(e.date)}</td>
           <td class="px-5 py-3">${decisionBadge(e.decision)}</td>
           <td class="px-5 py-3 text-xs text-slate-500 max-w-xs truncate">${escHtml((e.decision_snippet||'').slice(0,120))}</td>
           <td class="px-5 py-3 text-right flex items-center gap-2 justify-end">
-            <button class="text-xs text-slate-500 hover:text-cyan-300" onclick="event.stopPropagation();openTVChart('${safeSym(e.ticker)}')">Chart</button>
-            <button class="text-xs text-cyan-500 hover:text-cyan-300" onclick="event.stopPropagation();viewHistoryEntry('${e.ticker}','${e.date}')">View Report</button>
+            <button class="text-xs text-slate-500 hover:text-cyan-300" onclick="event.stopPropagation();openTVChart('${sym}')">Chart</button>
+            <button class="text-xs text-cyan-500 hover:text-cyan-300" onclick="event.stopPropagation();viewHistoryEntry('${sym}','${dt}')">View Report</button>
           </td>
         </tr>
-        <tr id="hist-expand-${e.ticker}-${e.date}" class="hidden">
+        <tr id="hist-expand-${sym}-${dt}" class="hidden">
           <td colspan="5" class="px-5 py-4 bg-slate-900/50">
-            <div id="hist-content-${e.ticker}-${e.date}" class="prose-dark text-sm max-h-64 overflow-auto"></div>
+            <div id="hist-content-${sym}-${dt}" class="prose-dark text-sm max-h-64 overflow-auto"></div>
           </td>
-        </tr>`).join('');
+        </tr>`; }).join('');
     }
 
     document.getElementById('h-prev-btn').disabled = historyPage <= 1;
@@ -8130,6 +8321,7 @@ const PAPER_LABELS = {
   combined: 'Algorithm + ML',
   pure_ai: 'Pure AI',
   long_hold: 'Long Hold',
+  unified_brain: 'Unified Brain',
 };
 
 function fmtPctFrac(n) {
@@ -8758,6 +8950,7 @@ const EQUITY_STRATEGY_COLORS = {
   combined: '#34d399',
   pure_ai: '#fb923c',
   long_hold: '#f59e0b',
+  unified_brain: '#e879f9',   // fuchsia — distinct from all others
 };
 
 let _equityTimer = null;
@@ -9986,9 +10179,12 @@ async function loadAdminHistory() {
 
 // ─── Admin console helpers ────────────────────────────────────────
 function _adminStat(label, value, sub, color) {
-  return `<div class="admin-stat"><div class="admin-stat-label">${label}</div>`
+  // label/sub are always plain text -> escape them. `value` may be trusted HTML
+  // (e.g. _adminDot spans), so callers MUST escHtml() any data they pass as value.
+  // color is a CSS token from code, never user data.
+  return `<div class="admin-stat"><div class="admin-stat-label">${escHtml(label)}</div>`
     + `<div class="admin-stat-value text-sm"${color?` style="color:${color}"`:''}>${value}</div>`
-    + (sub ? `<div class="admin-stat-sub">${sub}</div>` : '') + `</div>`;
+    + (sub ? `<div class="admin-stat-sub">${escHtml(sub)}</div>` : '') + `</div>`;
 }
 function _adminDot(ok, onText, offText) {
   const c = ok ? '#4ade80' : '#f87171';
@@ -10046,8 +10242,8 @@ async function loadAdminOverview() {
     <div class="admin-stat-grid mb-5">
       ${_adminStat('Paper Runner', _adminDot(running,'Running','Stopped'), running && p.pid ? 'pid '+p.pid : (p.started_at? p.started_at.slice(0,16).replace('T',' '):''))}
       ${_adminStat('Users', nUsers, nAdmins+' admin'+(nAdmins===1?'':'s'))}
-      ${_adminStat('ML Model', mlD.status_label || (mlD.bundle_exists?'Loaded':'Missing'), mlD.days_old!=null?mlD.days_old+'d old':'')}
-      ${_adminStat('RL Agent', rlD.status_label || rlD.status || (rlD.checkpoint_exists?'Ready':'None'), '')}
+      ${_adminStat('ML Model', escHtml(mlD.status_label || (mlD.bundle_exists?'Loaded':'Missing')), mlD.days_old!=null?mlD.days_old+'d old':'')}
+      ${_adminStat('RL Agent', escHtml(rlD.status_label || rlD.status || (rlD.checkpoint_exists?'Ready':'None')), '')}
       ${_adminStat('Cloudflare AI', _adminDot(cfOk,'Configured','Off'), cf.data?.model||'')}
       ${_adminStat('Fidelity', _adminDot(fidOk,'Connected','Offline'),'')}
       ${_adminStat('Webull', _adminDot(wbOk,'Connected','Offline'),'')}
@@ -10196,7 +10392,7 @@ async function loadAdminModels() {
   if (!ml.ok) html += `<span class="text-red-400">ML status error: ${escHtml(ml.error||'')}</span>`;
   else {
     html += `<div class="admin-stat-grid mb-4">
-      ${_adminStat('Status', m.status_label || (m.bundle_exists?'Loaded':'Missing'))}
+      ${_adminStat('Status', escHtml(m.status_label || (m.bundle_exists?'Loaded':'Missing')))}
       ${_adminStat('Created', m.created_at ? m.created_at.slice(0,10) : '—', m.days_old!=null?m.days_old+' days old':'')}
       ${_adminStat('Features', (m.feature_names||[]).length || m.feature_count || '—')}
       ${_adminStat('Up to date', m.up_to_date ? 'Yes' : 'No', '', m.up_to_date?'#4ade80':'#fbbf24')}
@@ -10226,7 +10422,7 @@ async function loadAdminModels() {
   const r = rl.data || {};
   html += `<div class="text-xs font-semibold text-purple-300 mb-2 mt-5 uppercase tracking-wide">RL Agent</div>`;
   html += `<div class="admin-stat-grid">
-    ${_adminStat('Status', r.status_label || r.status || '—')}
+    ${_adminStat('Status', escHtml(r.status_label || r.status || '—'))}
     ${_adminStat('Checkpoint', r.checkpoint_exists ? 'Present' : 'None')}
     ${_adminStat('Total steps', r.total_steps!=null ? Number(r.total_steps).toLocaleString() : '—')}
     ${_adminStat('Tickers', Array.isArray(r.tickers)? r.tickers.length : (r.tickers ?? '—'))}
@@ -13996,12 +14192,14 @@ async function fiRunTest() {
         fiLog('Positions: 0 rows (may be empty account or scraper issue)', null);
       } else {
         posEl.innerHTML = positions.map(p => {
-          const sym = p.symbol || '';
-          const qty = p.qty || '';
-          const val = p.market_value || '';
-          const gl = p.today_gain_loss || '';
-          const glPct = p.today_gain_pct || '';
-          const glColor = gl.startsWith('-') ? '#f87171' : gl ? '#34d399' : '#94a3b8';
+          // Scraped broker fields — escape before innerHTML (defense-in-depth).
+          const sym = escHtml(p.symbol || '');
+          const qty = escHtml(p.qty || '');
+          const val = escHtml(p.market_value || '');
+          const glRaw = String(p.today_gain_loss || '');
+          const gl = escHtml(glRaw);
+          const glPct = escHtml(p.today_gain_pct || '');
+          const glColor = glRaw.startsWith('-') ? '#f87171' : glRaw ? '#34d399' : '#94a3b8';
           return `<div style="display:flex;gap:12px;color:#cbd5e1"><span style="font-weight:600;min-width:60px">${sym}</span><span style="color:#94a3b8">${qty} sh</span><span>${val}</span><span style="color:${glColor}">${gl}${glPct?' ('+glPct+')':''}</span></div>`;
         }).join('');
         fiLog(`Positions: ${positions.length} rows fetched`, true);
@@ -14231,21 +14429,6 @@ if (typeof _origLoadSettings === 'function') {
     b.addEventListener('pointerdown',function(){ b.style.transform+=' scale(.96)'; });
   });
 
-  // Liquid hover wash — feed pointer coords into ::after radial origin
-  var _hoverTick = false;
-  document.addEventListener('pointermove', function(ev){
-    if(_hoverTick) return;
-    var t = ev.target.closest('.nav-item,.dash-chart-btn,.report-tab,.btn-secondary');
-    if(!t) return;
-    _hoverTick = true;
-    requestAnimationFrame(function(){
-      _hoverTick = false;
-      var r = t.getBoundingClientRect();
-      t.style.setProperty('--mx', (ev.clientX - r.left) + 'px');
-      t.style.setProperty('--my', (ev.clientY - r.top) + 'px');
-    });
-  }, { passive:true });
-
   // Stagger index for dashboard list rows (cap so late rows don't lag)
   function indexRows(){
     document.querySelectorAll('.dash-watch-row,.dash-signal-row').forEach(function(el,i){
@@ -14321,35 +14504,7 @@ if (typeof _origLoadSettings === 'function') {
     setTimeout(function(){ ink.remove(); }, 560);
   }, { passive:true });
 
-  // 3D parallax tilt — cards lean under the cursor, spring back on leave
-  if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) {
-    var TILT = 9; // max deg — pronounced
-    var _tiltTick = false;
-    document.addEventListener('pointermove', function(ev){
-      if(_tiltTick) return;
-      var c = ev.target.closest('.card, .dash-opp-card');
-      if(!c){ return; }
-      _tiltTick = true;
-      requestAnimationFrame(function(){
-        _tiltTick = false;
-        if(!c.classList.contains('tilt-3d')) c.classList.add('tilt-3d');
-        var r = c.getBoundingClientRect();
-        // Only skip charts (canvas clips under 3D) — everything else tilts
-        if(r.width < 70 || r.height < 44 || c.querySelector('canvas')){ c.style.transform=''; return; }
-        var px = (ev.clientX - r.left) / r.width  - .5;
-        var py = (ev.clientY - r.top)  / r.height - .5;
-        c.style.transform = 'perspective(700px) rotateX(' + (-py*TILT).toFixed(2) +
-          'deg) rotateY(' + (px*TILT).toFixed(2) + 'deg) scale(1.012)';
-        c.style.setProperty('--gx', ((px+.5)*100).toFixed(1)+'%');
-        c.style.setProperty('--gy', ((py+.5)*100).toFixed(1)+'%');
-        c.classList.add('tilt-glare');
-      });
-    }, { passive:true });
-    document.addEventListener('pointerout', function(ev){
-      var c = ev.target.closest && ev.target.closest('.card, .dash-opp-card');
-      if(c && !c.contains(ev.relatedTarget)){ c.style.transform = ''; c.classList.remove('tilt-glare'); }
-    }, { passive:true });
-  }
+  // 3D card tilt removed — not appropriate for a data terminal
 
   // A11y shim: associate every label.label with its form control (for/id),
   // covering dynamically-rendered settings/risk inputs that lack linkage.
@@ -14383,8 +14538,21 @@ if (typeof _origLoadSettings === 'function') {
   linkLabels();
   var labelRoot=document.body;
   if(labelRoot){
-    new MutationObserver(function(){ clearTimeout(window.__lblT); window.__lblT=setTimeout(linkLabels,200); })
-      .observe(labelRoot,{childList:true,subtree:true});
+    // Only re-scan when a mutation actually adds a label/form control. High-frequency
+    // feeds (ticker, candidates, trades) add plain divs and must NOT trigger the full
+    // document querySelectorAll + getClientRects scan — that forced layout was the
+    // main-thread long-task that made the ticker stutter.
+    new MutationObserver(function(muts){
+      var relevant = muts.some(function(m){
+        return [].some.call(m.addedNodes||[], function(x){
+          return x.nodeType===1 && x.matches && (
+            x.matches('label.label,input,select,textarea') ||
+            (x.querySelector && x.querySelector('label.label,input,select,textarea')));
+        });
+      });
+      if(!relevant) return;
+      clearTimeout(window.__lblT); window.__lblT=setTimeout(linkLabels,300);
+    }).observe(labelRoot,{childList:true,subtree:true});
   }
 
   // Auto-animate freshly rendered content (innerHTML swaps have no transition otherwise)
@@ -14408,7 +14576,9 @@ if (typeof _origLoadSettings === 'function') {
       pending.clear();
     };
     var SKIP = /ticker|chartjs|tooltip|ripple|nav-progress|enter-(anim|stagger)|tab-panel|a-messages|a-current|datetime|spin|skeleton|blink/i;
-    var SKIP_ID = /ticker|datetime|messages|status|loading|chart|canvas|progress|toast/i;
+    // Include high-frequency polled feeds so their periodic innerHTML swaps don't
+    // trigger reflow + re-stagger every cycle (kept the main thread busy → ticker jank).
+    var SKIP_ID = /ticker|datetime|messages|status|loading|chart|canvas|progress|toast|dlf-|opportun|watch|candidate|positions-tbody|sc-tbody/i;
     var cool = new WeakMap();
     new MutationObserver(function(muts){
       var now = Date.now();

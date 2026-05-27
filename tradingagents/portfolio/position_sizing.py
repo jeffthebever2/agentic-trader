@@ -113,15 +113,44 @@ class PositionSizer:
         adv_cap_pct: float = 0.01,
         kelly_fraction_multiplier: float = 0.5, # 0.5 for Half-Kelly, 0.25 for Quarter-Kelly
         rolling_stats: Dict[str, Any] | None = None,
+        expected_return: float = 0.0,
+        large_loss_probability: float = 0.0,
+        tier_factor: float = 1.0,
     ) -> int:
         """Dynamic position sizer. Layers: Kelly → ML confidence → streak → time-of-day →
-        daily-profit lock-in → drawdown → regime → ATR risk → heat cap → cash floor → liquidity cap."""
+        daily-profit lock-in → drawdown → regime → tier → ATR risk → heat cap → cash floor → liquidity cap.
+
+        Parameters
+        ----------
+        tier_factor : float
+            Multiplier from AlphaEngine tier: A+=1.5, A=1.0, B=0.5.
+            Applied after regime_factor. Hard cap still respected.
+
+        Parameters
+        ----------
+        expected_return : float
+            Model expected return (e.g. 0.032 = 3.2%). Boosts cap_max slightly for
+            high-expected-return candidates (within hard cap).
+        large_loss_probability : float
+            Model large-loss probability [0, 1]. Reduces final size proportionally.
+            A hard cap should be applied upstream (in CandidateRanker / scan_account_once)
+            before reaching here; this is a secondary safety valve only.
+        """
         if price <= 0 or account_value <= 0:
             return 0
 
         cap_max = args.position_cap_pct / 100.0
         cap_min = getattr(args, "position_cap_min_pct", 10.0) / 100.0
         risk_per_trade_pct = getattr(args, "risk_per_trade_pct", 0.0)
+
+        # ── Expected return cap boost ──────────────────────────────────────────────
+        # High expected return → allow up to cap_max; low → lean toward cap_min
+        # Clip to [-0.5, 2.0] to prevent extreme signals from dominating
+        er_clipped = max(-0.5, min(2.0, expected_return))
+        er_alloc_boost = er_clipped / 4.0  # +0% at er=0, +50% at er=2.0 (as fraction of cap range)
+        # Adjust cap_max modestly — never exceed the hard cap_max
+        cap_max_effective = min(cap_max, cap_min + (cap_max - cap_min) * (0.5 + er_alloc_boost))
+        cap_max_effective = max(cap_min, cap_max_effective)  # never go below cap_min
 
         # ── 1. Kelly-fraction base pct ─────────────────────────────────────────────
         if rolling_stats is None:
@@ -137,12 +166,12 @@ class PositionSizer:
 
         if n_trades < 5:
             # Too few trades — start at midpoint, let system learn
-            base_pct = (cap_min + cap_max) / 2.0
+            base_pct = (cap_min + cap_max_effective) / 2.0
         else:
             # Apply fractional Kelly multiplier
             adjusted_kelly = kelly_pct * (kelly_fraction_multiplier / 0.5) if kelly_pct > 0 else 0
-            # Kelly gives optimal bet size; clamp between cap_min and cap_max
-            base_pct = max(cap_min, min(cap_max, adjusted_kelly))
+            # Kelly gives optimal bet size; clamp between cap_min and cap_max_effective
+            base_pct = max(cap_min, min(cap_max_effective, adjusted_kelly))
 
         # ── 2. ML confidence scalar (min→max within Kelly range) ──────────────────
         if ml_probability is not None and ml_probability > 0:
@@ -150,8 +179,8 @@ class PositionSizer:
             high_conf = getattr(args, "position_high_confidence_threshold", 0.80)
             t = (ml_probability - ml_threshold) / max(high_conf - ml_threshold, 0.01)
             t = max(0.0, min(1.0, t))
-            # Scale base_pct up toward cap_max based on ML conviction
-            base_pct = base_pct + t * (cap_max - base_pct) * 0.6
+            # Scale base_pct up toward cap_max_effective based on ML conviction
+            base_pct = base_pct + t * (cap_max_effective - base_pct) * 0.6
         else:
             base_pct = cap_min
 
@@ -201,36 +230,53 @@ class PositionSizer:
 
         # ── 6. Apply regime factor (already includes drawdown from caller) ─────────
         base_pct *= regime_factor
-        base_pct = max(cap_min * 0.5, min(cap_max, base_pct))  # soft clamp
+        base_pct = max(cap_min * 0.5, min(cap_max_effective, base_pct))  # soft clamp
 
-        # ── 7. ATR risk-based sizing: size so max loss = risk_pct of account ───────
+        # ── 6b. Apply tier factor from AlphaEngine (A+=1.5×, A=1.0×, B=0.5×) ────────
+        # Tier factor is applied AFTER regime/streak so we don't amplify already-reduced sizes.
+        # Hard cap (cap_max) is still the ceiling — tier can only push up to it, never above.
+        tier_factor = max(0.0, min(2.0, tier_factor))  # safety clamp
+        if tier_factor > 0:
+            base_pct = min(cap_max, base_pct * tier_factor)
+        else:
+            return 0  # tier C → no trade
+
+        # ── 7. ATR dollar-risk sizing (PRIMARY path when stop/atr available) ────────
         commission = getattr(args, "commission", 0.0)
         settled_cash = getattr(account, "settled_cash", account_value)
-        
+
         if risk_per_trade_pct > 0 and (atr > 0 or stop > 0):
+            # Primary: dollar-risk / stop-distance
             risk_dollars = account_value * (risk_per_trade_pct / 100.0)
+            # Apply tier_factor to risk_dollars so A+ risks more, B risks less
+            risk_dollars = risk_dollars * tier_factor
             stop_dist = (price - stop) if stop > 0 and price > stop else max(atr, price * 0.01)
             atr_shares = int(math.floor(risk_dollars / stop_dist)) if stop_dist > 0 else 0
+
+            # Hard cap by max allocation (uses cap_max, not cap_max_effective, as absolute ceiling)
             cap_shares = int(math.floor(account_value * cap_max / price))
-            shares_from_risk = min(atr_shares, cap_shares)
-            
-            # Blend: 60% ATR-risk, 40% Kelly-pct
-            pct_shares = int(math.floor(account_value * base_pct / price))
-            blended = int(round(shares_from_risk * 0.6 + pct_shares * 0.4))
-            
-            # Use settled_cash as ceiling — never size into unsettled funds
+            final_shares = min(atr_shares, cap_shares)
+
+            # Cash ceiling
             budget = max(0.0, settled_cash - commission)
-            final_shares = max(0, min(blended, int(math.floor(budget / price))))
+            final_shares = max(0, min(final_shares, int(math.floor(budget / price))))
         else:
-            # ── 8. Percentage-of-account sizing ───────────────────────────────────────
+            # ── 8. Percentage-of-account fallback ─────────────────────────────────────
             max_position_value = account_value * base_pct
             # Use settled_cash as ceiling — never size into unsettled funds
             budget = max(0.0, min(settled_cash - commission, max_position_value))
             final_shares = max(0, int(math.floor(budget / price)))
-            
-        # ── 9. ADV Liquidity Cap (New constraint) ───────────────────────────────────
+
+        # ── 9. ADV Liquidity Cap ──────────────────────────────────────────────────
         if adv is not None and adv > 0:
             max_shares_adv = int(math.floor(adv * adv_cap_pct))
             final_shares = min(final_shares, max_shares_adv)
-            
+
+        # ── 10. Large-loss probability safety reduction ───────────────────────────
+        # Hard cap must happen upstream; this is a soft scaling valve only.
+        # Reduces size linearly: ll=0 → 1.0×, ll=0.35 → 0.65×, ll≥0.50 → 0.50×
+        if large_loss_probability > 0:
+            ll_scale = max(0.50, 1.0 - large_loss_probability)
+            final_shares = int(math.floor(final_shares * ll_scale))
+
         return final_shares

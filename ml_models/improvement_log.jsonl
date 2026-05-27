@@ -1,0 +1,41 @@
+{"date": "2026-05-26", "timestamp": "2026-05-26T11:40:35.116136", "action": "check_only", "validation_rc": 0, "needs_retrain": true, "retrain_triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"]}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T13:41:43.860601"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T13:41:43.861333"}
+{"type": "RELIABILITY_UPDATE", "action": "prediction_grading", "n_grades": 0, "strategies": [], "timestamp": "2026-05-26T13:42:00.555830"}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T13:42:00.557002"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T13:42:00.557294"}
+{"type": "RELIABILITY_UPDATE", "action": "prediction_grading", "n_grades": 0, "strategies": [], "timestamp": "2026-05-26T13:42:05.218493"}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T13:42:05.220246"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T13:42:05.221374"}
+{"type": "RELIABILITY_UPDATE", "action": "prediction_grading", "n_grades": 0, "strategies": [], "timestamp": "2026-05-26T13:42:10.162730"}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T13:42:10.163662"}
+{"type": "AI_REVIEW", "tool": "claude", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_claude_review.md", "dry_run": true, "success": true, "timestamp": "2026-05-26T13:42:10.165399"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T13:42:10.165627"}
+{"type": "RELIABILITY_UPDATE", "action": "prediction_grading", "n_grades": 0, "strategies": [], "timestamp": "2026-05-26T13:46:09.601402"}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T13:46:09.603091"}
+{"type": "AI_REVIEW", "tool": "claude", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_claude_review.md", "dry_run": true, "success": true, "timestamp": "2026-05-26T13:46:09.604500"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T13:46:09.604732"}
+{"type": "RELIABILITY_UPDATE", "action": "prediction_grading", "n_grades": 0, "strategies": [], "timestamp": "2026-05-26T13:46:14.754684"}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T13:46:14.755634"}
+{"type": "AI_REVIEW", "tool": "codex", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_codex_review.md", "dry_run": true, "success": true, "timestamp": "2026-05-26T13:46:14.757035"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T13:46:14.757259"}
+{"type": "RELIABILITY_UPDATE", "action": "prediction_grading", "n_grades": 0, "strategies": [], "timestamp": "2026-05-26T13:51:52.093125"}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T13:51:52.094947"}
+{"type": "AI_REVIEW", "stage": 1, "tool": "claude", "role": "patch_writer", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_claude_patch.md", "dry_run": true, "success": true, "timestamp": "2026-05-26T13:51:52.096419"}
+{"type": "AI_REVIEW", "stage": 2, "tool": "codex", "role": "validator", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_codex_validation.md", "dry_run": true, "success": true, "timestamp": "2026-05-26T13:51:52.097056"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T13:51:52.097280"}
+{"type": "RELIABILITY_UPDATE", "action": "prediction_grading", "n_grades": 0, "strategies": [], "timestamp": "2026-05-26T13:52:22.090869"}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T13:52:22.253392"}
+{"type": "AI_REVIEW", "stage": 1, "tool": "claude", "role": "patch_writer", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_claude_patch.md", "dry_run": false, "success": true, "timestamp": "2026-05-26T13:52:54.604949"}
+{"type": "AI_REVIEW", "stage": 2, "tool": "codex", "role": "validator", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_codex_validation.md", "dry_run": false, "success": true, "timestamp": "2026-05-26T13:52:54.904093"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T13:52:54.904579"}
+{"type": "RELIABILITY_UPDATE", "action": "prediction_grading", "n_grades": 0, "strategies": [], "timestamp": "2026-05-26T13:53:53.147940"}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T13:53:53.297912"}
+{"type": "AI_REVIEW", "stage": 1, "tool": "claude", "role": "patch_writer", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_claude_patch.md", "dry_run": false, "success": true, "timestamp": "2026-05-26T13:57:47.237386"}
+{"type": "AI_REVIEW", "stage": 2, "tool": "codex", "role": "validator", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_codex_validation.md", "dry_run": false, "success": true, "timestamp": "2026-05-26T13:57:51.443362"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T13:57:51.444483"}
+{"type": "RELIABILITY_UPDATE", "action": "prediction_grading", "n_grades": 0, "strategies": [], "timestamp": "2026-05-26T14:02:22.812043"}
+{"type": "RETRAIN_TRIGGERED", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "needs_retrain": true, "timestamp": "2026-05-26T14:02:22.993305"}
+{"type": "AI_REVIEW", "stage": 1, "tool": "claude", "role": "patch_writer", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_claude_patch.md", "dry_run": false, "success": true, "timestamp": "2026-05-26T14:06:01.799931"}
+{"type": "AI_REVIEW", "stage": 2, "tool": "codex", "role": "validator", "review_path": "/Users/williamscott/Desktop/TradingAgents-0.2.4/ml_models/ai_reviews/2026-05-26_codex_validation.md", "dry_run": false, "success": true, "timestamp": "2026-05-26T14:08:02.770062"}
+{"type": "RETRAIN_SKIPPED", "action": "check_only", "triggers": ["cannot parse model created_at \u2014 assume stale", "win_roc=0.5479 < 0.56"], "timestamp": "2026-05-26T14:08:02.771142"}

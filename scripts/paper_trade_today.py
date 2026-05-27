@@ -76,6 +76,7 @@ from backtest import (  # noqa: E402
     SECTOR_ETFS,
     _extract_ticker_dfs,
     _ml_design_matrix,
+    build_combined_regime,
     build_sector_breadth,
     build_spy_regime,
     build_vix_regime,
@@ -83,6 +84,10 @@ from backtest import (  # noqa: E402
     load_tickers,
     precompute,
     score_at,
+)
+from tradingagents.screening.market_regime import (
+    MarketRegimeEngine,
+    MarketRegimeState,
 )
 from tradingagents.openrouter_usage import record_openrouter_request  # noqa: E402
 
@@ -379,6 +384,10 @@ class Candidate:
     decision_reason: str = "rule_pass"
     signals: dict[str, Any] = field(default_factory=dict)
     ai_reason: str = ""
+    # Unified alpha engine fields (populated by build_candidates)
+    alpha_score: float | None = None
+    alpha_tier: str = "C"
+    breakout_score: float = 0.0
 
 
 @dataclass
@@ -404,6 +413,11 @@ class Position:
     entry_date: str = ""
     funded_by_unsettled: bool = False
     unsettled_settle_date: str = ""
+    # Regime state at entry time (for SELL event logging / per-regime analysis)
+    regime_at_entry: str = "unknown"
+    regime_score_at_entry: float | None = None
+    crash_risk_at_entry: float | None = None
+    regime_confidence_at_entry: float | None = None
 
     def market_value(self, price: float) -> float:
         return self.shares * price
@@ -665,7 +679,8 @@ class PaperAccount:
                 "description": "Pattern Day Trader flag: 4+ day trades in 5 business days with <$25k account. Requires $25,000 margin minimum.",
             })
 
-    def buy(self, candidate: Candidate, price: float, shares: int, now: dt.datetime) -> None:
+    def buy(self, candidate: Candidate, price: float, shares: int, now: dt.datetime,
+            regime_state=None) -> None:
         cost = price * shares + self.commission
         if shares <= 0:
             raise ValueError("shares must be positive")
@@ -689,6 +704,10 @@ class PaperAccount:
         self.settled_cash = max(0.0, self.settled_cash)
         self.unsettled_cash = max(0.0, self.cash - self.settled_cash)
 
+        _pos_regime = str(getattr(regime_state, "regime", "unknown")) if regime_state else "unknown"
+        _pos_reg_score = float(getattr(regime_state, "regime_score", 0.80)) if regime_state else None
+        _pos_crash = float(getattr(regime_state, "crash_risk_score", 0.0)) if regime_state else None
+        _pos_conf = float(getattr(regime_state, "regime_confidence", 0.5)) if regime_state else None
         self.positions[candidate.ticker] = Position(
             ticker=candidate.ticker,
             shares=shares,
@@ -705,6 +724,10 @@ class PaperAccount:
             entry_date=now.strftime("%Y-%m-%d"),
             funded_by_unsettled=funded_by_unsettled,
             unsettled_settle_date=settle_date,
+            regime_at_entry=_pos_regime,
+            regime_score_at_entry=_pos_reg_score,
+            crash_risk_at_entry=_pos_crash,
+            regime_confidence_at_entry=_pos_conf,
         )
         self.log_event(
             {
@@ -722,6 +745,10 @@ class PaperAccount:
                 "stop": candidate.stop,
                 "target": candidate.target,
                 "ai_reason": candidate.ai_reason or candidate.signals.get("ai_thesis") or candidate.signals.get("ai_reason") or "",
+                "regime": _pos_regime,
+                "regime_score": _pos_reg_score,
+                "crash_risk_score": _pos_crash,
+                "regime_confidence": _pos_conf,
             }
         )
         self.save()
@@ -988,6 +1015,11 @@ class PaperAccount:
             "gfv": gfv_triggered,
             "freeriding": freeriding_triggered,
             "clv": clv_triggered,
+            # Regime context at entry — enables per-regime win-rate analysis
+            "regime_at_entry": position.regime_at_entry,
+            "regime_score_at_entry": position.regime_score_at_entry,
+            "crash_risk_at_entry": position.crash_risk_at_entry,
+            "regime_confidence_at_entry": position.regime_confidence_at_entry,
         }
         self.trades.append(trade)
         self.log_event({
@@ -1012,13 +1044,25 @@ class PaperAccount:
         except Exception:
             pass
 
-        # ML drift tracking
+        # ML drift tracking + PaperFeedbackTracker
         if position.ml_probability is not None:
             won = pnl > 0
             entry = {"ml_prob": round(position.ml_probability, 4), "won": int(won), "t": now.isoformat()}
             self._drift_window.append(entry)
             if len(self._drift_window) > 20:
                 self._drift_window = self._drift_window[-20:]
+            # Persist to PaperFeedbackTracker for aggression scaling
+            try:
+                from tradingagents.portfolio.alpha_engine import PaperFeedbackTracker as _PFT
+                _fb_path = str(self.state_path.parent / "feedback_tracker.json")
+                _pft = _PFT(state_path=_fb_path)
+                _pft.record(ticker, float(position.ml_probability), won, now.isoformat())
+                if _pft.retrain_recommended():
+                    self.log_event({"type": "RETRAIN_RECOMMENDED",
+                                    "reason": "model_drift_sustained",
+                                    "summary": _pft.summary()})
+            except Exception:
+                pass
             try:
                 with self._drift_path.open("a", encoding="utf-8") as _df:
                     _df.write(json.dumps(entry) + "\n")
@@ -1181,10 +1225,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--position-cap-pct", type=float, default=25.0, help="Max account %% per position at high confidence.")
     parser.add_argument("--position-cap-min-pct", type=float, default=10.0, help="Min account %% per position at ML threshold confidence.")
     parser.add_argument("--position-high-confidence-threshold", type=float, default=0.80, help="ML probability at which position reaches full size (position-cap-pct).")
-    parser.add_argument("--risk-per-trade-pct", type=float, default=0.0, help="Risk this %% of account per trade via ATR-based sizing. e.g. 1.0 = risk 1%% of account. 0=disabled, use cap-pct.")
-    parser.add_argument("--min-risk-reward", type=float, default=0.6, help="Skip entry if live R:R (target-price)/(price-stop) falls below this. Default 0.6 (validated config runs target 0.75 / stop 1.0 ATR = 0.75 R:R; a 1.0 floor would block every entry).")
+    parser.add_argument("--risk-per-trade-pct", type=float, default=1.0, help="Risk this %% of account per trade via ATR-based sizing. e.g. 1.0 = risk 1%% of account. 0=disabled, use cap-pct.")
+    parser.add_argument("--min-risk-reward", type=float, default=1.5, help="Skip entry if live R:R (target-price)/(price-stop) falls below this. Default 1.5.")
     parser.add_argument("--bear-regime-size-factor", type=float, default=0.5, help="Multiply position size by this in bear/sell regime (0–1). Default 0.5.")
     parser.add_argument("--neutral-regime-size-factor", type=float, default=0.75, help="Multiply position size by this in neutral regime (0–1). Default 0.75.")
+    # SafeTradeGuard thresholds
+    parser.add_argument("--crisis-vix-threshold", type=float, default=35.0, help="VIX above this → halt all new entries (crisis mode). Default 35.")
+    parser.add_argument("--elevated-vix-threshold", type=float, default=25.0, help="VIX above this (+ bear) → halt; or high-vol mode adjustments. Default 25.")
+    parser.add_argument("--ml-drift-halt-threshold", type=float, default=0.20, help="Model drift |pred_wr - actual_wr| above this → halt new entries. Default 0.20.")
+    parser.add_argument("--rolling-wr-floor", type=float, default=0.30, help="Rolling win rate below this (last 10 trades) → halt new entries. Default 0.30.")
     parser.add_argument("--take-profit-pct", type=float, default=0.0, help="Percentage-based take-profit override (e.g. 2.5 = exit at +2.5%%). 0 = use ATR-based target.")
     parser.add_argument("--stop-loss-pct", type=float, default=0.0, help="Percentage-based stop-loss override (e.g. 1.5 = exit at -1.5%%). 0 = use ATR-based stop.")
     parser.add_argument("--partial-profit-pct", type=float, default=0.5,
@@ -1217,6 +1266,16 @@ def parse_args() -> argparse.Namespace:
         help="Max open positions in same GICS sector. 0=disabled.")
     parser.add_argument("--daily-loss-limit-pct", type=float, default=2.0,
         help="Stop new entries if today realized PnL lost this %% of starting cash. 0=disabled.")
+    parser.add_argument("--max-consecutive-losses", type=int, default=4,
+        help="Halt new entries after this many consecutive losses. Default 4.")
+    parser.add_argument("--max-trades-per-day", type=int, default=8,
+        help="Halt new entries once this many trades are opened today. Default 8.")
+    parser.add_argument("--max-weekly-loss-pct", type=float, default=5.0,
+        help="Halt new entries if week's realized PnL lost this %% of starting cash. Default 5.0.")
+    parser.add_argument("--max-stale-data-hours", type=float, default=6.0,
+        help="Halt if market data is older than this many hours. Default 6.0.")
+    parser.add_argument("--max-model-age-days", type=int, default=45,
+        help="Halt if ML model bundle is older than this many days. Default 45.")
     parser.add_argument("--max-positions", type=int, default=5)
     parser.add_argument("--sms-on-fills", dest="sms_on_fills", action="store_true", default=False,
                         help="Text every paper BUY/SELL fill. Off by default (would flood SMS).")
@@ -1490,6 +1549,19 @@ def predict_ml(row: dict[str, Any], bundle: dict[str, Any],
     if "rsi9_slope3" in frame.columns:
         frame["rsi_recovering"] = (pd.to_numeric(frame["rsi9_slope3"], errors="coerce") > 0).astype(float)
 
+    # ── Derived features added in train_ml_models.py/_ml_prepare_frame ──────
+    # Must mirror exactly what's computed during training to avoid feature mismatch.
+    if "spy_ret5" in frame.columns and "spy_ret20" in frame.columns:
+        s5 = pd.to_numeric(frame["spy_ret5"], errors="coerce")
+        s20 = pd.to_numeric(frame["spy_ret20"], errors="coerce")
+        frame["spy_momentum_accel"] = (s5 / (s20.abs() + 0.001)).clip(-5.0, 5.0)
+    if "target" in frame.columns and "entry" in frame.columns and "stop" in frame.columns:
+        _entry = pd.to_numeric(frame["entry"], errors="coerce")
+        _target = pd.to_numeric(frame["target"], errors="coerce")
+        _stop = pd.to_numeric(frame["stop"], errors="coerce")
+        _stop_dist = (_entry - _stop).clip(lower=0.001)
+        frame["setup_rr"] = ((_target - _entry) / _stop_dist).clip(-1.0, 10.0)
+
     x, _ = _ml_design_matrix(frame, numeric, categorical, feature_names)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
@@ -1508,7 +1580,15 @@ def predict_ml(row: dict[str, Any], bundle: dict[str, Any],
             return float(probs[0, 0])
         return float(probs[0, 1])
 
-    win_prob = class_prob("win_probability")
+    # Ensemble win probability: XGB 60% + RF 40% when both models present
+    win_prob_primary = class_prob("win_probability")
+    win_prob_rf = class_prob("win_probability_rf")
+    if win_prob_primary is not None and win_prob_rf is not None:
+        _weights = bundle.get("ensemble_win_weights", {"xgb": 0.60, "rf": 0.40})
+        win_prob = win_prob_primary * _weights.get("xgb", 0.60) + win_prob_rf * _weights.get("rf", 0.40)
+    else:
+        win_prob = win_prob_primary
+
     loss_prob = class_prob("large_loss_probability")
     target_prob = class_prob("target_before_stop_probability")
     timeout_prob = class_prob("timeout_probability")
@@ -1549,16 +1629,28 @@ def predict_ml(row: dict[str, Any], bundle: dict[str, Any],
 ML_OLD_THRESHOLD = 0.51
 
 
-def regime_ml_threshold(spy_regime: str | None, vix_regime: str | None) -> float:
-    """Regime-aware ML gate for the *latest* model. Its live win-prob maxes
-    ~0.69, so the old 0.72 bar was unreachable. Use 0.63 in bull/calm tape
-    (top ~10%, high precision) and relax to 0.58 in bear/neutral or high-vol so
-    ML still trades when the tape is weaker."""
+def regime_ml_threshold(spy_regime: str | None, vix_regime: str | None,
+                        regime_state: "MarketRegimeState | None" = None,
+                        base_threshold: float = 0.60) -> float:
+    """Regime-aware ML gate threshold.
+
+    When regime_state (from MarketRegimeEngine) is available, returns its
+    pre-computed ml_threshold (base + regime delta). Falls back to the old
+    two-bucket logic when regime_state is None.
+
+    Parameters
+    ----------
+    base_threshold : float
+        Base ML probability gate. Only used in fallback mode (regime_state=None).
+    """
+    if regime_state is not None:
+        return float(regime_state.ml_threshold)
+    # Fallback: legacy two-bucket logic
     spy = (spy_regime or "").lower()
     vix = (vix_regime or "").lower()
     if spy == "bull" and vix in ("low_vol", "normal"):
-        return 0.63
-    return 0.58
+        return min(base_threshold + 0.03, 0.95)
+    return base_threshold
 
 
 def ai_shortlist_sort_key(candidate: Candidate) -> tuple:
@@ -1926,6 +2018,28 @@ def build_candidates(
     }
     sector_breadth = build_sector_breadth(sector_dfs) if sector_dfs else None
 
+    # ── Full probabilistic regime state (MarketRegimeEngine) ─────────────────
+    # Builds on top of already-downloaded SPY/VIX/VIX3M/sector data.
+    # Replaces the crude 3-bucket regime_size_factor and 2-bucket ml_threshold.
+    _mr_engine = MarketRegimeEngine(
+        ml_base_threshold=getattr(args, "ml_probability_threshold", 0.60)
+    )
+    try:
+        _regime_state: MarketRegimeState = _mr_engine.compute_from_dataframes(
+            spy_df=spy_df,
+            vix_df=vix_df,
+            vix3m_df=vix3m_df,
+            sector_dfs={k: v for k, v in sector_dfs.items() if v is not None and len(v) > 20},
+            as_of_date=str(trade_date),
+        )
+    except Exception as _re:
+        import logging
+        logging.getLogger(__name__).warning("MarketRegimeEngine failed (%s), using unknown state", _re)
+        _regime_state = _mr_engine._unknown_state(str(trade_date))
+
+    if dashboard:
+        dashboard.event(f"Market regime: {_regime_state.summary_str()}")
+
     # Volume pre-filter: drop tickers with <500K avg 20-day volume before scoring
     min_vol = getattr(args, "min_avg_volume", MIN_AVG_VOLUME)
     pre_filter_count = len(tickers)
@@ -2052,7 +2166,12 @@ def build_candidates(
             "ml_pass": True,
             "decision_reason": "rule_pass_no_ml",
         }
-        eff_ml_threshold = regime_ml_threshold(regime, vix_reg)
+        # Use full MarketRegimeEngine threshold if available, else fallback
+        eff_ml_threshold = regime_ml_threshold(
+            regime, vix_reg,
+            regime_state=_regime_state if "_regime_state" in dir() else None,
+            base_threshold=getattr(args, "ml_probability_threshold", 0.60),
+        )
         if bundle is not None:
             ml = predict_ml(
                 row, bundle,
@@ -2144,13 +2263,63 @@ def build_candidates(
         copy.copy(c) for c in candidates_by_strategy["algorithm"]
     ]
 
+    # ── Unified AlphaEngine scoring ──────────────────────────────────────────
+    # Compute alpha_score and tier for every candidate across all strategies.
+    # Provides a single ranking key that incorporates all quality signals.
+    try:
+        from tradingagents.portfolio.alpha_engine import AlphaEngine, PaperFeedbackTracker
+        _ae = AlphaEngine()
+        _regime_state_for_ae = raw.get("_market_regime_state") or (
+            _regime_state if "_regime_state" in dir() else None  # type: ignore[possibly-undefined]
+        )
+        # Load paper feedback tracker for aggression scalar
+        _fb_path = str(getattr(args, "output_dir", "") or "")
+        _fb_tracker = PaperFeedbackTracker(
+            state_path=os.path.join(_fb_path, "feedback_tracker.json") if _fb_path else "",
+        )
+        _feedback_mult = _fb_tracker.aggression_mult()
+        # Score all unique candidates (dedup by ticker — same ticker may appear in multiple strategies)
+        _all_unique: dict[str, Any] = {}
+        for _cands in candidates_by_strategy.values():
+            for _c in _cands:
+                if _c.ticker not in _all_unique:
+                    _all_unique[_c.ticker] = _c
+        _alpha_results: dict[str, Any] = {}
+        for _t, _c in _all_unique.items():
+            _ar = _ae.evaluate(
+                candidate=_c,
+                regime_state=_regime_state_for_ae,
+                ticker_reliability=0.5,   # will be recomputed per-account in scan loop
+                feedback_mult=_feedback_mult,
+                breakout_score=getattr(_c, "breakout_score", 0.0),
+            )
+            _alpha_results[_t] = _ar
+            _c.alpha_score = _ar.alpha_score
+            _c.alpha_tier = _ar.tier
+        if dashboard:
+            _tiers = {}
+            for _ar in _alpha_results.values():
+                _tiers[_ar.tier] = _tiers.get(_ar.tier, 0) + 1
+            dashboard.event(
+                "Alpha tiers: " + " | ".join(f"{t}={n}" for t, n in sorted(_tiers.items()))
+                + f" | feedback_mult={_feedback_mult:.2f}"
+            )
+    except Exception as _ae_err:
+        pass  # AlphaEngine failure is non-fatal; fall back to _ml_composite_score
+
     for strategy, candidates in candidates_by_strategy.items():
         if strategy in {"machine_learning", "ml_new", "combined"}:
-            candidates.sort(key=_ml_composite_score, reverse=True)
+            # Prefer alpha_score when available; fallback to _ml_composite_score
+            candidates.sort(
+                key=lambda c: (c.alpha_score if c.alpha_score is not None else _ml_composite_score(c)),
+                reverse=True,
+            )
         else:
             candidates.sort(
                 key=lambda c: (
-                    c.ml_probability if c.ml_probability is not None else 0.0,
+                    c.alpha_score if c.alpha_score is not None else (
+                        c.ml_probability if c.ml_probability is not None else 0.0
+                    ),
                     c.expected_return if c.expected_return is not None else 0.0,
                     c.score,
                 ),
@@ -2184,6 +2353,11 @@ def build_candidates(
             f"{len(candidates_by_strategy['pure_ai']):,} pure AI"
         )
         dashboard.update(candidates_by_strategy=candidates_by_strategy, phase="Candidate lists ready")
+
+    # Stash regime state so the caller can cache it on args
+    if "_regime_state" in dir():
+        raw["_market_regime_state"] = _regime_state  # type: ignore[possibly-undefined]
+
     return candidates_by_strategy, raw
 
 
@@ -2685,6 +2859,88 @@ def _rolling_trade_stats(trades: list[dict], n: int = 20) -> dict:
 # NOTE: position_size(...) has been migrated to tradingagents.portfolio.position_sizing.PositionSizer.calculate_dynamic_size()
 
 
+def check_live_feature_drift(
+    candidates: list,
+    bundle: dict | None,
+    account: Any,
+    warn_threshold: float = 0.20,
+    min_candidates: int = 5,
+) -> dict | None:
+    """Compare live candidate feature distributions vs training reference.
+
+    Builds a DataFrame from current candidates' signal dicts, then computes
+    PSI per feature against the training distribution statistics saved in the
+    model bundle (if available). Logs ML_FEATURE_DRIFT_ALERT events to account
+    if any feature exceeds warn_threshold.
+
+    Returns the PSI summary dict or None if insufficient data.
+    """
+    if bundle is None or not candidates or len(candidates) < min_candidates:
+        return None
+    try:
+        from tradingagents.portfolio.feature_monitor import FeatureMonitor
+        numeric_features = bundle.get("numeric_features", [])
+        if not numeric_features:
+            return None
+
+        # Build candidate feature rows from signal dicts
+        rows = []
+        for c in candidates:
+            row = {}
+            signals = getattr(c, "signals", {}) or {}
+            # Pull numeric features from signals and candidate attrs
+            for feat in numeric_features:
+                val = signals.get(feat)
+                if val is None:
+                    val = getattr(c, feat, None)
+                try:
+                    row[feat] = float(val) if val is not None else float("nan")
+                except (TypeError, ValueError):
+                    row[feat] = float("nan")
+            rows.append(row)
+
+        if not rows:
+            return None
+
+        live_df = pd.DataFrame(rows)
+
+        # We don't have the full training DF here, but we can compare to
+        # reference stats saved in the bundle (mean/std per feature).
+        # If bundle has a 'feature_stats' dict, use it; otherwise skip.
+        ref_stats = bundle.get("feature_stats")
+        if ref_stats is None:
+            return None  # bundle doesn't have reference stats yet
+
+        # Build a synthetic reference sample from stored mean/std
+        import numpy as _np
+        ref_rows = {}
+        n_ref = 500  # synthetic reference size
+        for feat in numeric_features:
+            stats = ref_stats.get(feat, {})
+            mu = stats.get("mean", 0.0)
+            std = stats.get("std", 1.0) or 1.0
+            ref_rows[feat] = _np.random.normal(mu, std, n_ref)
+        ref_df = pd.DataFrame(ref_rows)
+
+        fm = FeatureMonitor(warn_threshold=warn_threshold)
+        psi_report = fm.compute_psi_report(ref_df, live_df, numeric_features)
+        summary = fm.summary(psi_report)
+
+        if summary["n_fail"] > 0 or summary["n_watch"] > 0:
+            bad_feats = [f for f, d in psi_report.items() if d.get("status") in ("fail", "watch")]
+            account.log_event({
+                "type": "ML_FEATURE_DRIFT_ALERT",
+                "n_fail": summary["n_fail"],
+                "n_watch": summary["n_watch"],
+                "worst_features": summary["worst_features"][:5],
+                "flagged": bad_feats[:10],
+            })
+
+        return summary
+    except Exception:
+        return None
+
+
 def compute_market_breadth(raw: dict[str, pd.DataFrame], trade_date: dt.date) -> float:
     """Fraction of universe tickers with last close above 50-day SMA (excluding trade_date)."""
     above = 0
@@ -2957,34 +3213,100 @@ def scan_account_once(
     market_breadth: float | None = None,
     dashboard: TerminalDashboard | None = None,
     spy_regime: str = "unknown",
+    vix_level: float | None = None,
+    output_dir: Path | None = None,
 ) -> dict[str, int]:
     bought = 0
     sold = 0
     skipped = 0
 
-    # ── Regime-aware sizing factor ─────────────────────────────────────────────
-    bear_factor    = getattr(args, "bear_regime_size_factor", 0.5)
-    neutral_factor = getattr(args, "neutral_regime_size_factor", 0.75)
-    _r = spy_regime.lower() if spy_regime else "unknown"
-    if _r in ("bear", "sell", "downtrend"):
-        regime_size_factor = bear_factor
-    elif _r in ("neutral", "sideways", "mixed"):
-        regime_size_factor = neutral_factor
-    else:
-        regime_size_factor = 1.0  # bull / uptrend / unknown → full size
+    # ── Fetch regime state + ML bundle (needed by safety monitor) ────────────
+    _rs: MarketRegimeState | None = getattr(args, "_regime_state_cache", None)
+    _bundle: dict | None = getattr(args, "_bundle_ref", None)
+    _bundle_path: str | None = getattr(args, "ml_model_bundle", None)
 
-    # ── Daily loss limit check ────────────────────────────────────────────────
-    daily_loss_limit = getattr(args, "daily_loss_limit_pct", 0.0)
-    daily_loss_exceeded = False
-    if daily_loss_limit > 0:
-        today_str = now.strftime("%Y-%m-%d")
-        today_pnl = sum(
-            float(t.get("pnl", 0)) for t in account.trades
-            if str(t.get("exit_time", ""))[:10] == today_str
+    # ── ProductionSafetyMonitor: consolidated pre-scan safety check ───────────
+    from tradingagents.portfolio.production_safety import ProductionSafetyMonitor
+    _safety_config_path = (output_dir.parent / "safety_config.json") if output_dir else None
+    _safety_monitor = ProductionSafetyMonitor(
+        config_path=str(_safety_config_path) if _safety_config_path else None,
+        output_dir=str(output_dir) if output_dir else None,
+    )
+    _safety_report = _safety_monitor.check_all(
+        account=account,
+        prices=prices,
+        bundle=_bundle,
+        bundle_path=_bundle_path,
+        vix_level=vix_level,
+        spy_regime=spy_regime,
+        regime_state=_rs,
+        output_dir=str(output_dir) if output_dir else None,
+        now=now,
+    )
+
+    if not _safety_report.safe_to_trade:
+        for _reason in _safety_report.halt_reasons:
+            account.log_event({
+                "type": "SAFETY_HALT",
+                "reason": _reason,
+                "timestamp": now.isoformat(),
+                "spy_regime": spy_regime,
+                "vix_level": vix_level,
+            })
+            if dashboard:
+                dashboard.event(f"SAFETY_HALT: {_reason[:80]}")
+        # Still run exit logic (sell open positions) but block all new entries
+        _skip_all_entries = True
+    else:
+        _skip_all_entries = False
+        for _w in _safety_report.warn_reasons:
+            account.log_event({"type": "SAFETY_WARN", "msg": _w, "timestamp": now.isoformat()})
+            if dashboard:
+                dashboard.event(f"SAFETY_WARN: {_w[:60]}")
+
+    # ── SafeTradeGuard (kept for high_vol_adjustments sizing only) ────────────
+    from tradingagents.portfolio.safe_trade_guard import SafeTradeGuard
+    _guard = SafeTradeGuard(
+        crisis_vix=getattr(args, "crisis_vix_threshold", 35.0),
+        elevated_vix=getattr(args, "elevated_vix_threshold", 25.0),
+        max_dd_pct=-(getattr(args, "max_portfolio_drawdown", 12.0) / 100.0),
+        drift_threshold=getattr(args, "ml_drift_halt_threshold", 0.20),
+        wr_floor=getattr(args, "rolling_wr_floor", 0.30),
+    )
+
+    # ── High-volatility mode: tighten gates + reduce size ────────────────────
+    _hv_prob_boost = 0.0
+    _hv_size_factor = 1.0
+    _hv_max_hold = None
+    if vix_level is not None and not _skip_all_entries:
+        _hv_min_prob, _hv_sf, _hv_max_hold = _guard.high_vol_adjustments(
+            vix_level=vix_level,
+            min_prob_threshold=getattr(args, "ml_probability_threshold", 0.58),
+            combined_size_factor=1.0,
         )
-        if today_pnl < -(account.starting_cash * daily_loss_limit / 100.0):
-            daily_loss_exceeded = True
-            account.log_event({"type": "DAILY_LOSS_LIMIT_HIT", "today_pnl": round(today_pnl, 2)})
+        _hv_prob_boost = max(0.0, _hv_min_prob - getattr(args, "ml_probability_threshold", 0.58))
+        _hv_size_factor = _hv_sf
+        if _hv_prob_boost > 0 and dashboard:
+            dashboard.event(f"HIGH_VOL_MODE: VIX={vix_level:.1f} → +{_hv_prob_boost:.0%} prob gate, {_hv_sf:.0%} size")
+
+    # ── Regime-aware sizing factor (MarketRegimeEngine preferred) ────────────
+    # _rs already fetched above; no_trade handled by ProductionSafetyMonitor.
+    # Here we only read the size_factor for position sizing.
+    if _rs is not None and hasattr(_rs, "size_factor"):
+        regime_size_factor = float(_rs.size_factor)
+    else:
+        # Legacy 3-bucket fallback
+        bear_factor    = getattr(args, "bear_regime_size_factor", 0.5)
+        neutral_factor = getattr(args, "neutral_regime_size_factor", 0.75)
+        _r = spy_regime.lower() if spy_regime else "unknown"
+        if _r in ("bear", "sell", "downtrend", "high_vol_bear", "crash_risk"):
+            regime_size_factor = bear_factor
+        elif _r in ("neutral", "sideways", "mixed", "high_vol_bull"):
+            regime_size_factor = neutral_factor
+        else:
+            regime_size_factor = 1.0  # bull / uptrend / unknown → full size
+
+    regime_size_factor *= _hv_size_factor  # apply high-vol reduction (belt-and-suspenders)
 
     partial_profit_pct = getattr(args, "partial_profit_pct", 0.5)
     partial_profit_fraction = getattr(args, "partial_profit_fraction", 0.5)
@@ -3230,9 +3552,8 @@ def scan_account_once(
     if now < market_open + dt.timedelta(minutes=15) or now > market_close - dt.timedelta(minutes=15):
         return {"bought": bought, "sold": sold, "skipped": skipped}
 
-    # Daily loss limit gate
-    if daily_loss_exceeded:
-        return {"bought": bought, "sold": sold, "skipped": skipped}
+    # (daily_loss_limit, weekly_loss_limit, consecutive_losses, max_trades_per_day
+    #  are all handled by ProductionSafetyMonitor above — _skip_all_entries already set)
 
     # Sector concentration: build current exposure map
     sector_max = getattr(args, "sector_max_positions", 3)
@@ -3251,12 +3572,32 @@ def scan_account_once(
     # Combined sizing factor: drawdown × regime
     combined_size_factor = dd_size_factor * regime_size_factor
 
-    min_rr = getattr(args, "min_risk_reward", 1.0)
+    min_rr = getattr(args, "min_risk_reward", 1.5)
 
-    # Re-rank candidates by composite ML score
-    ranked_candidates = sorted(candidates, key=_ml_composite_score, reverse=True)
+    # ── Re-rank candidates by composite ML score (CandidateRanker) ───────────
+    from tradingagents.portfolio.candidate_ranker import CandidateRanker
+    # High-vol mode: raise minimum win probability gate
+    _effective_min_prob = getattr(args, "ml_probability_threshold", 0.50) + _hv_prob_boost
+    _ranker = CandidateRanker(
+        ll_hard_cap=getattr(args, "ml_large_loss_max", 0.35),
+        min_win_prob=_effective_min_prob,
+    )
+    _ranked_objs = _ranker.rank(candidates, spy_regime=spy_regime, trades=account.trades)
+    # Build allocation weights for audit log
+    _alloc_weights = _ranker.allocation_weights(_ranked_objs)
+    # Flatten back to Candidate objects (rejected go last, ignored for new entries)
+    ranked_candidates = [r.candidate for r in _ranked_objs]
+    # Keep ranked objects by ticker for audit log
+    _ranked_by_ticker = {
+        getattr(r.candidate, "ticker", "?"): r for r in _ranked_objs
+    }
 
     for candidate in ranked_candidates:
+        # SafeTradeGuard halted new entries — skip all non-exit candidates
+        if _skip_all_entries and candidate.ticker not in account.positions:
+            skipped += 1
+            continue
+
         if candidate.ticker in account.positions:
             position = account.positions[candidate.ticker]
             price = prices.get(candidate.ticker)
@@ -3307,7 +3648,12 @@ def scan_account_once(
                             "price": round(price, 4),
                         })
             continue
-        if len(account.positions) >= args.max_positions:
+        # Regime max_open_trades enforcement (MarketRegimeState overrides static limit)
+        _regime_max = None
+        if _rs is not None and hasattr(_rs, "max_open_trades"):
+            _regime_max = int(_rs.max_open_trades)
+        _eff_max = min(args.max_positions, _regime_max) if _regime_max is not None else args.max_positions
+        if len(account.positions) >= _eff_max:
             break
         price = prices.get(candidate.ticker)
         if price is None:
@@ -3417,6 +3763,18 @@ def scan_account_once(
                 })
                 continue
 
+        # ── CandidateRanker hard rejection gate ───────────────────────────────
+        _ranked_obj = _ranked_by_ticker.get(candidate.ticker)
+        if _ranked_obj is not None and _ranked_obj.rejected:
+            skipped += 1
+            account.log_event({
+                "type": "SKIP",
+                "ticker": candidate.ticker,
+                "reason": _ranked_obj.rejection_reason,
+                "composite_score": 0.0,
+            })
+            continue
+
         account_value = account.total_value(prices)
 
         # ── Total heat cap: never deploy more than 80% of account ─────────────
@@ -3442,6 +3800,64 @@ def scan_account_once(
         if hasattr(candidate, "raw_data") and candidate.raw_data is not None and "Volume" in candidate.raw_data.columns and len(candidate.raw_data) >= 20:
             adv = float(candidate.raw_data["Volume"].iloc[-20:].mean())
 
+        _cand_ll   = candidate.large_loss_probability if candidate.large_loss_probability is not None else 0.0
+        _cand_er   = candidate.expected_return if candidate.expected_return is not None else 0.0
+        _cand_stop = candidate.stop if hasattr(candidate, "stop") else 0.0
+
+        # Tier factor from AlphaEngine: A+=1.5, A=1.0, B=0.5, C→skip (already filtered above)
+        from tradingagents.portfolio.alpha_engine import TIER_SIZE_MULT
+        _tier = getattr(candidate, "alpha_tier", "A")  # default A if not yet scored
+        _tier_factor = TIER_SIZE_MULT.get(_tier, 1.0)
+        # If tier B, enforce half-size; tier C already rejected above via CandidateRanker
+        if _tier == "C":
+            skipped += 1
+            account.log_event({
+                "type": "CANDIDATE_EVALUATED",
+                "ticker": candidate.ticker,
+                "scan_date": now.strftime("%Y-%m-%d"),
+                "timestamp": now.isoformat(),
+                "alpha_score": candidate.alpha_score,
+                "alpha_tier": _tier,
+                "size_mult": 0.0,
+                "rejected": True,
+                "rejection_reason": "alpha_tier=C",
+                "ml_probability": candidate.ml_probability,
+                "expected_return": _cand_er,
+                "large_loss_probability": _cand_ll,
+                "breakout_score": candidate.breakout_score,
+                "spy_regime": spy_regime,
+            })
+            continue
+
+        # ── CANDIDATE_EVALUATED audit event (selected candidates) ─────────────────
+        account.log_event({
+            "type": "CANDIDATE_EVALUATED",
+            "ticker": candidate.ticker,
+            "scan_date": now.strftime("%Y-%m-%d"),
+            "timestamp": now.isoformat(),
+            "alpha_score": round(candidate.alpha_score, 5) if candidate.alpha_score is not None else None,
+            "alpha_tier": _tier,
+            "size_mult": round(_tier_factor, 4),
+            "rejected": False,
+            "rejection_reason": "",
+            "ml_probability": candidate.ml_probability,
+            "expected_return": _cand_er,
+            "large_loss_probability": _cand_ll,
+            "target_before_stop_probability": candidate.target_before_stop_probability,
+            "timeout_probability": candidate.timeout_probability,
+            "breakout_score": candidate.breakout_score,
+            "atr": round(candidate.atr, 4),
+            "atr_pct": round(candidate.atr / price, 4) if price > 0 else 0,
+            "spy_regime": spy_regime,
+            "regime_score": float(getattr(_rs, "regime_score", 0.80)) if _rs else None,
+            "crash_risk_score": float(getattr(_rs, "crash_risk_score", 0.0)) if _rs else None,
+            "regime_confidence": float(getattr(_rs, "regime_confidence", 0.5)) if _rs else None,
+            "stop": round(_cand_stop, 4),
+            "target": round(candidate.target, 4) if hasattr(candidate, "target") else None,
+            "entry": round(candidate.entry, 4),
+            "price": round(price, 4),
+        })
+
         shares = PositionSizer().calculate_dynamic_size(
             account=account,
             price=price,
@@ -3449,12 +3865,65 @@ def scan_account_once(
             args=args,
             ml_probability=candidate.ml_probability,
             atr=candidate.atr,
-            stop=candidate.stop if hasattr(candidate, "stop") else 0.0,
+            stop=_cand_stop,
             regime_factor=combined_size_factor,
             now=now,
             adv=adv,
             rolling_stats=rolling_stats,
+            expected_return=_cand_er,
+            large_loss_probability=_cand_ll,
+            tier_factor=_tier_factor,
         )
+
+        # ── SIZING_DECISION audit log ─────────────────────────────────────────
+        _composite_score = _ranked_obj.composite_score if _ranked_obj is not None else 0.0
+        _risk_pct = getattr(args, "risk_per_trade_pct", 1.0)
+        _risk_dollars = account_value * _risk_pct / 100.0
+        _stop_dist = (price - _cand_stop) if _cand_stop > 0 and price > _cand_stop else max(candidate.atr, price * 0.01)
+        _live_rr = 0.0
+        if buy_candidate.stop > 0 and buy_candidate.target > 0:
+            _lr = price - buy_candidate.stop
+            _lw = buy_candidate.target - price
+            _live_rr = round(_lw / _lr, 3) if _lr > 0 else 0.0
+        account.log_event({
+            "type": "SIZING_DECISION",
+            "ticker": candidate.ticker,
+            "decision": "BUY" if shares > 0 else "SKIP",
+            "scan_date": now.strftime("%Y-%m-%d"),
+            "timestamp": now.isoformat(),
+            "inputs": {
+                "price": round(price, 4),
+                "stop": round(buy_candidate.stop, 4) if buy_candidate.stop else None,
+                "target": round(buy_candidate.target, 4) if buy_candidate.target else None,
+                "atr": round(candidate.atr, 4),
+                "atr_pct": round(candidate.atr / price, 4) if price > 0 else 0,
+                "ml_probability": candidate.ml_probability,
+                "large_loss_probability": _cand_ll,
+                "expected_return": _cand_er,
+                "target_before_stop_probability": candidate.target_before_stop_probability,
+                "composite_score": round(_composite_score, 5),
+                "alpha_score": round(candidate.alpha_score, 5) if candidate.alpha_score is not None else None,
+                "alpha_tier": candidate.alpha_tier,
+                "breakout_score": round(candidate.breakout_score, 2),
+                "spy_regime": spy_regime,
+                "account_value": round(account_value, 2),
+                "settled_cash": round(account.settled_cash, 2),
+                "account_drawdown": round(account_drawdown, 4),
+            },
+            "sizing": {
+                "risk_pct": _risk_pct,
+                "risk_dollars": round(_risk_dollars, 2),
+                "stop_distance": round(_stop_dist, 4),
+                "regime_factor": round(combined_size_factor, 4),
+                "tier_factor": round(_tier_factor, 4),
+                "final_shares": shares,
+                "final_notional": round(shares * price, 2) if shares > 0 else 0,
+                "final_pct_of_account": round(shares * price / max(account_value, 1.0), 4) if shares > 0 else 0,
+                "reward_risk_ratio": _live_rr,
+            },
+            "rejection_reason": None,
+        })
+
         if shares <= 0:
             skipped += 1
             continue
@@ -3468,7 +3937,7 @@ def scan_account_once(
             continue
 
         try:
-            account.buy(buy_candidate, price, shares, now)
+            account.buy(buy_candidate, price, shares, now, regime_state=_rs)
             # Stamp sector and peak_price on new position
             if candidate.ticker in account.positions:
                 account.positions[candidate.ticker].sector = ticker_sector
@@ -3480,7 +3949,7 @@ def scan_account_once(
             if dashboard:
                 dashboard.event(
                     f"{strategy_label(strategy)} bought {shares} {candidate.ticker} @ {price:.2f} "
-                    f"sector={ticker_sector} regime={spy_regime} score={_ml_composite_score(candidate):.3f}"
+                    f"sector={ticker_sector} regime={spy_regime} score={_composite_score:.3f}"
                 )
             bought += 1
         except ValueError as exc:
@@ -3604,6 +4073,40 @@ def scan_accounts_once(
         if dashboard:
             dashboard.event(f"Market breadth: {market_breadth:.1%} above 50d SMA")
 
+    # Fetch current VIX level for SafeTradeGuard + high-vol mode
+    _current_vix: float | None = None
+    try:
+        import yfinance as _yf
+        _vix_raw = _yf.download("^VIX", period="5d", progress=False, auto_adjust=True)
+        if _vix_raw is not None and not _vix_raw.empty and "Close" in _vix_raw.columns:
+            _vix_series = _vix_raw["Close"].dropna()
+            if not _vix_series.empty:
+                _current_vix = float(_vix_series.iloc[-1])
+                if dashboard:
+                    dashboard.event(f"VIX level: {_current_vix:.1f}")
+    except Exception:
+        pass
+
+    # ── Live feature drift check (once per scan cycle) ────────────────────────
+    # Compares current candidates' feature distribution vs training reference.
+    # Requires bundle to have 'feature_stats' (added in train_ml_models.py Phase 2).
+    _all_candidates = [c for cands in candidates_by_strategy.values() for c in cands]
+    if _all_candidates:
+        _primary_account = next(iter(accounts.values()), None)
+        _bundle_ref = getattr(args, "_bundle_ref", None)
+        if _bundle_ref is None:
+            try:
+                import joblib as _jl
+                _bp = getattr(args, "model_bundle", "ml_models/latest/model_bundle.joblib")
+                _bundle_ref = _jl.load(_bp)
+                args._bundle_ref = _bundle_ref  # cache on args to avoid reloading
+            except Exception:
+                _bundle_ref = None
+        if _primary_account is not None:
+            check_live_feature_drift(
+                _all_candidates, _bundle_ref, _primary_account, min_candidates=5
+            )
+
     # Fetch VWAP for all candidate tickers
     candidate_tickers = list({
         c.ticker
@@ -3646,6 +4149,7 @@ def scan_accounts_once(
 
     summaries: dict[str, Any] = {}
     for strategy, account in accounts.items():
+        _strat_output_dir = output_dir.parent / strategy / output_dir.name
         cycle = scan_account_once(
             account,
             strategy,
@@ -3658,6 +4162,8 @@ def scan_accounts_once(
             market_breadth=market_breadth,
             dashboard=dashboard,
             spy_regime=current_spy_regime,
+            vix_level=_current_vix,
+            output_dir=_strat_output_dir,
         )
         summaries[strategy] = write_summary(
             account,
@@ -3982,6 +4488,35 @@ def run() -> None:
         sms_on_fills=getattr(args, "sms_on_fills", False),
     )
 
+    # ── Ensure safety_config.json exists; apply CLI arg overrides ────────────
+    from tradingagents.portfolio.production_safety import ensure_safety_config, DEFAULT_SAFETY_CONFIG
+    import json as _json
+    _cli_safety_overrides = {
+        "max_daily_loss_pct":    getattr(args, "daily_loss_limit_pct",    DEFAULT_SAFETY_CONFIG["max_daily_loss_pct"]),
+        "max_weekly_loss_pct":   getattr(args, "max_weekly_loss_pct",     DEFAULT_SAFETY_CONFIG["max_weekly_loss_pct"]),
+        "max_consecutive_losses": getattr(args, "max_consecutive_losses", DEFAULT_SAFETY_CONFIG["max_consecutive_losses"]),
+        "max_trades_per_day":    getattr(args, "max_trades_per_day",      DEFAULT_SAFETY_CONFIG["max_trades_per_day"]),
+        "max_model_age_days":    getattr(args, "max_model_age_days",      DEFAULT_SAFETY_CONFIG["max_model_age_days"]),
+        "max_stale_data_hours":  getattr(args, "max_stale_data_hours",    DEFAULT_SAFETY_CONFIG["max_stale_data_hours"]),
+        "crisis_vix":            getattr(args, "crisis_vix_threshold",    DEFAULT_SAFETY_CONFIG["crisis_vix"]),
+        "elevated_vix":          getattr(args, "elevated_vix_threshold",  DEFAULT_SAFETY_CONFIG["elevated_vix"]),
+        "max_portfolio_drawdown": -(getattr(args, "max_portfolio_drawdown", 0.12)),
+        "ml_drift_halt_threshold": getattr(args, "ml_drift_halt_threshold", DEFAULT_SAFETY_CONFIG["ml_drift_halt_threshold"]),
+        "rolling_wr_floor":      getattr(args, "rolling_wr_floor",        DEFAULT_SAFETY_CONFIG["rolling_wr_floor"]),
+    }
+    for _strat in STRATEGY_LABELS:
+        _cfg_path = ensure_safety_config(output_dir.parent / _strat)
+        try:
+            with open(_cfg_path) as _f:
+                _existing_cfg = _json.load(_f)
+            # Preserve kill_switch state; override thresholds from CLI
+            for _k, _v in _cli_safety_overrides.items():
+                _existing_cfg[_k] = _v
+            with open(_cfg_path, "w") as _f:
+                _json.dump(_existing_cfg, _f, indent=2)
+        except Exception:
+            pass
+
     dashboard = TerminalDashboard(enabled=not args.no_dashboard)
     candidates_by_strategy: dict[str, list[Candidate]] = {
         strategy: [] for strategy in STRATEGY_LABELS
@@ -4023,6 +4558,22 @@ def run() -> None:
         _today_ts = pd.Timestamp(trade_date)
         current_spy_regime = regime_value(_spy_regime_series, _today_ts) if _spy_regime_series is not None else "unknown"
         dashboard.event(f"SPY regime: {current_spy_regime}")
+
+        # Cache the MarketRegimeState from build_candidates() onto args
+        # so the sizing block in process_candidates() can read it.
+        # build_candidates() writes _regime_state as a local — retrieve from
+        # the raw_daily sentinel we stash there as a side-channel.
+        if "_market_regime_state" in raw_daily:
+            args._regime_state_cache = raw_daily["_market_regime_state"]
+        else:
+            # Fall back to building a state from regime string only
+            try:
+                _fb_engine = MarketRegimeEngine(
+                    ml_base_threshold=getattr(args, "ml_probability_threshold", 0.60)
+                )
+                args._regime_state_cache = _fb_engine._unknown_state(str(trade_date))
+            except Exception:
+                args._regime_state_cache = None
 
         # Generate AI reasons for all unique candidates
         if not getattr(args, "no_ai", False):

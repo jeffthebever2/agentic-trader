@@ -671,6 +671,29 @@ class FidelityTradeRequest(BaseModel):
 @router.post("/fidelity/trade")
 async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(require_step_up)):
     from fastapi import HTTPException
+    from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
+    # ── Compliance hard block ──────────────────────────────────────────────────
+    # Two independent gates must both pass before any real order is placed:
+    #   1. LIVE_TRADING_HARD_BLOCKED (source-code constant) — absolute kill switch
+    #   2. LIVE_TRADING_ENABLED (.env toggle, default off) — operational switch
+    if LIVE_TRADING_HARD_BLOCKED:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Live trading is hard-blocked in compliance.py. "
+                "Set LIVE_TRADING_HARD_BLOCKED = False in source to enable, "
+                "then also set LIVE_TRADING_ENABLED=true in .env."
+            ),
+        )
+    decision = validate_live_order(body.model_dump())
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.reason)
+    if not live_trading_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail="Live trading is disabled. Set LIVE_TRADING_ENABLED=true in .env to enable.",
+        )
+    # ── End compliance check ───────────────────────────────────────────────────
     ctx = await _ensure_browser(admin["email"])
     page = await ctx.new_page()
     try:

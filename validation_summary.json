@@ -1,0 +1,35 @@
+{
+  "generated_at": "2026-05-26T14:02:22.975895",
+  "train": {
+    "created_at": "unknown",
+    "hold": 3,
+    "train_rows": 471160,
+    "test_rows": 28840,
+    "calibrated": false,
+    "feature_count": 64,
+    "win_roc": 0.5479,
+    "win_precision": 0.4513,
+    "win_recall": 0.6002,
+    "brier_before": null,
+    "brier_after": null,
+    "gate_win_rate": null,
+    "gate_expectancy": null,
+    "gate_n": null,
+    "wf_win_rate": null,
+    "wf_roc_auc": null,
+    "wf_expectancy": null,
+    "wf_n": null,
+    "wf_evaluation": "unknown",
+    "recommended_threshold": null
+  },
+  "holdout": null,
+  "paper": null,
+  "flags": {
+    "holdout_vs_wf_wr": "\u2013",
+    "paper_vs_holdout_wr": "\u2013"
+  },
+  "warnings": [
+    "Win ROC=0.5479 < 0.56 \u2014 model near random; retrain needed"
+  ],
+  "pass_": false
+}

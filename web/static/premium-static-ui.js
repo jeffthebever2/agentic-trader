@@ -1,43 +1,12 @@
 /* ============================================
-   TradingAgents Premium Static UI Initializer
+   TradingAgents UI Initializer
    Plain JS only. No React, no build step.
    ============================================ */
 
 (function () {
-  const prefersReducedMotion = window.matchMedia &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
   function ready(fn) {
     if (document.readyState !== "loading") fn();
     else document.addEventListener("DOMContentLoaded", fn);
-  }
-
-  function createSpotlight() {
-    if (prefersReducedMotion || window.innerWidth < 760) return;
-
-    let spotlight = document.querySelector(".ta-spotlight");
-    if (!spotlight) {
-      spotlight = document.createElement("div");
-      spotlight.className = "ta-spotlight";
-      spotlight.setAttribute("aria-hidden", "true");
-      document.body.prepend(spotlight);
-    }
-
-    let x = window.innerWidth / 2;
-    let y = window.innerHeight / 2;
-    let raf = null;
-
-    function update() {
-      document.documentElement.style.setProperty("--ta-mouse-x", `${x}px`);
-      document.documentElement.style.setProperty("--ta-mouse-y", `${y}px`);
-      raf = null;
-    }
-
-    window.addEventListener("mousemove", (event) => {
-      x = event.clientX;
-      y = event.clientY;
-      if (!raf) raf = requestAnimationFrame(update);
-    }, { passive: true });
   }
 
   function initIcons() {
@@ -57,17 +26,17 @@
       types: [
         {
           type: "success",
-          background: "linear-gradient(135deg, #16a34a, #22c55e)",
+          background: "#047857",
           icon: false
         },
         {
           type: "error",
-          background: "linear-gradient(135deg, #dc2626, #ef4444)",
+          background: "#b91c1c",
           icon: false
         },
         {
           type: "info",
-          background: "linear-gradient(135deg, #0284c7, #38bdf8)",
+          background: "#1d4ed8",
           icon: false
         }
       ]
@@ -87,56 +56,10 @@
       theme: "light-border",
       animation: "shift-away-subtle",
       delay: [120, 40],
-      duration: [160, 120],
+      duration: [140, 100],
       maxWidth: 280,
       touch: ["hold", 500]
     });
-  }
-
-  function initLenis() {
-    if (prefersReducedMotion || !window.Lenis) return;
-
-    // Dashboards often have nested scroll areas. Keep Lenis conservative.
-    try {
-      const lenis = new Lenis({
-        autoRaf: true,
-        smoothWheel: true,
-        syncTouch: false,
-        lerp: 0.12
-      });
-      window.TALenis = lenis;
-    } catch (error) {
-      console.warn("[TradingAgents UI] Lenis failed to initialize:", error);
-    }
-  }
-
-  function initGSAP() {
-    if (prefersReducedMotion || !window.gsap) return;
-
-    try {
-      if (window.ScrollTrigger) {
-        window.gsap.registerPlugin(window.ScrollTrigger);
-      }
-
-      window.gsap.from(".ta-card, .card, [data-animate='card']", {
-        opacity: 0,
-        y: 14,
-        duration: 0.42,
-        stagger: 0.045,
-        ease: "power2.out",
-        clearProps: "transform"
-      });
-
-      window.gsap.from("[data-animate='fade-up']", {
-        opacity: 0,
-        y: 18,
-        duration: 0.46,
-        stagger: 0.05,
-        ease: "power2.out"
-      });
-    } catch (error) {
-      console.warn("[TradingAgents UI] GSAP animation failed:", error);
-    }
   }
 
   function initChartPlugins() {
@@ -153,14 +76,14 @@
         window.Chart.register(...plugins);
       }
 
-      // Global Chart.js visual polish. Existing chart options can override this.
+      // Chart defaults — structural only, never semantic dataset colors
       window.Chart.defaults.color = getComputedStyle(document.documentElement)
-        .getPropertyValue("--ta-muted")
-        .trim() || "#94a3b8";
+        .getPropertyValue("--ink-faint")
+        .trim() || "#736C61";
 
-      window.Chart.defaults.borderColor = "rgba(148, 163, 184, 0.13)";
+      window.Chart.defaults.borderColor = "rgba(113, 108, 97, 0.13)";
       window.Chart.defaults.font.family =
-        'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+        '"Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
 
       if (window.Chart.defaults.plugins && window.Chart.defaults.plugins.legend) {
         window.Chart.defaults.plugins.legend.labels.usePointStyle = true;
@@ -177,10 +100,10 @@
 
     window.TAConfirm = function TAConfirm(options) {
       return window.Swal.fire({
-        background: "rgba(2, 6, 23, 0.96)",
-        color: "#e5edf8",
-        confirmButtonColor: "#0284c7",
-        cancelButtonColor: "#334155",
+        background: "var(--surface, #FCFBFA)",
+        color: "var(--ink, #1A1714)",
+        confirmButtonColor: "var(--accent, #D63A00)",
+        cancelButtonColor: "var(--surface-raised, #EBE9E4)",
         showCancelButton: true,
         reverseButtons: true,
         ...options
@@ -189,7 +112,7 @@
   }
 
   function initAxeDevHelper() {
-    // Only runs if you manually load axe.min.js and set ?axe=1
+    // Only runs if axe.min.js is loaded and ?axe=1 is in the URL
     if (!window.axe || !window.location.search.includes("axe=1")) return;
 
     window.axe.run().then((results) => {
@@ -206,16 +129,13 @@
   }
 
   ready(() => {
-    createSpotlight();
     initIcons();
     initToasts();
     initTooltips();
-    initLenis();
-    initGSAP();
     initChartPlugins();
     initSweetAlertDefaults();
     initAxeDevHelper();
 
-    document.documentElement.classList.add("ta-premium-ui-ready");
+    document.documentElement.classList.add("ta-ui-ready");
   });
 })();

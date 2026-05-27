@@ -93,6 +93,9 @@ def _filter_stock_tickers(tickers: list, include_non_common: bool = False) -> tu
 
 
 def _read_nasdaqtrader_symbols(url: str) -> pd.DataFrame:
+    # Only allow http(s) — block file:/ftp:/custom schemes (SSRF / local-file read).
+    if not str(url).lower().startswith(("https://", "http://")):
+        raise ValueError(f"Refusing non-http(s) URL: {url!r}")
     with urllib.request.urlopen(url, timeout=30, context=_verified_ssl_context()) as resp:
         text = resp.read().decode("utf-8", errors="replace")
     lines = [

@@ -317,13 +317,15 @@ class TD3Agent:
 
     def load(self, path: str | Path) -> None:
         path = Path(path)
-        self.actor.load_state_dict(torch.load(path / "actor.pt", map_location=self.device))
-        self.critic.load_state_dict(torch.load(path / "critic.pt", map_location=self.device))
+        # weights_only=True prevents arbitrary code execution from a malicious
+        # checkpoint (torch.load unpickles by default). These are pure state_dicts.
+        self.actor.load_state_dict(torch.load(path / "actor.pt", map_location=self.device, weights_only=True))
+        self.critic.load_state_dict(torch.load(path / "critic.pt", map_location=self.device, weights_only=True))
         self.actor_target.load_state_dict(
-            torch.load(path / "actor_target.pt", map_location=self.device)
+            torch.load(path / "actor_target.pt", map_location=self.device, weights_only=True)
         )
         self.critic_target.load_state_dict(
-            torch.load(path / "critic_target.pt", map_location=self.device)
+            torch.load(path / "critic_target.pt", map_location=self.device, weights_only=True)
         )
         meta = np.load(str(path / "meta.npy"))
         self.total_steps = int(meta[0])

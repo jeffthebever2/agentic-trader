@@ -192,7 +192,7 @@ def _build_cache_key(method: str, args: tuple, kwargs: dict, vendor_config: str 
         "args": args,
         "kwargs": kwargs,
     }
-    return hashlib.md5(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+    return hashlib.md5(json.dumps(payload, sort_keys=True, default=str).encode(), usedforsecurity=False).hexdigest()
 
 
 def route_to_vendor(method: str, *args, **kwargs):

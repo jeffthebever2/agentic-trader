@@ -1,0 +1,86 @@
+{
+  "generated_at": "2026-05-26T13:55:57.994800+00:00",
+  "target": ".",
+  "mode": "repo",
+  "strictness": 3,
+  "ai_design_risk": 86.0,
+  "human_design_score": 14.0,
+  "verdict": "OBVIOUSLY AI / TEMPLATE-CODED",
+  "category_scores": {
+    "palette": 28,
+    "surface": 28,
+    "composition": 30,
+    "component_cliches": 30,
+    "motion": 26,
+    "copy": 24,
+    "iconography": 16,
+    "typography": 18,
+    "state_depth": 0.0,
+    "a11y": 0.0,
+    "design_system": 0.0,
+    "domain_fit": 20,
+    "repo_hygiene": 0.0
+  },
+  "category_caps": {
+    "palette": 28,
+    "surface": 28,
+    "composition": 30,
+    "component_cliches": 30,
+    "motion": 26,
+    "copy": 24,
+    "iconography": 16,
+    "typography": 18,
+    "state_depth": 22,
+    "a11y": 22,
+    "design_system": 24,
+    "domain_fit": 20,
+    "repo_hygiene": 14
+  },
+  "stats": {
+    "target": ".",
+    "mode": "repo",
+    "strictness": 3,
+    "scanned_files": 65,
+    "scanned_bytes": 10151155,
+    "extensions": {
+      ".json": 31,
+      ".yml": 3,
+      ".css": 3,
+      ".html": 1,
+      ".js": 8,
+      ".mjs": 19
+    },
+    "skipped": {
+      "non_frontend_ext": 367,
+      "too_large": 2
+    },
+    "domain_noun_hits": 44,
+    "has_motion": true,
+    "has_reduced_motion": true,
+    "has_focus_system": true,
+    "has_state_depth": true,
+    "has_semantic_tokens": true,
+    "combo_findings": [
+      {
+        "combo": "hero_gradient_badge_cta",
+        "hits": 2,
+        "points": 15.0
+      },
+      {
+        "combo": "blob_glass_card_stack",
+        "hits": 2,
+        "points": 15.0
+      },
+      {
+        "combo": "three_feature_lucide_grid",
+        "hits": 2,
+        "points": 15.0
+      },
+      {
+        "combo": "shadcn_default_dark_saas",
+        "hits": 3,
+        "points": 22.5
+      }
+    ]
+  }
+}

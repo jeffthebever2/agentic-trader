@@ -309,13 +309,16 @@ class AlgoBacktestRequest(BaseModel):
     max_price: Optional[float] = None
     no_cache: bool = False
     account_size: float = 10000.0
-    hold_periods: List[int] = [1, 2, 3]
+    hold_periods: List[int] = [3, 5, 10]
     primary_hold: int = 3
     no_ml: bool = False
     no_charts: bool = True
     ml_probability_threshold: float = 0.50
     ml_large_loss_max: float = 0.35
     ml_expected_return_min: float = -0.01
+    # Realistic cost model defaults (non-zero prevents fake edge in backtest)
+    account_commission: float = 1.0  # $1 flat per entry and exit
+    account_slippage_bps: float = 5.0  # 5 bps per side (10 bps round-trip)
 
 
 @router.websocket("/ws/algo-backtest")
@@ -374,6 +377,8 @@ async def ws_algo_backtest(websocket: WebSocket):
             cmd += ["--ml-probability-threshold", str(req.ml_probability_threshold)]
             cmd += ["--ml-large-loss-max", str(req.ml_large_loss_max)]
             cmd += ["--ml-expected-return-min", str(req.ml_expected_return_min)]
+            cmd += ["--account-commission", str(req.account_commission)]
+            cmd += ["--account-slippage-bps", str(req.account_slippage_bps)]
             if req.no_cache:
                 cmd.append("--no-cache")
             if req.no_ml:

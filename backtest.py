@@ -395,6 +395,7 @@ def precompute(df: pd.DataFrame) -> dict:
         "range20h": h.rolling(20).max(),
         "range20l": l.rolling(20).min(),
         "high10":   h.rolling(10).max(),
+        "high50":   h.rolling(50).max(),   # 50-day high for breakout_v2
         "high52w":  h.rolling(252).max(),
         "low52w":   l.rolling(252).min(),
         "atr14":    (h - l).rolling(14).mean(),    # simplified ATR proxy
@@ -427,6 +428,12 @@ def precompute(df: pd.DataFrame) -> dict:
         # ── Donchian channels (20-day) ────────────────────────────────────
         "donch_upper20": h.rolling(20).max(),
         "donch_lower20": l.rolling(20).min(),
+
+        # ── Bollinger Band width (for breakout compression features) ─────
+        "bb_upper": bb_upper,
+        "bb_lower": bb_lower,
+        "bb_mid":   bb_mid,
+        "bb_width": (bb_upper - bb_lower) / bb_mid.replace(0, np.nan),
 
         # ── Keltner channels ──────────────────────────────────────────────
         "kelt_upper": kelt_upper,
@@ -657,10 +664,39 @@ def score_at(pc: dict, df: pd.DataFrame, pos: int,
         sig["spy_ret5"] = round(spy_ret5, 4) if spy_ret5 is not None else None
         sig["spy_ret20"] = round(spy_ret20, 4) if spy_ret20 is not None else None
         sig["rel_ret20_vs_spy"] = round(sig["ret_20d"] - spy_ret20, 4) if spy_ret20 is not None else None
+        # ── Per-stock regime: stock's relative trend vs SPY ──────────────────
+        # "outperforming"  : stock 20d return > SPY 20d return + 3%  (leading)
+        # "neutral"        : within ±3% of SPY                        (tracking)
+        # "underperforming": stock 20d return < SPY 20d return - 3%  (lagging)
+        # Pullback-in-uptrend buys from "neutral"/"outperforming" have better edge.
+        # Buying laggards = trying to catch falling knives.
+        if spy_ret20 is not None and sig.get("ret_20d") is not None:
+            _rel = sig["ret_20d"] - spy_ret20
+            sig["stock_regime"] = (
+                "outperforming" if _rel > 0.03
+                else ("underperforming" if _rel < -0.03 else "neutral")
+            )
+        else:
+            sig["stock_regime"] = "unknown"
         sig["vix_1d_chg"] = round(vix_1d_chg, 4) if vix_1d_chg is not None else None
         sig["cci14_prev"] = round(cci_prev, 2) if cci_prev is not None else None
         sig["macd_hist_prev1"] = round(macd_prev1, 4) if macd_prev1 is not None else None
         sig["macd_hist_prev2"] = round(macd_prev2, 4) if macd_prev2 is not None else None
+        # ── Additional features (were in ML_NUMERIC_FEATURES but missing from sig dict) ──
+        slope20_cp = g("slope_sma20")
+        slope50_cp = g("slope_sma50")
+        sig["slope_sma20"] = round(slope20_cp, 4) if slope20_cp is not None else None
+        sig["slope_sma50"] = round(slope50_cp, 4) if slope50_cp is not None else None
+        sig["obv_above_sma"] = int(obv_val > obv_sma_val) if (obv_val is not None and obv_sma_val is not None) else None
+        sig["pvt_above_sma"] = int(pvt_val > pvt_sma_val) if (pvt_val is not None and pvt_sma_val is not None) else None
+        dmi_p_cp = g("dmi_plus")
+        dmi_m_cp = g("dmi_minus")
+        sig["dmi_bull"] = int(dmi_p_cp > dmi_m_cp) if (dmi_p_cp is not None and dmi_m_cp is not None) else None
+        # ATR expansion: ratio of today's ATR vs rolling 20d average ATR
+        # Values > 1.0 = volatility expansion (breakout-like); < 1.0 = compression
+        atr14_today = float(pc["atr14_true"].iloc[pos]) if pd.notna(pc["atr14_true"].iloc[pos]) else None
+        atr14_roll20 = float(pc["atr14_true"].iloc[max(0, pos-20):pos].mean()) if pos >= 5 else None
+        sig["atr_expansion"] = round(atr14_today / atr14_roll20, 3) if (atr14_today and atr14_roll20 and atr14_roll20 > 0) else None
         signal_high = float(pc["high"].iloc[pos])
         signal_low = float(pc["low"].iloc[pos])
         trigger = signal_high + 0.05 * atr
@@ -747,6 +783,224 @@ def score_at(pc: dict, df: pd.DataFrame, pos: int,
         sig["stop"] = round(price - stop_mult * atr, 2)
         sig["risk_reward"] = round(target_mult / stop_mult, 2)
         return round(min(score, 100.0), 1), sig
+
+    # ── breakout_v2: VCP / range-breakout scoring (full feature set) ──────────
+    if score_mode == "breakout_v2":
+        # Hard liquidity / quality gates
+        dollar_vol20_bv2 = price * v20 if v20 > 0 else 0.0
+        atr_pct_bv2 = atr / price if price > 0 else 1.0
+        if price < 5.0 or price > 600.0:
+            return 0.0, {}
+        if dollar_vol20_bv2 < 5_000_000:
+            return 0.0, {}
+        if atr_pct_bv2 > 0.08:
+            return 0.0, {}
+
+        # ── Resistance proximity ──────────────────────────────────────────
+        h20  = g("range20h")  # 20-day high (pre-shifted in precompute — no leakage)
+        h50  = g("high50")
+        h52w = g("high52w")
+        pct_from_20d_high = (price - h20) / h20 if h20 and h20 > 0 else None
+        if pct_from_20d_high is not None:
+            sig["pct_from_20d_high"] = round(pct_from_20d_high, 4)
+        if h50 and h50 > 0:
+            sig["pct_from_50d_high"] = round((price - h50) / h50, 4)
+        if h52w and h52w > 0:
+            sig["pct_from_52w_high"] = round((price - h52w) / h52w, 4)
+
+        # ── Range contraction (VCP) ───────────────────────────────────────
+        r5h = g("range5h"); r5l = g("range5l")
+        r20h = g("range20h"); r20l = g("range20l")
+        range_contraction = None
+        if r5h and r5l and r20h and r20l:
+            r5 = r5h - r5l; r20 = r20h - r20l
+            if r20 > 0:
+                range_contraction = r5 / r20
+                sig["range_contraction_5_20"] = round(range_contraction, 3)
+
+        # ── ATR compression = 5d ATR / 20d ATR (< 0.8 = compressed) ─────
+        if pos >= 20:
+            atr5_val  = float(pc["atr14_true"].iloc[max(0, pos-4):pos+1].mean()) if pd.notna(pc["atr14_true"].iloc[pos]) else None
+            atr20_val = float(pc["atr14_true"].iloc[max(0, pos-19):pos+1].mean())
+            if atr5_val and atr20_val and atr20_val > 0:
+                atr_compr = atr5_val / atr20_val
+                sig["atr_compression"] = round(atr_compr, 3)
+
+        # ── ATR expansion (today vs rolling 20d) ─────────────────────────
+        if pos >= 20:
+            atr20_mean = float(pc["atr14_true"].iloc[max(0, pos-20):pos].mean())
+            if atr and atr20_mean and atr20_mean > 0:
+                sig["atr_expansion"] = round(atr / atr20_mean, 3)
+
+        # ── Bollinger Band width ──────────────────────────────────────────
+        bb_w = g("bb_width")
+        if bb_w is not None:
+            sig["bb_width"] = round(bb_w, 4)
+
+        # ── Keltner squeeze ───────────────────────────────────────────────
+        sig["keltner_squeeze"] = int(squeeze_val) if squeeze_val is not None else 0
+
+        # ── Volume features ───────────────────────────────────────────────
+        vol_surge_1d = sig.get("vol_ratio_20d") or 1.0
+        v3p = g("vol3p")
+        if v3p and v20 > 0:
+            sig["vol_surge_3d"] = round(v3p / v20, 3)
+        v5_prior = g("vol5")  # prior 5d avg volume (shifted so no today)
+        vol_dryup_5d = None
+        if v5_prior and v20 > 0:
+            vol_dryup_5d = v5_prior / v20
+            sig["vol_dryup_5d"] = round(vol_dryup_5d, 3)
+
+        # ── OBV slope (5d change normalized) ─────────────────────────────
+        if pos >= 5 and pd.notna(pc["obv"].iloc[pos]) and pd.notna(pc["obv"].iloc[pos-5]):
+            obv_now_v  = float(pc["obv"].iloc[pos])
+            obv_5d_ago = float(pc["obv"].iloc[pos-5])
+            norm = price * v20 * 5 if (v20 > 0) else 1.0
+            sig["obv_slope_5d"] = round((obv_now_v - obv_5d_ago) / norm, 6) if norm > 0 else None
+
+        # ── Trend alignment ───────────────────────────────────────────────
+        sig["above_sma20"]  = int(bool(sma20  and price > sma20))
+        sig["above_sma50"]  = int(bool(sma50  and price > sma50))
+        sig["above_sma200"] = int(bool(sma200 and price > sma200))
+        sma_alignment = 1 if (sma20 and sma50 and sma200 and sma20 > sma50 > sma200) else 0
+        sig["sma_alignment"] = sma_alignment
+
+        ema9_val = g("ema9")
+        if ema9_val and atr > 0:
+            sig["price_vs_ema9"] = round((price - ema9_val) / atr, 3)
+
+        # ── Relative strength vs SPY ──────────────────────────────────────
+        rel_str_5d = None; rel_str_20d = None
+        if sig.get("ret_5d") is not None and spy_ret5 is not None:
+            rel_str_5d = sig["ret_5d"] - spy_ret5
+            sig["rel_strength_5d"] = round(rel_str_5d, 4)
+        if sig.get("ret_20d") is not None and spy_ret20 is not None:
+            rel_str_20d = sig["ret_20d"] - spy_ret20
+            sig["rel_strength_20d"] = round(rel_str_20d, 4)
+        if rel_str_5d is not None and rel_str_20d is not None:
+            sig["rs_momentum"] = int(rel_str_5d > rel_str_20d)
+
+        # ── Failed breakout detection ─────────────────────────────────────
+        # consec_failed_highs: days in last 5 where new 5d high but closed lower
+        cfh = 0
+        if pos >= 5:
+            for k in range(pos - 4, pos + 1):
+                ph = float(pc["high"].iloc[k]) if pd.notna(pc["high"].iloc[k]) else 0.0
+                pk_h5 = float(pc["high"].iloc[max(0, k-5):k].max()) if k > 0 else 0.0
+                pk_c  = float(pc["close"].iloc[k]) if pd.notna(pc["close"].iloc[k]) else 0.0
+                pk_o  = float(pc["open"].iloc[k])  if pd.notna(pc["open"].iloc[k])  else pk_c
+                if ph > 0 and pk_h5 > 0 and ph >= pk_h5 * 0.999 and pk_c < pk_o:
+                    cfh += 1
+        sig["consec_failed_highs"] = cfh
+
+        # prev_breakout_failed: prior vol surge + near high that gave back gains
+        prev_fail = 0
+        if pos >= 10:
+            for k in range(pos - 9, pos - 4):
+                v20k = float(pc["vol20"].iloc[k]) if pd.notna(pc["vol20"].iloc[k]) else 0.0
+                vk   = float(pc["volume"].iloc[k]) if pd.notna(pc["volume"].iloc[k]) else 0.0
+                hk   = float(pc["high"].iloc[k])   if pd.notna(pc["high"].iloc[k])   else 0.0
+                h20k = float(pc["range20h"].iloc[k]) if pd.notna(pc["range20h"].iloc[k]) else 0.0
+                ck   = float(pc["close"].iloc[k])  if pd.notna(pc["close"].iloc[k])  else 0.0
+                if v20k > 0 and vk / v20k >= 1.5 and h20k > 0 and hk >= h20k * 0.99:
+                    for j in range(k + 1, min(k + 6, pos + 1)):
+                        cj = float(pc["close"].iloc[j]) if pd.notna(pc["close"].iloc[j]) else 0.0
+                        if cj < ck:
+                            prev_fail = 1
+                            break
+                if prev_fail:
+                    break
+        sig["prev_breakout_failed"] = prev_fail
+
+        # ── Additional fields for ML compat ──────────────────────────────
+        sig["vix_ts"]         = round(vix_ts, 3) if vix_ts is not None else None
+        sig["sector_breadth"] = round(sector_breadth, 3) if sector_breadth is not None else None
+        sig["spy_ret5"]       = round(spy_ret5, 4) if spy_ret5 is not None else None
+        sig["spy_ret20"]      = round(spy_ret20, 4) if spy_ret20 is not None else None
+        sig["dollar_vol20"]   = round(dollar_vol20_bv2, 0)
+        sig["atr_pct"]        = round(atr_pct_bv2, 4)
+
+        # ── Scoring: 4 components × 25 pts ───────────────────────────────
+        # Compression (25 pts): is stock coiling?
+        compression_pts = 0.0
+        if range_contraction is not None:
+            if   range_contraction <= 0.30: compression_pts += 12
+            elif range_contraction <= 0.45: compression_pts += 8
+            elif range_contraction <= 0.60: compression_pts += 4
+        if squeeze_val and squeeze_val > 0.5:
+            compression_pts += 5
+        if vol_dryup_5d is not None:
+            if   vol_dryup_5d <= 0.65: compression_pts += 8
+            elif vol_dryup_5d <= 0.80: compression_pts += 5
+
+        # Rejection day hard gate: large upper wick kills compression credit
+        uw_val = sig.get("upper_wick") or 0.0
+        if uw_val > 0.60:
+            compression_pts = 0.0
+
+        compression_pts = min(compression_pts, 25.0)
+
+        # Confirmation (25 pts): is today the breakout day?
+        confirmation_pts = 0.0
+        if pct_from_20d_high is not None:
+            if   pct_from_20d_high >= -0.005: confirmation_pts += 15
+            elif pct_from_20d_high >= -0.020: confirmation_pts += 10
+            elif pct_from_20d_high >= -0.040: confirmation_pts += 5
+        rsi14_bv2 = sig.get("rsi14") or 50.0
+        if   50 <= rsi14_bv2 <= 65: confirmation_pts += 10
+        elif 65 < rsi14_bv2 <= 75:  confirmation_pts += 5
+        if uw_val < 0.30:
+            confirmation_pts += 3  # clean day, no major rejection
+        confirmation_pts = min(confirmation_pts, 25.0)
+
+        # Trend (25 pts): trend favorable?
+        trend_bv2 = 0.0
+        if sig.get("above_sma20"):  trend_bv2 += 8
+        if sig.get("above_sma50"):  trend_bv2 += 9
+        if sig.get("above_sma200"): trend_bv2 += 8
+        trend_bv2 = min(trend_bv2, 25.0)
+
+        # Volume (25 pts): volume confirming?
+        volume_pts = 0.0
+        if   vol_surge_1d >= 2.0: volume_pts = 25.0
+        elif vol_surge_1d >= 1.5: volume_pts = 17.0
+        elif vol_surge_1d >= 1.2: volume_pts = 10.0
+        elif vol_surge_1d >= 1.0: volume_pts = 5.0
+
+        breakout_score = compression_pts + confirmation_pts + trend_bv2 + volume_pts
+
+        # Classify breakout type
+        bv2_type = "consolidation_setup"
+        if prev_fail and uw_val > 0.40 and (sig.get("close_loc") or 0.5) < 0.40:
+            bv2_type = "failed_breakout_risk"
+        elif (sig.get("gap_pct") or 0.0) > 0.01 and sig.get("above_sma20") and sig.get("above_sma50") and vol_surge_1d >= 1.5:
+            bv2_type = "gap_continuation"
+        elif pct_from_20d_high is not None and pct_from_20d_high >= -0.01 and vol_surge_1d >= 1.5 and uw_val < 0.35:
+            bv2_type = "range_breakout"
+        elif vol_surge_1d >= 2.0 and sig.get("above_sma50"):
+            bv2_type = "volume_breakout"
+        elif sma_alignment and pct_from_20d_high is not None and pct_from_20d_high >= -0.05:
+            bv2_type = "trend_continuation"
+        sig["breakout_type"] = bv2_type
+
+        # Store score components (aliased for ML compat)
+        sig["coil_pts"]        = round(compression_pts, 1)
+        sig["brk_pts"]         = round(confirmation_pts, 1)
+        sig["trend_pts"]       = round(trend_bv2, 1)
+        sig["vol_pts"]         = round(volume_pts, 1)
+        sig["compression_pts"] = round(compression_pts, 1)
+        sig["confirmation_pts"] = round(confirmation_pts, 1)
+        sig["breakout_score"]  = round(breakout_score, 1)
+        sig["regime_adj"]      = 0.0
+        sig["confirmed_pullback_gates"] = "pass"  # ML frame compat
+
+        # Price targets (breakout uses 3× ATR target, 1.5× ATR stop)
+        sig["entry"]       = round(price, 2)
+        sig["target"]      = round(price + 3.0 * atr, 2)
+        sig["stop"]        = round(price - 1.5 * atr, 2)
+        sig["risk_reward"] = 2.0
+
+        return round(min(breakout_score, 100.0), 1), sig
 
     # ── 1. Consolidation / coiling (25 pts) ───────────────────────────────
     # Require BOTH range contraction AND volume dry-up for full points.
@@ -1196,8 +1450,83 @@ def measure_outcome(df: pd.DataFrame, signal_pos: int, entry: float,
 # ── SPY / VIX helpers ─────────────────────────────────────────────────────────
 
 def build_spy_regime(spy_df: pd.DataFrame) -> pd.Series:
+    """Classify each day into 5 SPY regime levels.
+
+    Levels:
+      bull     — price > SMA200 + SMA50 > SMA200 (strong uptrend)
+      uptrend  — price > SMA200 but SMA50 <= SMA200 (recovering/early bull)
+      sideways — price within ±2% of SMA200 (chop/consolidation)
+      downtrend— price < SMA200 but > SMA200 * 0.95 (early bear)
+      bear     — price < SMA200 * 0.95 (deep bear)
+
+    Old callers using "bull" / "bear" boolean still work since:
+      bull/uptrend → treated as bull in regime_size_factor logic
+      bear/downtrend → treated as bear
+    """
+    close  = spy_df["Close"]
+    sma50  = close.rolling(50).mean()
+    sma200 = close.rolling(200).mean()
+
+    regime = pd.Series("unknown", index=spy_df.index)
+    # Need at least 200 rows of SMA200; early rows stay "unknown"
+    valid = sma200.notna()
+    # sideways first (widest band — overridden by stronger signals)
+    regime[valid & (close >= sma200 * 0.98) & (close <= sma200 * 1.02)] = "sideways"
+    # downtrend: below SMA200 but not deeply
+    regime[valid & (close < sma200 * 0.98) & (close >= sma200 * 0.95)] = "downtrend"
+    # bear: price deeply below SMA200
+    regime[valid & (close < sma200 * 0.95)] = "bear"
+    # uptrend: above SMA200 but SMA50 not yet above SMA200
+    regime[valid & (close > sma200 * 1.02) & sma50.notna() & (sma50 <= sma200)] = "uptrend"
+    # bull: above SMA200, SMA50 above SMA200 (confirmed uptrend)
+    regime[valid & (close > sma200 * 1.02) & sma50.notna() & (sma50 > sma200)] = "bull"
+
+    return regime
+
+
+def build_combined_regime(spy_df: pd.DataFrame, vix_df: pd.DataFrame) -> pd.Series:
+    """Merge SPY regime with VIX for composite regime label.
+
+    Additional levels beyond build_spy_regime:
+      crash_risk      — bear + VIX > 35 (avoid all new longs)
+      high_vol_bear   — bear + VIX > 25 (minimal exposure)
+      high_vol_bull   — bull + VIX > 25 (reduce size, no new setups without strong signal)
+      crash_rebound   — price recovering from crash_risk (VIX falling from >35, price >SMA200*0.95)
+    """
+    spy_reg = build_spy_regime(spy_df)
+    vix_close = vix_df["Close"].reindex(spy_df.index, method="ffill")
+
+    combined = spy_reg.copy()
+    is_bear = spy_reg.isin(["bear", "downtrend"])
+    is_bull = spy_reg.isin(["bull", "uptrend"])
+
+    # Crash risk: bear + VIX crisis
+    mask_crash = is_bear & (vix_close > 35)
+    combined[mask_crash] = "crash_risk"
+
+    # Crash rebound: VIX was in crisis (>35) within last 10 trading days
+    # AND now falling + price recovering above SMA200 * 0.95
+    # This is a distinct regime where mean-reversion bounces have strong historical edge
+    vix_rolling_max10 = vix_close.rolling(10).max()
     sma200 = spy_df["Close"].rolling(200).mean()
-    return (spy_df["Close"] > sma200).map({True: "bull", False: "bear"})
+    close = spy_df["Close"]
+    mask_rebound = (
+        (vix_rolling_max10 > 35)          # was in crisis recently
+        & (vix_close <= 35)               # VIX now cooling
+        & (vix_close < vix_rolling_max10 * 0.85)  # VIX fallen at least 15% from recent peak
+        & (close >= sma200 * 0.93)        # not yet in deep bear (partial recovery)
+    )
+    combined[mask_rebound] = "crash_rebound"
+
+    # High vol bear (non-crash)
+    mask_hvbear = is_bear & (vix_close > 25) & (vix_close <= 35)
+    combined[mask_hvbear] = "high_vol_bear"
+
+    # High vol bull
+    mask_hvbull = is_bull & (vix_close > 25)
+    combined[mask_hvbull] = "high_vol_bull"
+
+    return combined
 
 
 def build_vix_regime(vix_df: pd.DataFrame) -> pd.Series:
@@ -1620,11 +1949,61 @@ ML_NUMERIC_FEATURES = [
     "above_sma200",      # price > SMA200: long-term trend intact
     "rsi_recovering",    # rsi9_slope3 > 0: RSI already turning up (not still falling)
     "vol_dryup",         # vol_ratio_10d < 1.0: volume contracting = selling exhaustion
+    # Volatility and momentum regime features (added to fix missing-from-sig-dict bug)
+    "atr_expansion",     # today's ATR / rolling-20d ATR: >1 = expanding vol (breakout), <1 = compression
+    "spy_momentum_accel", # SPY 5d return / SPY 20d return: >1 = market accelerating, <1 = decelerating
+    "setup_rr",          # (target - entry) / (entry - stop): quality of risk/reward geometry
+    # ── Market regime features (from MarketRegimeEngine) ─────────────────────
+    # Included in sig dict by _add_regime_features_to_sig() called in _collect_trades
+    "spy_ret60",         # SPY 60-day return: medium-term trend strength
+    "spy_drawdown_20d",  # SPY distance below its 20-day high (0 = at high, negative = below)
+    "spy_above_sma50",   # SPY price > SMA50 (binary)
+    "spy_above_sma200",  # SPY price > SMA200 (binary)
+    "spy_golden_cross",  # SPY SMA50 > SMA200 (binary, golden cross)
+    "vix_20d_zscore",    # (VIX - 20d mean) / 20d std: >1.5 = vol expanding, < -1 = compressed
+    "vol_expansion",     # 1 if vix_20d_zscore > 1.5 (unusual vol spike)
+    "regime_score",      # MarketRegimeEngine.regime_score [0,1] continuous quality signal
+    "crash_risk_score",  # MarketRegimeEngine.crash_risk_score [0,1] tail-risk proxy
+    "risk_on_score",     # breadth × above_sma200 × (1 - vol_expansion)
+    "risk_off_score",    # (1 - breadth) × vol_expansion × 0.5
 ]
 
 ML_CATEGORICAL_FEATURES = [
     "day_of_week", "spy_regime", "vix_regime", "confirmed_pullback_gates",
     "candidate_status",
+    "stock_regime",    # per-stock relative-to-market regime (new feature)
+]
+
+# ── Breakout-specific ML feature set ─────────────────────────────────────────
+# Used when score_mode="breakout_v2". Superset of confirmed_pullback features
+# plus breakout-specific features.
+ML_NUMERIC_FEATURES_BREAKOUT = [
+    # Core breakout scoring components
+    "breakout_score", "compression_pts", "confirmation_pts",
+    # Resistance proximity
+    "pct_from_20d_high", "pct_from_50d_high", "pct_from_52w_high",
+    # Volatility compression → expansion
+    "bb_width", "atr_compression", "atr_expansion",
+    "range_contraction_5_20", "keltner_squeeze",
+    # Volume confirmation
+    "vol_surge_3d", "vol_dryup_5d", "obv_slope_5d",
+    # Trend alignment
+    "above_sma20", "above_sma50", "above_sma200", "sma_alignment", "price_vs_ema9",
+    # Relative strength
+    "rel_strength_20d", "rel_strength_5d", "rs_momentum",
+    # Failed breakout warning
+    "upper_wick", "close_loc", "consec_failed_highs", "prev_breakout_failed",
+    # All existing features that apply to breakouts too
+    "score", "coil_pts", "brk_pts", "trend_pts", "vol_pts",
+    "rsi9", "rsi14", "macd_hist", "macd_bull", "atr", "atr_pct",
+    "vol_ratio_20d", "vol_ratio_10d", "dollar_vol20",
+    "body_pct", "day_range_pct", "gap_pct",
+    "pct_from_52w_low", "ret_1d", "ret_3d", "ret_5d", "ret_10d", "ret_20d",
+    "rel_ret20_vs_spy", "spy_ret5", "spy_ret20", "vix_ts", "sector_breadth",
+    "adx14", "roc10", "roc20", "bb_pct", "squeeze",
+    "rsi9_slope3", "macd_hist_slope3",
+    "slope_sma20", "slope_sma50",
+    "atr_expansion", "spy_momentum_accel", "setup_rr",
 ]
 
 
@@ -1649,6 +2028,25 @@ def _ml_prepare_frame(rows_df: pd.DataFrame, hold: int) -> tuple:
     outcomes = df[out_col].fillna("").astype(str) if out_col in df.columns else pd.Series("", index=df.index)
     df["_target_label"] = (outcomes == "TARGET_HIT").astype(int)
     df["_timeout_label"] = (outcomes == "TIMED_OUT").astype(int)
+
+    # ── Breakout-specific labels (used when score_mode=breakout_v2) ───────────
+    # Breakout win: h5_return > 1% AND not stopped out
+    h5_ret_col = "h5_return"
+    h5_out_col = "h5_outcome"
+    if h5_ret_col in df.columns:
+        h5_ret = pd.to_numeric(df[h5_ret_col], errors="coerce")
+        h5_out = df[h5_out_col].fillna("").astype(str) if h5_out_col in df.columns else pd.Series("", index=df.index)
+        df["_breakout_win_label"] = ((h5_ret > 0.01) & (h5_out != "STOP_HIT")).astype(int)
+        # Failed breakout: gave back gains within h3 (closed below entry after being up)
+        h3_ret_col = "h3_return"
+        if h3_ret_col in df.columns:
+            h3_ret = pd.to_numeric(df[h3_ret_col], errors="coerce")
+            df["_failed_breakout_label"] = (h3_ret < 0.0).astype(int)
+    # Big move: h10_return > 3%
+    h10_ret_col = "h10_return"
+    if h10_ret_col in df.columns:
+        h10_ret = pd.to_numeric(df[h10_ret_col], errors="coerce")
+        df["_big_move_label"] = (h10_ret > 0.03).astype(int)
     mae_col = f"h{hold}_mae"
     mfe_col = f"h{hold}_mfe"
     df["_mfe"] = pd.to_numeric(df[mfe_col], errors="coerce") if mfe_col in df.columns else np.nan
@@ -1676,6 +2074,23 @@ def _ml_prepare_frame(rows_df: pd.DataFrame, hold: int) -> tuple:
     if "vol_ratio_10d" in df.columns:
         df["vol_dryup"] = (pd.to_numeric(df["vol_ratio_10d"], errors="coerce") < 1.0).astype(float)
 
+    # SPY momentum acceleration: short vs long momentum ratio
+    # > 1 = market accelerating (early bull phase); < 1 = decelerating (late bull, topping)
+    # Computed here from existing columns to avoid adding to signal dict at scan time
+    if "spy_ret5" in df.columns and "spy_ret20" in df.columns:
+        s5 = pd.to_numeric(df["spy_ret5"], errors="coerce")
+        s20 = pd.to_numeric(df["spy_ret20"], errors="coerce")
+        df["spy_momentum_accel"] = (s5 / (s20.abs() + 0.001)).clip(-5.0, 5.0)
+
+    # Setup R:R geometry quality from signal-level target/stop geometry
+    # High R:R setups should predict better outcomes IF the model picks entries correctly
+    if "target" in df.columns and "entry" in df.columns and "stop" in df.columns:
+        _entry = pd.to_numeric(df["entry"], errors="coerce")
+        _target = pd.to_numeric(df["target"], errors="coerce")
+        _stop = pd.to_numeric(df["stop"], errors="coerce")
+        _stop_dist = (_entry - _stop).clip(lower=0.001)
+        df["setup_rr"] = ((_target - _entry) / _stop_dist).clip(-1.0, 10.0)
+
     numeric = [c for c in ML_NUMERIC_FEATURES if c in df.columns]
     for col in numeric:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -1685,7 +2100,9 @@ def _ml_prepare_frame(rows_df: pd.DataFrame, hold: int) -> tuple:
     keep = ["ticker", "scan_date", "year", "month", "_scan_dt", "_return",
             "_win_label", "_large_loss_label", "_missed_winner_label",
             "_target_label", "_timeout_label", "_mfe", "_mae",
+            "_breakout_win_label", "_failed_breakout_label", "_big_move_label",
             f"h{hold}_outcome", f"h{hold}_return", f"h{hold}_mae", f"h{hold}_mfe",
+            "h3_return", "h5_return", "h5_outcome", "h10_return",
             "rejection_reasons"] + numeric + categorical
     keep = [c for c in keep if c in df.columns]
     df = df[keep].dropna(subset=["_scan_dt", "_return"])
@@ -2780,6 +3197,7 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
                     vix_regime, args,
                     vix_ts_series=None,
                     sector_breadth_series=None,
+                    vix_raw_df=None,
                     collect_diagnostics: bool = True) -> list:
     """
     Core scan: for each ticker × scan_date, score and measure outcomes.
@@ -2820,6 +3238,32 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
     if spy_df is not None:
         for i, dt in enumerate(spy_df.index):
             spy_idx_map[dt] = i
+
+    # Precompute per-date regime scores from MarketRegimeEngine (once, not per ticker).
+    # regime_score_map: date → {regime_score, crash_risk_score, risk_on_score, risk_off_score}
+    _regime_score_map: dict = {}
+    if spy_df is not None and len(spy_df) > 20:
+        try:
+            from tradingagents.screening.market_regime import MarketRegimeEngine
+            _mr_engine = MarketRegimeEngine()
+            for _d in scan_dates:
+                _ds = str(_d.date())
+                try:
+                    _rs = _mr_engine.compute_from_dataframes(
+                        spy_df=spy_df,
+                        vix_df=vix_raw_df,
+                        as_of_date=_ds,
+                    )
+                    _regime_score_map[_ds] = {
+                        "regime_score":     round(_rs.regime_score, 4),
+                        "crash_risk_score": round(_rs.crash_risk_score, 4),
+                        "risk_on_score":    round(getattr(_rs, "prob_risk_on", 0.5), 4),
+                        "risk_off_score":   round(getattr(_rs, "prob_risk_off", 0.0), 4),
+                    }
+                except Exception:
+                    pass
+        except ImportError:
+            pass
 
     for ticker, (df, pc) in tqdm(precomputed.items(),
                                   desc="Scanning", unit="ticker"):
@@ -2866,14 +3310,39 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
                     pre_sector_breadth = float(v) if pd.notna(v) else None
 
             spy_close = spy_sma50 = spy_sma200 = spy_ret5 = spy_ret20 = None
+            # Extra regime features for ML_NUMERIC_FEATURES
+            _spy_ret60 = _spy_dd20 = _spy_abv50 = _spy_abv200 = _spy_golden = None
             if spy_df is not None:
                 si_gate = spy_df.index.searchsorted(date_ts, side="right") - 1
                 if si_gate >= 200:
                     spy_close = float(spy_df["Close"].iloc[si_gate])
                     spy_sma50 = float(spy_df["Close"].iloc[si_gate - 49:si_gate + 1].mean())
                     spy_sma200 = float(spy_df["Close"].iloc[si_gate - 199:si_gate + 1].mean())
-                    spy_ret5 = float(spy_close / spy_df["Close"].iloc[si_gate - 5] - 1) if si_gate >= 5 else None
+                    spy_ret5  = float(spy_close / spy_df["Close"].iloc[si_gate - 5] - 1) if si_gate >= 5 else None
                     spy_ret20 = float(spy_close / spy_df["Close"].iloc[si_gate - 20] - 1) if si_gate >= 20 else None
+                    # Extended regime features
+                    _spy_ret60 = float(spy_close / spy_df["Close"].iloc[si_gate - 60] - 1) if si_gate >= 60 else None
+                    _spy_high20 = float(spy_df["Close"].iloc[max(0, si_gate - 19):si_gate + 1].max())
+                    _spy_dd20 = round((spy_close - _spy_high20) / _spy_high20, 4) if _spy_high20 > 0 else None
+                    _spy_abv50  = 1.0 if spy_close > spy_sma50  else 0.0
+                    _spy_abv200 = 1.0 if spy_close > spy_sma200 else 0.0
+                    _spy_golden = 1.0 if spy_sma50 > spy_sma200  else 0.0
+
+            # VIX-based regime features: vix_20d_zscore, vol_expansion
+            _vix_20d_zscore = _vol_expansion = None
+            if vix_raw_df is not None:
+                try:
+                    vi_gate = vix_raw_df.index.searchsorted(date_ts, side="right") - 1
+                    if vi_gate >= 20:
+                        _vix_close_now = float(vix_raw_df["Close"].iloc[vi_gate])
+                        _vix_20d_slice = vix_raw_df["Close"].iloc[max(0, vi_gate - 19):vi_gate + 1]
+                        _vix_20d_mean  = float(_vix_20d_slice.mean())
+                        _vix_20d_std   = float(_vix_20d_slice.std(ddof=1))
+                        if _vix_20d_std > 0:
+                            _vix_20d_zscore = round((_vix_close_now - _vix_20d_mean) / _vix_20d_std, 4)
+                            _vol_expansion  = 1.0 if _vix_20d_zscore > 1.5 else 0.0
+                except Exception:
+                    pass
 
             try:
                 score, signals = score_at(pc, df, pos, target_mult, stop_mult,
@@ -2891,6 +3360,23 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
 
             if not signals:
                 continue
+
+            # Inject extended regime features into signals so they land in trade rows
+            # and become ML training features via ML_NUMERIC_FEATURES.
+            if _spy_ret60 is not None:    signals["spy_ret60"]          = _spy_ret60
+            if _spy_dd20 is not None:     signals["spy_drawdown_20d"]   = _spy_dd20
+            if _spy_abv50 is not None:    signals["spy_above_sma50"]    = _spy_abv50
+            if _spy_abv200 is not None:   signals["spy_above_sma200"]   = _spy_abv200
+            if _spy_golden is not None:   signals["spy_golden_cross"]   = _spy_golden
+            if _vix_20d_zscore is not None: signals["vix_20d_zscore"]   = _vix_20d_zscore
+            if _vol_expansion is not None:  signals["vol_expansion"]    = _vol_expansion
+            # Regime engine scores (precomputed once per scan date)
+            _rmap = _regime_score_map.get(str(date_ts.date()), {})
+            if _rmap:
+                signals["regime_score"]     = _rmap["regime_score"]
+                signals["crash_risk_score"] = _rmap["crash_risk_score"]
+                signals["risk_on_score"]    = _rmap["risk_on_score"]
+                signals["risk_off_score"]   = _rmap["risk_off_score"]
 
             rejection_reasons = []
             if score < effective_thresh:
@@ -3129,7 +3615,8 @@ def run_grid_search(trades_df: pd.DataFrame, args) -> list:
 
 def run_walk_forward(precomputed: dict, all_scan_dates, spy_df,
                      spy_regime, vix_regime, args,
-                     vix_ts_series=None, sector_breadth_series=None) -> list:
+                     vix_ts_series=None, sector_breadth_series=None,
+                     vix_raw_df=None) -> list:
     """
     Rolling walk-forward: choose the best threshold on the train window,
     then apply that threshold to the next out-of-sample test window.
@@ -3148,6 +3635,7 @@ def run_walk_forward(precomputed: dict, all_scan_dates, spy_df,
             precomputed, train_dates, spy_df, spy_regime, vix_regime, args,
             vix_ts_series=vix_ts_series,
             sector_breadth_series=sector_breadth_series,
+            vix_raw_df=vix_raw_df,
             collect_diagnostics=False,
         )
         if not train_trades:
@@ -3177,6 +3665,7 @@ def run_walk_forward(precomputed: dict, all_scan_dates, spy_df,
             precomputed, test_dates, spy_df, spy_regime, vix_regime, args,
             vix_ts_series=vix_ts_series,
             sector_breadth_series=sector_breadth_series,
+            vix_raw_df=vix_raw_df,
             collect_diagnostics=False,
         )
         if test_trades:
@@ -3405,7 +3894,8 @@ def _position_sizing_table(hold_stats: dict, account_sizes=None) -> dict:
 def _simulate_account(trades_df: pd.DataFrame, hold: int, hold_stats: dict,
                       account_size: float = 5000.0,
                       position_cap_pct: float = 20.0,
-                      commission: float = 0.0,
+                      commission: float = 1.0,
+                      slippage_bps: float = 5.0,
                       regime_stats: dict = None,
                       sizing_mode: str = "fixed") -> dict:
     """Simulate a small account taking top-scored signals.
@@ -3461,6 +3951,11 @@ def _simulate_account(trades_df: pd.DataFrame, hold: int, hold_stats: dict,
     df["_score"] = pd.to_numeric(df["score"], errors="coerce")
     df = df.dropna(subset=["_scan_dt", "_exit_dt", "_entry", "_ret", "_score"])
     df = df[df["_entry"] > 0].sort_values(["_scan_dt", "_score"], ascending=[True, False])
+    # Apply round-trip slippage: entry slip (buy at ask) + exit slip (sell at bid)
+    # Each side is `slippage_bps / 10000`; total round-trip deducted from return.
+    if slippage_bps and float(slippage_bps) > 0:
+        slip_rt = 2.0 * float(slippage_bps) / 10000.0
+        df["_ret"] = df["_ret"] - slip_rt
     if df.empty:
         return {}
 
@@ -3822,7 +4317,8 @@ ARG_DEFAULTS = {
     "generate_charts": True,
     "charts_dir": None,
     "account_position_cap_pct": 20.0,
-    "account_commission": 0.0,
+    "account_commission": 1.0,
+    "account_slippage_bps": 5.0,
     "account_sizing_mode": "fixed",
     "diagnostics": True,
     "ml_analysis": True,
@@ -4034,6 +4530,7 @@ def run_backtest(args):
         precomputed, scan_dates, spy_df, spy_regime, vix_regime, args,
         vix_ts_series=vix_ts_series,
         sector_breadth_series=sector_breadth_series,
+        vix_raw_df=vix_raw,
     )
 
     # ── Analysis ──────────────────────────────────────────────────────────
@@ -4210,6 +4707,7 @@ def run_backtest(args):
         account_size=args.account_size,
         position_cap_pct=args.account_position_cap_pct,
         commission=args.account_commission,
+        slippage_bps=getattr(args, "account_slippage_bps", 5.0),
         regime_stats=regime_stats,
         sizing_mode=getattr(args, "account_sizing_mode", "fixed"),
     )
@@ -4234,6 +4732,7 @@ def run_backtest(args):
             precomputed, scan_dates, spy_df, spy_regime, vix_regime, args,
             vix_ts_series=vix_ts_series,
             sector_breadth_series=sector_breadth_series,
+            vix_raw_df=vix_raw,
         )
 
     # ── Optional: Monte Carlo ─────────────────────────────────────────────
@@ -4684,7 +5183,7 @@ if __name__ == "__main__":
         help="Min score to record a signal (default: 100; confirmed gate pass)"
     )
     parser.add_argument(
-        "--score-mode", choices=["confirmed_pullback", "breakout", "mean_reversion", "oversold_bounce"], default="confirmed_pullback",
+        "--score-mode", choices=["confirmed_pullback", "breakout", "breakout_v2", "mean_reversion", "oversold_bounce"], default="confirmed_pullback",
         help="Scoring model to backtest (default: confirmed_pullback)"
     )
     parser.add_argument(
@@ -4829,8 +5328,14 @@ if __name__ == "__main__":
         help="Maximum account percent allocated per simulated trade (default: 20)"
     )
     parser.add_argument(
-        "--account-commission", type=float, default=0.0,
-        help="Flat commission/slippage dollars per entry and exit (default: 0)"
+        "--account-commission", type=float, default=1.0,
+        help="Flat commission dollars per entry and exit (default: 1.0 = $1/side)"
+    )
+    parser.add_argument(
+        "--account-slippage-bps", type=float, default=5.0,
+        help="Round-trip slippage in basis points applied to every trade return "
+             "(default: 5 bps = 0.05%% per side, 0.10%% total). "
+             "Models bid/ask spread and imperfect fill on entry and exit."
     )
     parser.add_argument(
         "--account-sizing-mode", choices=["kelly_static", "fixed"],
