@@ -508,6 +508,209 @@ def ml_predict(ticker: str = typer.Argument(..., help="Ticker to predict.")):
     console.print(f"  {ticker.upper():<8}  signal [{sig_color}]{signal}[/{sig_color}]  prob {prob}")
 
 
+@ml_app.command("retrain")
+def ml_retrain(
+    mode: str = typer.Option(
+        "quick", "--mode", "-m",
+        help="quick = use existing candidate CSV (minutes). full = re-download OHLCV data (hours).",
+    ),
+    strategy: str = typer.Option(
+        "pullback", "--strategy", "-s",
+        help="Model strategy: pullback | breakout",
+    ),
+    hold: int = typer.Option(3, "--hold", help="Forward hold period in days for labels."),
+    threshold: float = typer.Option(0.60, "--threshold", "-t", help="ML probability gate threshold."),
+    tickers: str = typer.Option(
+        "tickers_liquid.txt", "--tickers",
+        help="Ticker file for full mode (tickers_liquid.txt | tickers_quality.txt | all_tickers.txt).",
+    ),
+    output_dir: str = typer.Option("", "--output-dir", "-o", help="Output dir (default: ml_models/latest)."),
+    no_walk_forward: bool = typer.Option(False, "--no-walk-forward", help="Skip walk-forward validation (faster)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would run without executing."),
+):
+    """
+    Retrain ML gate models with the current feature set.
+
+    QUICK mode (default, ~5-20 min):
+      Uses the existing candidate CSV at ml_models/stock_universe_candidate_*/
+      — no data download needed. Best for iterating on hyperparameters.
+
+    FULL mode (~2-6 hours):
+      Re-downloads OHLCV data for all tickers, rebuilds candidate rows from
+      scratch with the latest backtest/feature code, then trains. Use this
+      to incorporate data since last dataset build.
+
+    Examples:
+      ta ml retrain                          # quick pullback retrain → ml_models/latest
+      ta ml retrain --mode full              # full fresh download
+      ta ml retrain --strategy breakout      # train breakout model
+      ta ml retrain --threshold 0.65         # tighter gate
+      ta ml retrain --output-dir ml_models/my_experiment
+    """
+    import json as _json
+
+    out_dir = output_dir.strip() or "ml_models/latest"
+    out_path = ROOT / out_dir
+
+    # ── Locate training data for quick mode ───────────────────────────────────
+    QUICK_CANDIDATES = [
+        ROOT / "ml_models" / "stock_universe_candidate_20260512" / "stock_candidate_training_data.csv",
+        ROOT / "ml_models" / "stock_universe" / "stock_candidate_training_data.csv",
+        ROOT / "ml_models" / "stock_universe" / "training_data_enriched.csv",
+    ]
+
+    if mode == "quick":
+        csv_path = None
+        for p in QUICK_CANDIDATES:
+            if p.exists():
+                csv_path = p
+                break
+        if csv_path is None:
+            console.print("[red]No existing candidate CSV found. Run with --mode full to download.[/red]")
+            console.print("  Expected one of:")
+            for p in QUICK_CANDIDATES:
+                console.print(f"    {p}")
+            raise typer.Exit(1)
+
+        rows = sum(1 for _ in csv_path.open()) - 1  # fast line count
+        mtime = datetime.fromtimestamp(csv_path.stat().st_mtime)
+        age_days = (datetime.now() - mtime).days
+
+    # ── Show plan ─────────────────────────────────────────────────────────────
+    console.print()
+    console.print(Panel(
+        f"Mode:       [bold cyan]{mode}[/bold cyan]\n"
+        f"Strategy:   [bold]{strategy}[/bold]  (hold={hold}d)\n"
+        f"Threshold:  {threshold}\n"
+        f"Output:     {out_path}\n"
+        + (
+            f"Dataset:    {csv_path.name}\n"
+            f"Rows:       {rows:,}\n"
+            f"Data age:   {age_days} days ({mtime.strftime('%Y-%m-%d')})"
+            if mode == "quick" else
+            f"Tickers:    {ROOT / tickers}\n"
+            f"Download:   fresh OHLCV from Yahoo Finance"
+        ),
+        title="ML Retrain Plan",
+        border_style="cyan",
+    ))
+
+    if dry_run:
+        console.print("[yellow]--dry-run: nothing executed.[/yellow]")
+        return
+
+    if age_days > 14 and mode == "quick":
+        console.print(f"[yellow]Warning: dataset is {age_days} days old. Consider --mode full for fresh data.[/yellow]")
+
+    confirm = typer.prompt("Proceed?", default="Y").strip().upper()
+    if confirm not in ("Y", "YES"):
+        console.print("[dim]Aborted.[/dim]"); return
+
+    start_ts = time.time()
+
+    # ── Build command ─────────────────────────────────────────────────────────
+    if mode == "quick":
+        cmd = [
+            sys.executable, str(ROOT / "scripts" / "train_ml_models.py"),
+            "--input",  str(csv_path),
+            "--output-dir", str(out_path),
+            "--mode",  strategy,
+            "--hold",  str(hold),
+            "--ml-probability-threshold", str(threshold),
+            "--n-estimators", "600",
+            "--max-depth", "6",
+            "--min-samples-leaf", "25",
+            "--executed-weight", "20",
+            "--calibrate",
+        ]
+        if no_walk_forward:
+            cmd.append("--no-run-walk-forward")
+    else:  # full
+        ticker_file = ROOT / tickers
+        if not ticker_file.exists():
+            console.print(f"[red]Ticker file not found: {ticker_file}[/red]")
+            raise typer.Exit(1)
+        cmd = [
+            sys.executable, str(ROOT / "scripts" / "train_ml_from_stock_data.py"),
+            "--tickers", str(ticker_file),
+            "--output-dir", str(out_path),
+            "--hold",  str(hold),
+            "--reuse-dataset",      # reuse cached price pkl if present
+        ]
+
+    console.print(f"\n[cyan]Starting {mode} retrain...[/cyan]")
+    console.print(f"  [dim]{' '.join(str(c) for c in cmd[:6])} ...[/dim]\n")
+
+    # ── Run with live output ───────────────────────────────────────────────────
+    result = subprocess.run(cmd, cwd=str(ROOT))
+    elapsed = time.time() - start_ts
+    m, s = divmod(int(elapsed), 60)
+
+    if result.returncode != 0:
+        console.print(f"\n[red]✗ Retrain failed[/red]  (exit {result.returncode}  {m}m{s}s)")
+        raise typer.Exit(result.returncode)
+
+    # ── Parse and display results ──────────────────────────────────────────────
+    report_path = out_path / "training_report.json"
+    console.print(f"\n[green]✓ Retrain complete[/green]  ({m}m{s}s)")
+
+    if report_path.exists():
+        try:
+            report = _json.loads(report_path.read_text())
+            settings  = report.get("settings", {})
+            win_m     = report.get("models", {}).get("win_probability", {}).get("metrics", {})
+            ret_m     = report.get("models", {}).get("return_regression", {}).get("metrics", {})
+            thr_srch  = report.get("threshold_search", {})
+            rec_thr   = thr_srch.get("recommended_threshold")
+            wf        = report.get("walk_forward", {})
+            leakage   = report.get("leakage_check", {})
+
+            summary = (
+                f"Rows used:    {settings.get('rows_used', '?'):,}\n"
+                f"Features:     {len(settings.get('feature_names', [])) or settings.get('feature_count', '?')}\n"
+                f"Test period:  {settings.get('test_period', '?')}\n"
+                f"Calibrated:   {settings.get('calibrated', False)}\n"
+                f"\n[bold]Win Probability model[/bold]\n"
+                f"  AUC:        {win_m.get('roc_auc', '—')}\n"
+                f"  Precision:  {win_m.get('precision', '—')}\n"
+                f"  Recall:     {win_m.get('recall', '—')}\n"
+                f"  Brier:      {win_m.get('brier_score', '—')}\n"
+            )
+
+            if rec_thr:
+                rec = thr_srch.get(str(rec_thr), {})
+                summary += (
+                    f"\n[bold]Recommended threshold:[/bold] {rec_thr}\n"
+                    f"  Win rate:  {rec.get('win_rate', '?')}\n"
+                    f"  Avg ret:   {rec.get('avg_return_pct', '?')}%\n"
+                    f"  N trades:  {rec.get('n', '?')}\n"
+                )
+
+            if wf.get("roc_auc"):
+                summary += (
+                    f"\n[bold]Walk-forward validation[/bold]\n"
+                    f"  AUC:            {wf['roc_auc']}\n"
+                    f"  High-conf WR:   {wf.get('high_conf_win_rate', '—')}\n"
+                    f"  High-conf N:    {wf.get('high_conf_n', '—')}\n"
+                )
+            elif wf.get("status"):
+                summary += f"\nWalk-forward: {wf['status']}\n"
+
+            if leakage.get("leaky_features"):
+                summary += f"\n[red]⚠ LEAKAGE: {leakage['leaky_features']}[/red]"
+            else:
+                summary += "\n[green]Leakage check: clean[/green]"
+
+            console.print(Panel(summary, title="Training Results", border_style="green"))
+        except Exception as e:
+            console.print(f"[dim]Could not parse training report: {e}[/dim]")
+
+    console.print(f"  Bundle:  {out_path / 'model_bundle.joblib'}")
+    console.print(f"  Report:  {report_path}")
+    console.print()
+    console.print("[dim]Restart server to load new model: ta server restart[/dim]")
+
+
 # ── TICKER ─────────────────────────────────────────────────────────────────────
 
 @app.command()
