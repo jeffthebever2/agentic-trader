@@ -205,6 +205,15 @@ def main():
         "outcome": "started",
     }
 
+    # ── Cache status ────────────────────────────────────────────────────────
+    cache_dir = ROOT / ".backtest_cache"
+    if cache_dir.exists():
+        cache_files = list(cache_dir.glob("batch_*.pkl"))
+        total_mb = sum(f.stat().st_size for f in cache_files) / 1_048_576
+        print(f"[retrain_weekly] Cache: {len(cache_files)} batch pkl files ({total_mb:.0f} MB) — backtest will use cache, data download skipped")
+    else:
+        print("[retrain_weekly] Cache: none — backtest will download all price data (slow)")
+
     # ── Run backtest ────────────────────────────────────────────────────────
     run(backtest_cmd, f"Step 1/5 — Backtest {start} → {end}")
 
