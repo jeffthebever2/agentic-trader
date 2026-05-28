@@ -632,7 +632,8 @@ def ml_retrain(
     console.print("[dim]Output streams live below. Ctrl+C to abort (won't auto-clean temp CSV).[/dim]\n")
 
     start_ts = time.time()
-    result = subprocess.run(cmd, cwd=str(ROOT))
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    result = subprocess.run(cmd, cwd=str(ROOT), env=env)
     elapsed = time.time() - start_ts
     h, rem = divmod(int(elapsed), 3600)
     m, s = divmod(rem, 60)
