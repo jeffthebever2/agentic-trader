@@ -70,9 +70,19 @@ def download_all(tickers: list, start: str, end: str, no_cache: bool = False,
           f"({start} → {end}, batch_size={batch_size})...")
     print("Cached batches load instantly. First run may take 15-30 min.\n")
 
+    # Round end date to next Monday so cache is stable across a full week
+    import datetime as _dt
+    try:
+        _end_d = _dt.date.fromisoformat(str(end))
+        # snap forward to next Monday (or keep if already Monday)
+        _days_to_monday = (7 - _end_d.weekday()) % 7
+        _cache_end = (_end_d + _dt.timedelta(days=_days_to_monday)).isoformat()
+    except Exception:
+        _cache_end = str(end)
+
     for i, batch in enumerate(tqdm(batches, desc="Batches", unit="batch")):
         batch_sig = hashlib.sha256(",".join(batch).encode("utf-8")).hexdigest()[:16]
-        cache_key  = f"{start}_{end}_bs{batch_size}_{batch_sig}"
+        cache_key  = f"{start}_{_cache_end}_bs{batch_size}_{batch_sig}"
         cache_path = CACHE_DIR / f"batch_{cache_key}.pkl"
 
         if not no_cache and cache_path.exists():
