@@ -218,13 +218,12 @@ def main():
                                   # → ~55% WR, Kelly ~17% (vs 5% with 0.7). Old training CSV used 1.0.
         # consec_up filter: skip extended bounces (default active in backtest)
         # No explicit flag needed — --skip-extended-bounce is True by default
-        "--min-adv", "500000",    # match paper_trade_today.py min_avg_volume=500K
-        # Training-inference alignment: paper trading filters out stocks with
-        # <500K avg 20-day volume. Without this filter, training data includes
-        # illiquid signals that are never seen in production.
-        "--min-price", "15.0",    # match paper_trade_today.py --min-price=15.0 default
-        # Paper trading filters stocks below $15. Backtest default is $5.
-        # Including $5-$15 stocks in training adds noise from patterns never seen in production.
+        # Cycle 46: --min-adv and --min-price intentionally omitted from training backtest.
+        # Cycle 31 precedent: more training data beats alignment filtering.
+        # --min-adv 500K and --min-price $15 together eliminated 66% of ticker-years,
+        # collapsing training rows from ~1554 to 420 (ROC=0.30, PSI fail on 50 features).
+        # Model learns volume/price regime from features (atr_pct, vol_surge_1d, etc.).
+        # Paper trading still applies min_avg_volume=500K and --min-price=15 at scan time.
         "--skip-thursday",        # match paper_trade_today.py default skip_thursday=True
         # Thursday scans (Friday entries) consistently underperform: WR=50.4% vs 57.4% non-Thu.
         # Statistical: z=-3.5, p<0.0002 on 3974 backtest signals. Catastrophic in crash years.
