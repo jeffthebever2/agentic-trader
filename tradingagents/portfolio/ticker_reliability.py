@@ -51,6 +51,7 @@ class TickerReliabilityTracker:
         blend_at_n: int = 10,
         penalty_threshold: float = 0.40,
         reward_threshold: float = 0.65,
+        data_path: str | None = None,
     ):
         self.window = window
         self.blend_at_n = blend_at_n

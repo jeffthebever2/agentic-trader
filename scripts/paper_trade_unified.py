@@ -569,7 +569,7 @@ def main() -> None:
         data_path=str(output_dir / "ticker_reliability.json")
     )
     feedback    = PaperFeedbackTracker(
-        data_path=str(output_dir / "paper_feedback.json")
+        state_path=str(output_dir / "paper_feedback.json")
     )
     regime_engine = MarketRegimeEngine()
 

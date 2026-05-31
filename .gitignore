@@ -269,3 +269,20 @@ web/__pycache__/
 
 # Cleanup scripts (one-off)
 clean-tradingagents-repo-safe.sh
+
+# ML model backups and staging (large binary dirs)
+ml_models/backup_*/
+ml_models/best_*/
+ml_models/latest.backup_*/
+ml_models/nothu_*/
+ml_models/rejected_*/
+ml_models/.retrain_staging/
+
+# Retrain CSV data files
+retrain_trades_*.csv
+
+# Runtime logs
+logs/
+
+# Dev tools
+.tools/
