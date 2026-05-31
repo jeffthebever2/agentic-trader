@@ -3,6 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutGrid, Search, BarChart3, TrendingUp, Clock,
   Landmark, BarChart2, Lightbulb, ClipboardCheck, ShieldCheck, Settings,
+  Zap, ScrollText,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@/hooks/useAuth'
@@ -21,17 +22,19 @@ interface NavItem {
 const IC = { size: 17, strokeWidth: 1.75 }
 
 const NAV: NavItem[] = [
-  { to: '/',         id: 'nav-dashboard', label: 'Dashboard',         icon: <LayoutGrid    {...IC} /> },
-  { to: '/analyze',  id: 'nav-analyze',   label: 'Analyze',           icon: <Search        {...IC} />, adminOnly: true },
-  { to: '/paper',    id: 'nav-paper',     label: 'Paper Trading',     icon: <BarChart3     {...IC} /> },
-  { to: '/backtest', id: 'nav-backtest',  label: 'Backtest & Screener', icon: <TrendingUp  {...IC} />, adminOnly: true },
-  { to: '/history',  id: 'nav-history',  label: 'History',            icon: <Clock         {...IC} />, adminOnly: true },
-  { to: '/broker',   id: 'nav-broker',   label: 'Real Broker',        icon: <Landmark      {...IC} /> },
-  { to: '/ml',       id: 'nav-ml',       label: 'Statistics',         icon: <BarChart2     {...IC} />, adminOnly: true },
-  { to: '/rl',       id: 'nav-rl',       label: 'RL Agent',           icon: <Lightbulb     {...IC} />, adminOnly: true },
-  { to: '/hil',      id: 'nav-hil',      label: 'HIL Approvals',      icon: <ClipboardCheck {...IC} /> },
-  { to: '/admin',    id: 'nav-admin',    label: 'Admin',              icon: <ShieldCheck   {...IC} />, adminOnly: true },
-  { to: '/settings', id: 'nav-settings', label: 'Settings',           icon: <Settings      {...IC} /> },
+  { to: '/',         id: 'nav-dashboard', label: 'Dashboard',           icon: <LayoutGrid    {...IC} /> },
+  { to: '/signals',  id: 'nav-signals',   label: 'Signals',             icon: <Zap           {...IC} /> },
+  { to: '/paper',    id: 'nav-paper',     label: 'Paper Trading',       icon: <BarChart3     {...IC} /> },
+  { to: '/analyze',  id: 'nav-analyze',   label: 'Analyze',             icon: <Search        {...IC} />, adminOnly: true },
+  { to: '/backtest', id: 'nav-backtest',  label: 'Research & Backtest', icon: <TrendingUp    {...IC} />, adminOnly: true },
+  { to: '/history',  id: 'nav-history',  label: 'History',              icon: <Clock         {...IC} />, adminOnly: true },
+  { to: '/broker',   id: 'nav-broker',   label: 'Real Broker',          icon: <Landmark      {...IC} /> },
+  { to: '/ml',       id: 'nav-ml',       label: 'Models & Stats',       icon: <BarChart2     {...IC} />, adminOnly: true },
+  { to: '/logs',     id: 'nav-logs',     label: 'Logs',                 icon: <ScrollText    {...IC} />, adminOnly: true },
+  { to: '/rl',       id: 'nav-rl',       label: 'RL Agent',             icon: <Lightbulb    {...IC} />, adminOnly: true },
+  { to: '/hil',      id: 'nav-hil',      label: 'HIL Approvals',        icon: <ClipboardCheck {...IC} /> },
+  { to: '/admin',    id: 'nav-admin',    label: 'Admin',                icon: <ShieldCheck   {...IC} />, adminOnly: true },
+  { to: '/settings', id: 'nav-settings', label: 'Settings',             icon: <Settings      {...IC} /> },
 ]
 
 // ── Connection status ────────────────────────────────────────────────────────
@@ -71,11 +74,13 @@ const CONN_COLORS: Record<ConnState, { dot: string; value: string; border: strin
 
 // Prefetch config keyed by route path
 const PREFETCH_MAP: Record<string, { queryKey: unknown[]; queryFn: () => Promise<unknown> }> = {
-  '/':        { queryKey: ['paper', 'status'],  queryFn: () => api.get('/paper/status').then(r => r.data) },
-  '/paper':   { queryKey: ['paper', 'status'],  queryFn: () => api.get('/paper/status').then(r => r.data) },
-  '/history': { queryKey: ['history-stats'],    queryFn: () => api.get('/history/stats').then(r => r.data) },
-  '/ml':      { queryKey: ['ml', 'status'],     queryFn: () => api.get('/ml/status').then(r => r.data) },
-  '/hil':     { queryKey: ['hil', 'pending'],   queryFn: () => api.get('/hil/pending').then(r => r.data) },
+  '/':         { queryKey: ['paper', 'status'],  queryFn: () => api.get('/paper/status').then(r => r.data) },
+  '/signals':  { queryKey: ['paper', 'status'],  queryFn: () => api.get('/paper/status').then(r => r.data) },
+  '/paper':    { queryKey: ['paper', 'status'],  queryFn: () => api.get('/paper/status').then(r => r.data) },
+  '/history':  { queryKey: ['history-stats'],    queryFn: () => api.get('/history/stats').then(r => r.data) },
+  '/ml':       { queryKey: ['ml', 'status'],     queryFn: () => api.get('/ml/status').then(r => r.data) },
+  '/logs':     { queryKey: ['logs', 'stats'],    queryFn: () => api.get('/logs/stats').then(r => r.data) },
+  '/hil':      { queryKey: ['hil', 'pending'],   queryFn: () => api.get('/hil/pending').then(r => r.data) },
 }
 
 interface SidebarProps {
