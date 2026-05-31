@@ -169,18 +169,14 @@ Do NOT restart services. Do NOT make speculative changes. Do NOT modify working 
     summary = output[:1200] + ("..." if len(output) > 1200 else "")
     log(f"{service_name}: Claude reasoning:\n{summary}")
 
-    # Send notifications
-    try:
-        if fixed:
+    # Send fix notification only (down/skip alerts handled by trigger_audit)
+    if fixed:
+        try:
             fix_lines = [l for l in output.splitlines() if l.strip() and "AUTOFIX_DECISION" not in l]
             fix_snippet = "\n".join(fix_lines[-8:])
             notify_fixed(service_name, fix_snippet)
-        else:
-            skip_lines = [l for l in output.splitlines() if l.strip() and "AUTOFIX_DECISION" not in l]
-            skip_snippet = "\n".join(skip_lines[-6:])
-            notify_skip(service_name, skip_snippet)
-    except Exception as ne:
-        log(f"{service_name}: notification error: {ne}")
+        except Exception as ne:
+            log(f"{service_name}: fix notification error: {ne}")
 
     return output, fixed
 
@@ -214,26 +210,51 @@ class ServiceMonitor:
             return False
         return True
 
-    def trigger_audit(self) -> None:
+    def trigger_audit(self, exit_code: str = "0") -> None:
         if not self.can_audit():
             return
+
+        # For SIGTERM exits (exit=-15), wait briefly and check HTTP health.
+        # A clean launchctl restart generates SIGTERM but the service comes
+        # back healthy within seconds — no alert needed for that case.
+        health_url: str | None = self.cfg.get("health_url")
+        if exit_code == "-15" and health_url:
+            time.sleep(8)
+            if http_ok(health_url):
+                log(f"{self.name}: PID changed via SIGTERM but HTTP health OK — clean restart, no alert")
+                return
+
         self.last_audit_time = time.time()
         self.audit_times.append(self.last_audit_time)
         error_text = tail_log(self.cfg["err_log"])
-
-        # Send down alert immediately before calling Claude (Claude takes time)
-        last_lines = error_text.strip().splitlines()
-        err_summary = "\n".join(last_lines[-5:]) if last_lines else "(no log)"
-        try:
-            notify_down(self.name, err_summary)
-        except Exception as ne:
-            log(f"{self.name}: down notification error: {ne}")
 
         output, fixed = run_claude_audit(self.name, error_text)
         if fixed:
             log(f"{self.name}: code fixed by Claude — launchd will restart service")
         else:
             log(f"{self.name}: Claude skipped fix — monitoring continues")
+
+        # Only alert DOWN if Claude confirmed a real problem (FIX) or
+        # could not determine it was a clean restart (SKIP with non-trivial log).
+        if fixed:
+            pass  # notify_fixed already sent inside run_claude_audit
+        else:
+            # Check if Claude's reasoning says it's a false alarm (clean restart)
+            clean_keywords = ("no crash", "clean restart", "graceful shutdown",
+                              "clean startup", "false alarm", "no error", "no traceback")
+            reasoning_lower = output.lower()
+            is_false_alarm = any(kw in reasoning_lower for kw in clean_keywords)
+            if not is_false_alarm:
+                # Real problem Claude can't fix — alert the user
+                last_lines = error_text.strip().splitlines()
+                err_summary = "\n".join(last_lines[-5:]) if last_lines else "(no log)"
+                try:
+                    notify_down(self.name, err_summary)
+                    log(f"{self.name}: down alert sent (real crash, no auto-fix)")
+                except Exception as ne:
+                    log(f"{self.name}: down notification error: {ne}")
+            else:
+                log(f"{self.name}: false alarm (clean restart) — no alert sent")
 
     def has_new_errors(self) -> bool:
         path: Path = self.cfg["err_log"]
@@ -256,14 +277,14 @@ class ServiceMonitor:
         if self.last_pid not in ("-", "") and is_running and pid != self.last_pid:
             log(f"{self.name}: CRASH DETECTED — restarted (pid {self.last_pid}→{pid}, exit={exit_code})")
             self.last_pid = pid
-            self.trigger_audit()
+            self.trigger_audit(exit_code=exit_code)
             return
 
         # Crash: service is fully down + new errors appeared
         if not is_running and self.has_new_errors():
             log(f"{self.name}: CRASH DETECTED — down with new errors")
             self.last_pid = pid
-            self.trigger_audit()
+            self.trigger_audit(exit_code="1")
             return
 
         self.last_pid = pid

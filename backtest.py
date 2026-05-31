@@ -5367,7 +5367,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no-skip-extended-bounce", dest="skip_extended_bounce", action="store_false", default=True,
         help="Disable extended-bounce filter (consec_up>=2 skip). Default: filter active. "
-             "Evidence: consec_up<=1 E=+0.530% vs consec_up>=2 E=+0.157% (VIX=normal, 1.2/0.7)."
+             "Evidence: consec_up<=1 E=+0.530%% vs consec_up>=2 E=+0.157%% (VIX=normal, 1.2/0.7)."
     )
     parser.add_argument(
         "--skip-vix-low-vol", dest="skip_vix_low_vol", action="store_true", default=False,
