@@ -34,7 +34,10 @@ def _load_aux():
     cd = Path(".backtest_cache")
     def _pk(name):
         p = cd / f"{name}_{WIN}.pkl"
-        return pickle.load(open(p, "rb")) if p.exists() else None
+        if not p.exists():
+            return None
+        with open(p, "rb") as _f:
+            return pickle.load(_f)
     vix = _pk("vix")
     vix3m = _pk("vix3m")
     sectors = _pk("sectors")

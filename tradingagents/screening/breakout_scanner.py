@@ -363,7 +363,6 @@ class BreakoutScanner:
             "atr_expansion":          round(atr_expansion_ratio, 4),
             "bb_width":               round(bb_width, 4),
             "keltner_squeeze":        keltner_squeeze,
-            "vol_dryup_5d":           round(vol_dryup_5d, 4),
             # Confirmation
             "pct_from_10d_high":      round((price - high_10d) / high_10d, 4) if high_10d > 0 else None,
             "pct_from_20d_high":      round(pct_from_20d_high, 4),

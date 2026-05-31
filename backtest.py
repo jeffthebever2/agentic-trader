@@ -3314,6 +3314,8 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
                     _rs = _mr_engine.compute_from_dataframes(
                         spy_df=spy_df,
                         vix_df=vix_raw_df,
+                        vix3m_df=None,
+                        sector_dfs=None,
                         as_of_date=_ds,
                     )
                     _regime_score_map[_ds] = {

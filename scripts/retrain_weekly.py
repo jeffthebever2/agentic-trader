@@ -334,7 +334,8 @@ def main():
         _log_history(history_entry)
         sys.exit(1)
 
-    rows = sum(1 for _ in open(csv_path)) - 1
+    with open(csv_path) as _csv_f:
+        rows = sum(1 for _ in _csv_f) - 1
     print(f"[retrain_weekly] CSV has {rows:,} rows.")
     history_entry["csv_rows"] = rows
 

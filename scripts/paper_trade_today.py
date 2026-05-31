@@ -538,6 +538,17 @@ class PaperAccount:
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         tmp.replace(self.state_path)
+        # Rolling 5-snapshot backup
+        try:
+            import shutil as _shutil, time as _t
+            _bd = self.state_path.parent / ".backups"
+            _bd.mkdir(exist_ok=True)
+            _stamp = int(_t.time())
+            _shutil.copy2(self.state_path, _bd / f"{self.state_path.stem}_{_stamp}.json")
+            for _old in sorted(_bd.glob(f"{self.state_path.stem}_*.json"))[:-5]:
+                _old.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def log_event(self, event: dict[str, Any]) -> None:
         event = {"timestamp": dt.datetime.now().isoformat(), **event}

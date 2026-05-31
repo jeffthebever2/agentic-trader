@@ -36,13 +36,18 @@ CLAUDE_BIN = "/usr/local/bin/claude"
 SERVICES = {
     "webserver": {
         "label": "org.agentictrader.webserver",
-        "health_url": "http://localhost:8001/",
+        "health_url": "http://localhost:8001/health/deep",
         "err_log": LOGS / "webserver.err",
     },
     "papertrader": {
         "label": "org.agentictrader.papertrader",
         "health_url": None,
         "err_log": LOGS / "papertrader.err",
+    },
+    "tunnel": {
+        "label": "org.agentictrader.tunnel",
+        "health_url": None,
+        "err_log": LOGS / "tunnel.err",
     },
 }
 

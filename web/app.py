@@ -150,6 +150,7 @@ class AuthContextMiddleware(BaseHTTPMiddleware):
         "/api/paper/sms/inbound",  # signed by SENDBLUE_INBOUND_SECRET
         "/api/approve",            # signed magic token in query string
         "/health",
+        "/health/deep",
     }
 
     async def dispatch(self, request: Request, call_next):
@@ -260,6 +261,96 @@ async def health_check():
             "error": "An internal error occurred",
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
+
+@app.get("/health/deep")
+async def deep_health_check():
+    """Unauthenticated deep health check for autofix monitor and uptime watchers.
+    Returns per-subsystem status so monitors can distinguish what is actually broken.
+    """
+    import os, time
+    now = dt.datetime.now(dt.timezone.utc)
+    checks: dict = {}
+
+    # ── ML model ────────────────────────────────────────────────────────────
+    ml_ok = False
+    ml_detail: dict = {}
+    try:
+        mp = ROOT / "ml_models" / "latest" / "model_bundle.joblib"
+        if not mp.exists():
+            mp = ROOT / "ml_models" / "stock_universe" / "model_bundle.joblib"
+        if mp.exists():
+            age_h = (now.timestamp() - mp.stat().st_mtime) / 3600
+            ml_ok = True
+            ml_detail = {"path": str(mp), "age_hours": round(age_h, 1)}
+        else:
+            ml_detail = {"error": "model_bundle.joblib not found"}
+    except Exception as e:
+        ml_detail = {"error": str(e)}
+    checks["ml_model"] = {"ok": ml_ok, **ml_detail}
+
+    # ── Paper trader state freshness ─────────────────────────────────────────
+    paper_ok = False
+    paper_detail: dict = {}
+    try:
+        data_dir = ROOT / "tmp" / "paper_trading_today"
+        state_files = list(data_dir.rglob("state.json")) if data_dir.exists() else []
+        if state_files:
+            newest = max(state_files, key=lambda p: p.stat().st_mtime)
+            age_m = (now.timestamp() - newest.stat().st_mtime) / 60
+            paper_ok = age_m < 120  # stale if >2h
+            paper_detail = {"newest_state": str(newest), "age_minutes": round(age_m, 1)}
+        else:
+            paper_detail = {"error": "no state.json found under data/paper"}
+    except Exception as e:
+        paper_detail = {"error": str(e)}
+    checks["paper_trader"] = {"ok": paper_ok, **paper_detail}
+
+    # ── Cloudflare tunnel ────────────────────────────────────────────────────
+    tunnel_ok = False
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["pgrep", "-f", "cloudflared tunnel run"],
+            capture_output=True, timeout=3
+        )
+        tunnel_ok = result.returncode == 0
+        checks["cloudflare_tunnel"] = {"ok": tunnel_ok, "pids": result.stdout.decode().strip().split() if tunnel_ok else []}
+    except Exception as e:
+        checks["cloudflare_tunnel"] = {"ok": False, "error": str(e)}
+
+    # ── Disk space ──────────────────────────────────────────────────────────
+    disk_ok = False
+    try:
+        stat = os.statvfs(str(ROOT))
+        free_gb = (stat.f_bavail * stat.f_frsize) / 1e9
+        disk_ok = free_gb > 5.0
+        checks["disk"] = {"ok": disk_ok, "free_gb": round(free_gb, 2)}
+    except Exception as e:
+        checks["disk"] = {"ok": False, "error": str(e)}
+
+    # ── Autofix monitor ─────────────────────────────────────────────────────
+    autofix_ok = False
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["pgrep", "-f", "autofix_monitor.py"],
+            capture_output=True, timeout=3
+        )
+        autofix_ok = result.returncode == 0
+        checks["autofix_monitor"] = {"ok": autofix_ok}
+    except Exception as e:
+        checks["autofix_monitor"] = {"ok": False, "error": str(e)}
+
+    # ── Webserver self-check ─────────────────────────────────────────────────
+    checks["webserver"] = {"ok": True, "note": "responding (this endpoint)"}
+
+    overall = all(v.get("ok", False) for v in checks.values())
+    return {
+        "status": "healthy" if overall else "degraded",
+        "timestamp": now.isoformat(),
+        "checks": checks,
+    }
+
 
 @app.on_event("startup")
 async def _startup():

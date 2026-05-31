@@ -121,7 +121,7 @@ function TvModal({ onClose }: { onClose: () => void }) {
       <div style={body}>
         <iframe
           key={`${symbol}-${interval}-${style}`}
-          src={`https://www.tradingview.com/widgetembed/?symbol=${symbol}&interval=${interval}&theme=dark&style=${style}&locale=en`}
+          src={`https://www.tradingview.com/widgetembed/?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&theme=dark&style=${encodeURIComponent(style)}&locale=en`}
           style={{ width: '100%', height: '100%', border: 'none' }}
           allowFullScreen
         />

@@ -67,8 +67,11 @@ from scripts.paper_trade_today import (   # noqa: E402
     Position,
     Candidate,
     build_candidates,
+    clean_daily_frame,
+    regime_value,
     parse_args as _parse_args_today,
 )
+from backtest import build_spy_regime  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Portfolio / brain imports
@@ -198,12 +201,25 @@ def _load_exit_plans(path: Path) -> Dict[str, ShortHoldExitPlan]:
         return {}
 
 
-def _save_exit_plans(plans: Dict[str, ShortHoldExitPlan], path: Path) -> None:
+def _atomic_write_json(path: Path, data: Any, backups: int = 5) -> None:
+    """Write JSON atomically (tmp → rename) and rotate up to `backups` snapshots."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({t: p.to_dict() for t, p in plans.items()}, indent=2),
-        encoding="utf-8",
-    )
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    if backups > 0:
+        backup_dir = path.parent / ".backups"
+        backup_dir.mkdir(exist_ok=True)
+        import shutil, time as _time
+        stamp = int(_time.time())
+        shutil.copy2(path, backup_dir / f"{path.stem}_{stamp}{path.suffix}")
+        old = sorted(backup_dir.glob(f"{path.stem}_*{path.suffix}"))
+        for f in old[:-backups]:
+            f.unlink(missing_ok=True)
+
+
+def _save_exit_plans(plans: Dict[str, ShortHoldExitPlan], path: Path) -> None:
+    _atomic_write_json(path, {t: p.to_dict() for t, p in plans.items()})
 
 
 def _open_days(account: PaperAccount, ticker: str, now: dt.datetime) -> int:
@@ -476,8 +492,11 @@ def scan_once(
         for t in account.positions
     ) / account_value * 100 if account_value > 0 else 0.0
 
+    filtered_candidates = {
+        k: v for k, v in candidates_by_strategy.items() if k not in exclude
+    }
     brain_result = brain.process(
-        candidates_by_strategy=candidates_by_strategy,
+        candidates_by_strategy=filtered_candidates,
         account=account,
         account_value=account_value,
         prices=prices,
@@ -487,7 +506,6 @@ def scan_once(
         reliability_tracker=reliability,
         feedback_tracker=feedback,
         output_dir=output_dir,
-        exclude_strategies=exclude,
     )
 
     print(
@@ -651,16 +669,29 @@ def main() -> None:
         try:
             # ── Build candidates (reuses existing pipeline unchanged) ─────
             print("[unified] Building candidates…")
-            (
-                candidates_by_strategy,
-                prices,
-                spy_regime,
-                vix_level,
-                regime_state,
-            ) = build_candidates(args=_today_args)
+            trade_date = now.date()
+            candidates_by_strategy, raw_daily = build_candidates(
+                _today_args, trade_date, bundle=None
+            )
 
-            if vix_level is None:
-                vix_level = _fetch_vix()
+            # Extract regime info from raw_daily side-channel
+            _spy_df = clean_daily_frame(raw_daily.get(_today_args.benchmark), trade_date) if raw_daily.get(_today_args.benchmark) is not None else None
+            _spy_regime_series = build_spy_regime(_spy_df) if _spy_df is not None and len(_spy_df) >= 200 else None
+            spy_regime = regime_value(_spy_regime_series, pd.Timestamp(trade_date)) if _spy_regime_series is not None else "unknown"
+            regime_state = raw_daily.get("_market_regime_state")
+
+            # Extract current prices from raw_daily close prices
+            prices: Dict[str, float] = {}
+            for _tk, _df in raw_daily.items():
+                if isinstance(_tk, str) and not _tk.startswith("_") and hasattr(_df, "iloc"):
+                    try:
+                        _close = _df["Close"].dropna() if "Close" in _df.columns else None
+                        if _close is not None and len(_close) > 0:
+                            prices[_tk] = float(_close.iloc[-1])
+                    except Exception:
+                        pass
+
+            vix_level = _fetch_vix()
 
             # Cache refs on args for safety monitor
             _today_args._bundle_ref        = getattr(_today_args, "_bundle_ref", None)

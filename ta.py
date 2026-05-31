@@ -230,6 +230,7 @@ def server_start(
         stdout=log_fd, stderr=log_fd,
         start_new_session=True,
     )
+    log_fd.close()  # subprocess inherits fd; close our handle
     PID_FILE.write_text(str(proc.pid))
     console.print(f"[green]Server started[/green]  pid {proc.pid}  → http://{host}:{port}")
     console.print(f"  Logs: ta logs server")
