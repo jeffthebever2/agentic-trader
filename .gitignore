@@ -286,3 +286,4 @@ logs/
 
 # Dev tools
 .tools/
+.codeql-db/
