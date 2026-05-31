@@ -17,18 +17,25 @@ class DrawdownMonitor:
             cfg.get("trade_log_path", "~/.tradingagents/logs/trade_results.jsonl")
         ).expanduser()
 
-    def should_keep_trading(self) -> Tuple[bool, str]:
-        today_pnl = self._calculate_daily_pnl()
+    def should_keep_trading(self, unrealized_pnl_pct: float = 0.0) -> Tuple[bool, str]:
+        """Circuit-breaker check.
+
+        Cycle 44: ``unrealized_pnl_pct`` lets the caller fold in open-position
+        mark-to-market (account-fraction terms). Without it the breaker was blind
+        to open losers and could be bypassed by holding losing positions open
+        during a selloff — exactly the scenario it exists to catch.
+        """
+        today_pnl = self._calculate_daily_pnl() + unrealized_pnl_pct
         if today_pnl < self.max_daily_loss:
             return False, (
-                f"Daily realized loss {today_pnl:.1%} exceeds limit "
+                f"Daily loss {today_pnl:.1%} (incl. open MTM) exceeds limit "
                 f"{self.max_daily_loss:.1%}. STOP TRADING."
             )
 
-        month_pnl = self._calculate_monthly_pnl()
+        month_pnl = self._calculate_monthly_pnl() + unrealized_pnl_pct
         if month_pnl < self.max_monthly_loss:
             return False, (
-                f"Monthly realized loss {month_pnl:.1%} exceeds limit "
+                f"Monthly loss {month_pnl:.1%} (incl. open MTM) exceeds limit "
                 f"{self.max_monthly_loss:.1%}. STOP TRADING."
             )
         return True, "OK to trade"
@@ -46,10 +53,25 @@ class DrawdownMonitor:
 
     @staticmethod
     def _pnl_pct(trade: dict) -> float:
+        """Per-trade return as an account fraction.
+
+        Cycle 44: when a trade carries ``capital_fraction`` (notional / account
+        equity at entry) the per-trade return is weighted by it, so summing
+        across trades approximates the true account-level daily/monthly move
+        rather than naively adding position-level returns of unequal size.
+        """
         if "pnl_pct" in trade:
-            return float(trade["pnl_pct"])
-        pnl = float(trade.get("pnl", 0.0))
-        return pnl / 100 if abs(pnl) > 1 else pnl
+            ret = float(trade["pnl_pct"])
+        else:
+            pnl = float(trade.get("pnl", 0.0))
+            ret = pnl / 100 if abs(pnl) > 1 else pnl
+        cf = trade.get("capital_fraction")
+        if cf is not None:
+            try:
+                return ret * float(cf)
+            except (TypeError, ValueError):
+                return ret
+        return ret
 
     @staticmethod
     def _exit_dt(trade: dict) -> datetime | None:

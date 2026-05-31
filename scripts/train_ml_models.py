@@ -141,7 +141,9 @@ def _calibrate_classifier(clf, x_val, y_val, method: str = "isotonic"):
     auto_method = "isotonic" if len(y_val) >= 1000 else "sigmoid"
     actual_method = method if method in ("isotonic", "sigmoid") else auto_method
     try:
-        cal = CalibratedClassifierCV(clf, method=actual_method, cv="prefit")
+        # cv=None is the sklearn 1.8+ replacement for cv="prefit"
+        # (pre-fitted estimator, calibrate on x_val directly)
+        cal = CalibratedClassifierCV(clf, method=actual_method, cv=None)
         cal.fit(x_val, y_val)
         raw_prob = clf.predict_proba(x_val)[:, 1]
         cal_prob = cal.predict_proba(x_val)[:, 1]
@@ -452,6 +454,21 @@ def train_models(args) -> dict:
         if executed_weight > 1.0:
             print("  Sample weighting: skipped (executed_only=True or no candidate_status column)")
 
+    # ── Temporal decay: upweight recent signals to adapt to current market regime ──
+    # Older signals may represent different market conditions; decay their weight so
+    # the model focuses more on patterns that match the current environment.
+    # decay=0.0 (default): uniform weights. decay=0.02: 24-month-old signals get ~0.62x weight.
+    temporal_decay = float(getattr(args, "temporal_decay", 0.0))
+    if temporal_decay > 0.0 and "_scan_dt" in train_df.columns:
+        months_ago = (train_df["_scan_dt"].max() - train_df["_scan_dt"]).dt.days / 30.44
+        decay_weights = np.exp(-temporal_decay * months_ago.fillna(0).values)
+        if sample_weight_train is not None:
+            sample_weight_train = sample_weight_train * decay_weights
+        else:
+            sample_weight_train = decay_weights.astype(np.float64)
+        effective_n = decay_weights.sum()
+        print(f"  Temporal decay: λ={temporal_decay} → effective_n={effective_n:.0f} (raw={len(train_df)})")
+
     # Also weight calibration set (if any)
     sample_weight_cal = None
     if (sample_weight_train is not None
@@ -461,6 +478,32 @@ def train_models(args) -> dict:
             cal_df["candidate_status"].values == "executed",
             executed_weight, 1.0
         ).astype(np.float64)
+        if temporal_decay > 0.0 and "_scan_dt" in cal_df.columns:
+            months_ago_cal = (cal_df["_scan_dt"].max() - cal_df["_scan_dt"]).dt.days / 30.44
+            decay_cal = np.exp(-temporal_decay * months_ago_cal.fillna(0).values)
+            sample_weight_cal = sample_weight_cal * decay_cal
+
+    # ── Pre-training PSI pruning: drop features with severe distribution shift ──
+    # Features that look different in test vs train are unreliable for live inference.
+    # Pruning them before training prevents the model from learning spurious correlations
+    # that only hold in the training regime (e.g. spy_ret60, sector_breadth in bull markets).
+    _psi_pruned_features: list = []
+    if getattr(args, "auto_prune_psi", True) and len(test_df) >= 30:
+        try:
+            sys.path.insert(0, str(ROOT))
+            from tradingagents.portfolio.feature_monitor import FeatureMonitor
+            _fm_pre = FeatureMonitor()
+            _psi_cols = [c for c in numeric if c in train_df.columns and c in test_df.columns]
+            _psi_pre = _fm_pre.compute_psi_report(train_df, test_df, _psi_cols)
+            _psi_pruned_features = [f for f, d in _psi_pre.items() if d.get("status") == "fail"]
+            if _psi_pruned_features:
+                numeric = [f for f in numeric if f not in _psi_pruned_features]
+                print(f"  PSI pre-pruning: dropped {len(_psi_pruned_features)} unstable features "
+                      f"(PSI>0.25): {_psi_pruned_features[:8]}")
+            else:
+                print(f"  PSI pre-pruning: all features stable, no pruning needed")
+        except Exception as _psi_pre_err:
+            print(f"  PSI pre-pruning skipped: {_psi_pre_err}")
 
     x_train, feature_names = _ml_design_matrix(train_df, numeric, categorical)
     x_test, _ = _ml_design_matrix(test_df, numeric, categorical, feature_names)
@@ -529,6 +572,9 @@ def train_models(args) -> dict:
         "models": {},
     }
 
+    y_win_train = train_df["_win_label"].astype(int).to_numpy()
+    y_win_test = test_df["_win_label"].astype(int).to_numpy()
+
     # ── Label distribution diagnostics ───────────────────────────────────────
     # Records class balance and label validity before training.
     # Critical for catching: near-random labels, severe imbalance, degenerate splits.
@@ -576,6 +622,8 @@ def train_models(args) -> dict:
             "ml_large_loss_max": args.ml_large_loss_max,
             "executed_weight": getattr(args, "executed_weight", 1.0),
             "executed_only": getattr(args, "executed_only", False),
+            "psi_pruned_features": _psi_pruned_features,
+            "psi_pruned_count": len(_psi_pruned_features),
         },
         "label_distribution": label_distribution,
         "models": {},
@@ -587,8 +635,6 @@ def train_models(args) -> dict:
           + (f" [{_executed_train:,} executed]" if _executed_train else ""))
 
     # ── Win/loss classifier — ensemble XGBoost + RandomForest when both available
-    y_win_train = train_df["_win_label"].astype(int).to_numpy()
-    y_win_test = test_df["_win_label"].astype(int).to_numpy()
     if len(set(y_win_train)) < 2:
         raise SystemExit("Win/loss labels contain one class only; cannot train classifier.")
 
@@ -887,6 +933,13 @@ def parse_args():
         "--executed-weight", type=float, default=20.0,
         help="Sample weight multiplier for executed (rule-passing) rows vs rejected rows. "
              "0 or 1.0 = no weighting. Default: 20 (executed rows count 20× in training)."
+    )
+    parser.add_argument(
+        "--temporal-decay", type=float, default=0.0,
+        help="Exponential decay rate for temporal sample weighting (0=off). "
+             "λ=0.02: signals 24 months old get 0.62× weight; λ=0.03: 0.49× weight. "
+             "Focuses model on recent market regime. Combine with executed-weight. "
+             "Default 0.0 (uniform weights, backward compat)."
     )
     parser.add_argument(
         "--executed-only", action="store_true", default=False,

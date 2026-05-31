@@ -52,7 +52,11 @@ def _psi_one(ref_vals: np.ndarray, prod_vals: np.ndarray, n_bins: int = 10) -> f
     ref_clean = ref_vals[~np.isnan(ref_vals)]
     prod_clean = prod_vals[~np.isnan(prod_vals)]
 
-    if len(ref_clean) < 20 or len(prod_clean) < 10:
+    # Cycle 44 CR-1: require ≥30 production samples — PSI on a 10-bin histogram is
+    # extremely noisy below that (a single obs moves a bin ~10%), causing false
+    # drift. Below the floor we cannot assess, so return 0.0 (do not flag) and let
+    # the caller treat scarce data as "unknown" rather than a drift signal.
+    if len(ref_clean) < 50 or len(prod_clean) < 30:
         return 0.0  # not enough data to assess
 
     # Bin edges from reference distribution

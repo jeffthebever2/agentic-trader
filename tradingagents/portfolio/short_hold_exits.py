@@ -81,7 +81,7 @@ class ShortHoldExitPlan:
     partial_taken:           bool  = False # set True once partial fires
 
     # --- Risk / reward gate -------------------------------------------------
-    min_rr:                float = 1.5
+    min_rr:                float = 1.2
 
     # --- Live state (updated as price moves) --------------------------------
     trail_stop:            float = 0.0    # current trailing stop (0 = inactive)
@@ -115,7 +115,7 @@ class ShortHoldExitPlan:
         # Validate RR
         stop_dist = entry - stop
         tp_dist   = take_profit - entry
-        min_rr    = float(cfg.get("min_rr", 1.5))
+        min_rr    = float(cfg.get("min_rr", 1.15))  # Cycle 44: match SHORT_HOLD_CONFIG (was 1.5)
         if stop_dist > 0 and tp_dist / stop_dist < min_rr:
             # Stretch take_profit to meet min_rr
             take_profit = entry + stop_dist * min_rr
@@ -132,7 +132,7 @@ class ShortHoldExitPlan:
             breakeven_trigger_atr   = float(cfg.get("breakeven_trigger_atr", 1.0)),
             trail_atr_mult          = float(cfg.get("trail_atr_mult", 0.5)),
             partial_profit_fraction = float(cfg.get("partial_profit_fraction", 0.50)),
-            partial_profit_trigger  = float(cfg.get("partial_profit_trigger", 0.50)),
+            partial_profit_trigger  = float(cfg.get("partial_profit_trigger", 0.833)),  # Cycle 44: match SHORT_HOLD_CONFIG (was 0.50)
             min_rr                  = min_rr,
             trail_stop              = stop,
             peak_price              = entry,
@@ -191,10 +191,13 @@ class ShortHoldExitPlan:
         return self.entry + self.breakeven_trigger_atr * self.atr
 
     def effective_stop(self) -> float:
-        """Current effective stop (trailing if active, else initial)."""
-        if self.trail_active and self.trail_stop > self.stop:
-            return self.trail_stop
-        return self.stop
+        """Current effective stop — the highest of initial and any raised stop.
+
+        Cycle 44 E-12: honor a raised trail_stop even before full trail activation
+        (e.g. the intermediate breakeven lock at +0.6 ATR), not only when
+        trail_active. trail_stop only ever moves up, so max() is safe.
+        """
+        return max(self.stop, self.trail_stop)
 
 
 # ---------------------------------------------------------------------------
@@ -250,13 +253,31 @@ class ShortHoldExitManager:
         import copy
         p = copy.deepcopy(plan)  # work on copy; original stays clean
 
-        # 1. Hard time-based exit
+        # 1. Time-based exit. Cycle 44 E-9: conditional — the profit engine is the
+        # ~44% of trades that time out positive (drift). Dumping a still-green,
+        # still-trending position at the hard day count truncates that right tail.
+        # If green AND near its peak, switch to trail-only and let it run up to a
+        # hard cap (max_hold_days + 5); otherwise close.
         if open_days >= p.max_hold_days:
+            hard_cap = p.max_hold_days + 5
+            trending = (current_price > p.entry) and (current_price >= p.peak_price * 0.995)
+            if trending and open_days < hard_cap:
+                _update_trail(p, current_price)  # protect with trail, then hold
+                return ExitCheckResult(
+                    signal         = ExitSignal.HOLD,
+                    exit_price     = current_price,
+                    close_fraction = 0.0,
+                    reason         = (
+                        f"max_hold extended (green & trending): price={current_price:.2f} "
+                        f"days={open_days} < hard_cap={hard_cap}, trail_stop={p.effective_stop():.2f}"
+                    ),
+                    updated_plan   = p,
+                )
             return ExitCheckResult(
                 signal         = ExitSignal.MAX_HOLD,
                 exit_price     = current_price,
                 close_fraction = 1.0,
-                reason         = f"max_hold_days={p.max_hold_days} reached (open_days={open_days})",
+                reason         = f"max_hold reached (open_days={open_days}, not trending)",
                 updated_plan   = p,
             )
 
@@ -345,6 +366,13 @@ def _update_trail(plan: ShortHoldExitPlan, current_price: float) -> None:
     # Update peak
     if current_price > plan.peak_price:
         plan.peak_price = current_price
+
+    # Cycle 44 E-12: intermediate breakeven. Lock the stop to entry once price
+    # reaches +0.6 ATR, before full trail activation at the breakeven trigger
+    # (default +1.0 ATR). Removes the fully-exposed entry→+1ATR "dead zone" where a
+    # near-target runner could round-trip to a full stop-loss.
+    if not plan.trail_active and current_price >= plan.entry + 0.6 * plan.atr:
+        plan.trail_stop = max(plan.trail_stop, plan.entry)
 
     # Activate trail once price exceeds breakeven trigger
     if not plan.trail_active and current_price >= plan.breakeven_trigger_price:

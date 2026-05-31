@@ -231,10 +231,11 @@ class DataHealthChecker:
         sample_size: int = 20,
     ) -> Dict[str, Any]:
         """Check a sample of tickers from precomputed dict. Returns summary."""
-        import random
-        tickers = list(data.keys())
+        # Cycle 44 V-20: deterministic sample (sorted, not random) so the data-health
+        # verdict is reproducible across runs instead of intermittently halting.
+        tickers = sorted(data.keys())
         if len(tickers) > sample_size:
-            tickers = random.sample(tickers, sample_size)
+            tickers = tickers[:sample_size]
 
         results = []
         stale_count = 0
@@ -263,7 +264,9 @@ class DataHealthChecker:
             "high_nan_count": high_nan_count,
             "abnormal_count": abnormal_count,
             "avg_nan_rate": round(avg_nan, 4),
-            "critical": stale_count > 0 or high_nan_count > n * 0.5,
+            # Cycle 44 V-20: halt only when a FRACTION of the book is stale (>20%),
+            # not on a single stale ticker (commonly one halted/holiday name).
+            "critical": stale_count > max(1, int(0.20 * n)) or high_nan_count > n * 0.5,
             "ticker_results": results[:5],  # store first 5 for report
         }
 
@@ -334,8 +337,13 @@ class ModelHealthChecker:
         result["created_at"] = created_at
         if created_at:
             try:
+                # Cycle 44 V-16: tz-aware compare in UTC and clamp age>=0 so a
+                # UTC-stamped or future-dated model can't skew/under-report age.
                 created_dt = dt.datetime.fromisoformat(str(created_at)[:19])
-                age = (dt.datetime.now() - created_dt).days
+                now_dt = dt.datetime.now()
+                if created_dt.tzinfo is not None:
+                    created_dt = created_dt.astimezone().replace(tzinfo=None)
+                age = max(0, (now_dt - created_dt).days)
                 result["age_days"] = age
                 if age > self.max_age_days:
                     result["halt_reasons"].append(
@@ -359,9 +367,13 @@ class ModelHealthChecker:
                 cal_dt = dt.datetime.fromisoformat(str(cal_date)[:19])
                 cal_age = (dt.datetime.now() - cal_dt).days
                 result["calibration_age_days"] = cal_age
-                if cal_age > self.max_age_days + 15:
+                # Cycle 44 V-23: probability calibration decays faster than model
+                # relevance; use an independent (shorter) staleness threshold rather
+                # than max_age_days+15 (~60d).
+                cal_stale_days = int(self.cfg.get("max_calibration_age_days", 25)) if hasattr(self, "cfg") else 25
+                if cal_age > cal_stale_days:
                     result["warn_reasons"].append(
-                        f"WARN_calibration_stale: {cal_age}d since last calibration"
+                        f"WARN_calibration_stale: {cal_age}d > {cal_stale_days}d since last calibration"
                     )
             except Exception:
                 pass
@@ -394,7 +406,15 @@ class ModelHealthChecker:
                 brier = val_data.get("brier_score") or val_data.get("model_brier")
                 result["roc_auc"] = roc
                 result["brier"] = brier
-                if roc is not None and float(roc) < 0.52:
+                if roc is not None and float(roc) < 0.45:
+                    # Cycle 44 V-22: hard halt for a clearly anti-predictive model.
+                    # Floor set at 0.45 (well below the deployed model's test ROC ~0.49
+                    # and WF ROC 0.5121) so it catches catastrophic degradation without
+                    # halting the current model whose trusted safeguard is the ll head.
+                    result["halt_reasons"].append(
+                        f"model_roc_broken: roc_auc={float(roc):.3f} < 0.45 (anti-predictive)"
+                    )
+                elif roc is not None and float(roc) < 0.52:
                     result["warn_reasons"].append(
                         f"WARN_low_roc: roc_auc={roc:.3f} < 0.52 (weak discrimination)"
                     )
@@ -477,20 +497,43 @@ class ProductionSafetyMonitor:
         trades = getattr(account, "trades", [])
         starting_cash = getattr(account, "starting_cash", account_value) or account_value
 
-        # Daily PnL
+        # Open-position mark-to-market (Cycle 44 V-18): loss limits were blind to
+        # open losers, so the daily/weekly breaker could be bypassed by holding
+        # losing positions open during a selloff. Fold unrealized PnL in.
+        open_unrealized = 0.0
+        for pos in getattr(account, "positions", {}).values():
+            try:
+                shares = float(getattr(pos, "shares", 0) or 0)
+                entry_px = float(getattr(pos, "entry_price", 0) or 0)
+                px = float(prices.get(getattr(pos, "ticker", ""), entry_px) or entry_px)
+                open_unrealized += shares * (px - entry_px)
+            except (TypeError, ValueError):
+                continue
+
+        # Daily PnL (realized today + all open MTM, conservative for a breaker)
         today_pnl = sum(
             float(t.get("pnl", 0)) for t in trades
             if str(t.get("exit_time", ""))[:10] == today_str
-        )
+        ) + open_unrealized
 
         # Weekly PnL
         weekly_pnl = sum(
             float(t.get("pnl", 0)) for t in trades
             if str(t.get("exit_time", ""))[:10] >= week_start
-        )
+        ) + open_unrealized
 
-        # Account drawdown from peak
-        peak = max(starting_cash, account_value)
+        # Account drawdown from a persisted running high-water mark (Cycle 44 V-17).
+        # Previously peak=max(start, current), so any profitable run reset the peak
+        # and the drawdown halt under-reported (or never fired) after a pullback.
+        peak = max(
+            float(getattr(account, "peak_equity", 0.0) or 0.0),
+            starting_cash,
+            account_value,
+        )
+        try:
+            account.peak_equity = peak  # persist HWM forward (account is saved each run)
+        except Exception:
+            pass
         drawdown = (account_value - peak) / max(peak, 1.0)
 
         # Consecutive losses (most recent trades)
@@ -625,10 +668,19 @@ class ProductionSafetyMonitor:
         batch = checker.check_batch(precomputed, now=now)
         health = {"checked": True, **batch}
 
-        if batch.get("stale_count", 0) > 0:
+        # Cycle 44 V-20: halt only when >20% of the sampled book is stale, not on a
+        # single stale ticker (often one halted/holiday name). A single stale ticker
+        # should be excluded from candidates, not block the whole run.
+        _n_checked = batch.get("n_checked", 1) or 1
+        _stale = batch.get("stale_count", 0)
+        if _stale > max(1, int(0.20 * _n_checked)):
             halt.append(
-                f"data_stale: {batch['stale_count']}/{batch['n_checked']} tickers "
+                f"data_stale: {_stale}/{_n_checked} tickers (>20%) "
                 f"have data older than {max_stale}h"
+            )
+        elif _stale > 0:
+            warn.append(
+                f"WARN_data_stale: {_stale}/{_n_checked} stale ticker(s) — excluded, not halting"
             )
         if batch.get("high_nan_count", 0) > batch.get("n_checked", 1) * 0.5:
             halt.append(
@@ -818,6 +870,24 @@ class ProductionSafetyMonitor:
         all_halt.extend(mc_halt)
         all_warn.extend(mc_warn)
         gates_active.extend([r.split(":")[0] for r in mc_halt + mc_warn])
+
+        # ── 6. Candidate confidence floor (Cycle 44 V-21) ─────────────────
+        # Previously `candidates` was accepted but ignored. Warn (config intent)
+        # when no candidate clears the model-confidence floor — a low-quality slate.
+        if candidates:
+            floor = float(cfg.get("min_model_confidence_floor", 0.52))
+            best_conf = 0.0
+            for c in candidates:
+                try:
+                    best_conf = max(best_conf, float(getattr(c, "ml_probability", 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    continue
+            if best_conf < floor:
+                all_warn.append(
+                    f"WARN_low_slate_confidence: best candidate ml_prob={best_conf:.3f} "
+                    f"< floor {floor} (no high-confidence setups this cycle)"
+                )
+                gates_active.append("low_slate_confidence")
 
         # Deduplicate gates_active
         gates_active = list(dict.fromkeys(g for g in gates_active if g))

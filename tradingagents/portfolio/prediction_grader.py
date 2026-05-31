@@ -154,22 +154,34 @@ class PredictionGrader:
         try:
             ticker = str(sell_ev.get("ticker", buy_ev.get("ticker", "?")))
 
-            # ── Prediction fields from BUY ────────────────────────────────
-            pred_wp = float(buy_ev.get("ml_probability", buy_ev.get("ml_prob", 0.50)) or 0.50)
-            pred_ret = float(buy_ev.get("expected_return", 0.0) or 0.0)
-            pred_ll = float(buy_ev.get("large_loss_probability", buy_ev.get("large_loss_prob", 0.0)) or 0.0)
-            alpha_tier = str(buy_ev.get("alpha_tier", buy_ev.get("tier", "C")))
-            alpha_score = float(buy_ev.get("alpha_score", 0.0) or 0.0)
-            breakout_score = float(buy_ev.get("breakout_score", 0.0) or 0.0)
-            regime_entry = str(buy_ev.get("regime_at_entry", buy_ev.get("spy_regime", "unknown")))
-            model_version = str(buy_ev.get("model_version", "unknown"))
+            # ── Prediction fields from BUY (Cycle 44 GC-4: fall back to SELL ──
+            # event, which carries large_loss_probability / alpha_tier /
+            # regime_at_entry / model_version; the BUY payload often omits them, so
+            # grading on BUY-only collapsed every trade to tier "C" / "unknown").
+            def _pred(key, *aliases, default=None):
+                for k in (key, *aliases):
+                    if k in buy_ev and buy_ev[k] is not None:
+                        return buy_ev[k]
+                for k in (key, *aliases):
+                    if k in sell_ev and sell_ev[k] is not None:
+                        return sell_ev[k]
+                return default
+            pred_wp = float(_pred("ml_probability", "ml_prob", default=0.50) or 0.50)
+            pred_ret = float(_pred("expected_return", default=0.0) or 0.0)
+            pred_ll = float(_pred("large_loss_probability", "large_loss_prob", default=0.0) or 0.0)
+            alpha_tier = str(_pred("alpha_tier", "tier", default="C"))
+            alpha_score = float(_pred("alpha_score", default=0.0) or 0.0)
+            breakout_score = float(_pred("breakout_score", default=0.0) or 0.0)
+            regime_entry = str(_pred("regime_at_entry", "spy_regime", default="unknown"))
+            model_version = str(_pred("model_version", default="unknown"))
             entry_time = str(buy_ev.get("timestamp", buy_ev.get("entry_time", "")))
 
             # ── Actual outcome fields from SELL ───────────────────────────
+            # Cycle 44 GC-5: emitters write pnl_pct as a fraction (e.g. 0.031). The
+            # old `if abs>2.0: /100` heuristic would silently divide a genuine +250%
+            # winner (2.5) down to 0.025 — corrupting exactly the trades that matter
+            # most. Trust the fraction at source; no magnitude guess.
             pnl_pct = float(sell_ev.get("pnl_pct", sell_ev.get("return_pct", 0.0)) or 0.0)
-            # pnl_pct may be expressed as 0.031 (fraction) or 3.1 (pct) — normalise
-            if abs(pnl_pct) > 2.0:
-                pnl_pct = pnl_pct / 100.0
             actual_win = pnl_pct > 0
             actual_ret = pnl_pct
 
@@ -178,8 +190,12 @@ class PredictionGrader:
             if max_dd_pct > 0:
                 max_dd_pct = -max_dd_pct  # normalise to negative
 
-            stop_hit = bool(sell_ev.get("stop_hit", sell_ev.get("exit_reason", "") == "stop"))
-            target_hit = bool(sell_ev.get("target_hit", sell_ev.get("exit_reason", "") in ("target", "take_profit")))
+            # Cycle 44 GC-2: normalize exit_reason (emitters use STOP_LOSS /
+            # TAKE_PROFIT, the grader matched lowercase "stop"/"target") so
+            # stop_rate / target_rate stop collapsing to zero.
+            _er = str(sell_ev.get("exit_reason", "")).upper()
+            stop_hit = bool(sell_ev.get("stop_hit", "STOP" in _er))
+            target_hit = bool(sell_ev.get("target_hit", ("TARGET" in _er or "TAKE_PROFIT" in _er)))
             regime_exit = str(sell_ev.get("regime_at_exit", sell_ev.get("spy_regime", "unknown")))
 
             # Hold time
@@ -214,7 +230,10 @@ class PredictionGrader:
             else:
                 ret_bucket = "gain"
 
-            trade_id = f"{ticker}_{entry_time[:10]}"
+            # Cycle 44 GC-6: include full entry timestamp (to the second), not just
+            # the date, so two same-day round-trips of one ticker get distinct ids
+            # instead of the second being dropped by the save() dedup.
+            trade_id = f"{ticker}_{entry_time[:19]}" if entry_time else f"{ticker}_{exit_time_str[:19]}"
             graded_at = dt.datetime.now().isoformat()
 
             return GradeResult(

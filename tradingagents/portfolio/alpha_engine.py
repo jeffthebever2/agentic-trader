@@ -3,16 +3,21 @@
 Combines all candidate quality signals into one alpha_score and a tier label
 (A+/A/B/C/NO_TRADE) that drives position sizing and entry decisions.
 
-Formula
+Formula (Cycle 38 — win_prob removed, WF HC WR=39.5% anti-predictive on 679 OOS rows)
 -------
-              win_prob × er_boost × tbs_prob × regime_score × breakout_boost
-alpha_score = ─────────────────────────────────────────────────────────────── × ticker_rel × feedback_mult
-              1 + ll_penalty + vol_penalty + timeout_penalty + corr_penalty + liq_penalty
+              regime_score × breakout_boost
+alpha_score = ────────────────────────────── × ticker_rel × feedback_mult
+              1 + ll_penalty + vol_penalty + corr_penalty + liq_penalty
 
-Tier thresholds (not optimised on holdout — set by judgment):
-  A+   : alpha ≥ 0.40 AND win_prob ≥ 0.68 AND regime_score ≥ 0.70 AND breakout_score ≥ 65
-  A    : alpha ≥ 0.25 AND win_prob ≥ 0.60
-  B    : alpha ≥ 0.12 AND win_prob ≥ 0.52
+win_prob removed: current model WF HC WR=39.5% < 54.2% base at threshold=0.6 (679 OOS rows).
+Restore when: WF ROC > 0.55 AND WF HC WR > base WR (new geometry model needed).
+ll_penalty: large_loss model ROC=0.73 (strong, retained in denominator).
+
+Tier thresholds (Cycle 38 — recalibrated for reg_score-only alpha range ~0.28–0.79):
+  win_prob removed (anti-predictive). New formula: alpha = reg_score × breakout_boost / denominator.
+  A+   : alpha ≥ 0.72 AND regime_score ≥ 0.85 (strong bull + low ll risk)
+  A    : alpha ≥ 0.55 (bull regime or moderate with low ll)
+  B    : alpha ≥ 0.38 (sideways or weak regime)
   C    : otherwise (reject entry)
   NO_TRADE: regime.no_trade or crash_risk_score > 0.70
 
@@ -31,15 +36,28 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
-# ── Tier thresholds (knowledge-based, not back-fitted) ────────────────────────
+# ── Tier thresholds ─────────────────────────────────────────────────────────
+# Cycle 38: win_prob removed from numerator (anti-predictive, WF HC WR=39.5% vs 54.2% base).
+# New formula: alpha = reg_score × breakout_boost / denominator
+# New alpha range (ll_penalty_scale=1.5, no vol penalty):
+#   bull (reg=0.85), ll=0.05 → 0.85/1.075 = 0.791
+#   bull (reg=0.85), ll=0.15 → 0.85/1.225 = 0.694
+#   moderate (reg=0.75), ll=0.05 → 0.75/1.075 = 0.698
+#   sideways (reg=0.60), ll=0.15 → 0.60/1.225 = 0.490
+#   bear (reg=0.30), ll=0.05 → 0.30/1.075 = 0.279
+# A+ = strong bull + low ll risk. A = bull or moderate. B = sideways. C = bear/reject.
 TIER_THRESHOLDS: Dict[str, Dict[str, float]] = {
-    "A+": {"alpha": 0.40, "win_prob": 0.68, "regime_score": 0.70, "breakout_score": 65.0},
-    "A":  {"alpha": 0.25, "win_prob": 0.60},
-    "B":  {"alpha": 0.12, "win_prob": 0.52},
+    # A+: requires strong-bull regime (≥0.85) + low ll risk → alpha naturally >= 0.72
+    # A: bull regime with any ll risk, or moderate regime with low ll → alpha >= 0.55
+    # B: sideways or weak regime → alpha >= 0.38
+    "A+": {"alpha": 0.72, "win_prob": 0.0, "regime_score": 0.85, "breakout_score": 0.0},
+    "A":  {"alpha": 0.55, "win_prob": 0.0},
+    "B":  {"alpha": 0.38, "win_prob": 0.0},
 }
 
 TIER_SIZE_MULT: Dict[str, float] = {
-    "A+": 1.50,
+    # A+ = regime-quality + ll-safe signals. 1.25× maintained until paper trade evidence.
+    "A+": 1.25,
     "A":  1.00,
     "B":  0.50,
     "C":  0.00,
@@ -120,11 +138,11 @@ class AlphaEngine:
     Parameters
     ----------
     ll_hard_cap : float
-        Reject candidates where large_loss_probability > this. Default 0.35.
+        Reject candidates where large_loss_probability > this. Default 0.50.
     min_win_prob : float
-        Reject candidates where win_probability < this. Default 0.50.
+        Reject candidates where win_probability < this. Default 0.55.
     min_risk_reward : float
-        Reject candidates where risk_reward < this. Default 1.0.
+        Reject candidates where risk_reward < this. Default 1.2 (screener R:R=1.71).
     vol_penalty_threshold : float
         ATR% above this incurs a volatility penalty. Default 0.03 (3%).
     vol_penalty_scale : float
@@ -145,10 +163,10 @@ class AlphaEngine:
 
     def __init__(
         self,
-        ll_hard_cap: float = 0.35,
-        min_win_prob: float = 0.50,
-        min_risk_reward: float = 1.0,
-        vol_penalty_threshold: float = 0.03,
+        ll_hard_cap: float = 0.50,
+        min_win_prob: float = 0.0,   # disabled: ROC=0.4684 < 0.5 (anti-predictive). Re-enable after Cycle 17.
+        min_risk_reward: float = 1.15,  # Cycle 44: screener now R:R=1.2/1.0=1.20; floor 1.15 so cent-rounded signals pass
+        vol_penalty_threshold: float = 0.04,  # raised from 0.03: ATR 3-4% consistently better (5/6 years), penalty was unfair
         vol_penalty_scale: float = 1.0,
         ll_penalty_scale: float = 1.5,
         timeout_penalty_scale: float = 0.3,
@@ -283,7 +301,14 @@ class AlphaEngine:
             )
 
         # ── Hard gate: minimum risk/reward ──────────────────────────────────
-        if self.min_risk_reward > 0 and risk_reward > 0 and risk_reward < self.min_risk_reward:
+        # Cycle 44: enforce min R:R for any PRICED candidate, including the malformed
+        # rr<=0 case (stop above entry). Previously `risk_reward > 0` let zero-R:R
+        # candidates bypass the gate. Unpriced candidates (entry/stop/target=0) skip it.
+        if (
+            self.min_risk_reward > 0
+            and entry_price > 0 and stop_price > 0 and target_price > 0
+            and risk_reward < self.min_risk_reward
+        ):
             return self._rejected(
                 "C", ticker,
                 f"risk_reward={risk_reward:.2f} < min {self.min_risk_reward}",
@@ -292,10 +317,6 @@ class AlphaEngine:
             )
 
         # ── Compute factors ─────────────────────────────────────────────────
-
-        # Expected return boost: er=0 → 1.0×, er=1.0 → 2.0×, er=-0.5 → 0.5×
-        er_clipped = max(-0.5, min(self.er_clip_max, expected_ret))
-        er_boost   = 1.0 + er_clipped
 
         # Breakout boost: score=0 → 1.0×, score=100 → (1 + breakout_max_boost)×
         breakout_boost = 1.0 + (breakout_score / 100.0) * self.breakout_max_boost
@@ -308,7 +329,7 @@ class AlphaEngine:
             excess_atr / max(self.vol_penalty_threshold, 0.001) * self.vol_penalty_scale
         )
 
-        timeout_penalty = timeout * self.timeout_penalty_scale
+        # timeout_penalty neutralized: timeout model ROC=0.4023 (anti-predictive, penalizes wrong signals)
         corr_penalty    = self.corr_penalty_val if is_correlated else 0.0
         liq_penalty     = (
             self.liq_penalty_val
@@ -316,12 +337,13 @@ class AlphaEngine:
             else 0.0
         )
 
-        # Numerator
-        numerator = win_prob * er_boost * tbs * reg_score * breakout_boost
+        # Numerator: Cycle 38 — win_prob removed (WF HC WR=39.5% anti-predictive on 679 OOS rows).
+        # Restore when WF ROC > 0.55 AND WF HC WR > base WR after new-geometry retrain.
+        numerator = reg_score * breakout_boost
 
-        # Denominator
+        # Denominator (timeout_penalty removed — model ROC=0.4023, anti-predictive)
         denominator = max(
-            1.0 + ll_penalty + vol_penalty + timeout_penalty + corr_penalty + liq_penalty,
+            1.0 + ll_penalty + vol_penalty + corr_penalty + liq_penalty,
             0.01,
         )
 
@@ -335,6 +357,7 @@ class AlphaEngine:
             rel_mult = 0.60 + (ticker_reliability - 0.40) / 0.25 * 0.40  # [0.60, 1.00]
         else:
             rel_mult = 0.50  # max penalty
+        rel_mult = max(0.50, min(1.10, rel_mult))  # Cycle 44: clamp to design range (guards reliability>1.0)
 
         alpha_score = raw_alpha * rel_mult * feedback_mult
 
@@ -351,7 +374,7 @@ class AlphaEngine:
             rejection_reason="" if tier not in ("C", "NO_TRADE") else f"tier={tier}",
             win_prob=win_prob,
             expected_return=expected_ret,
-            er_boost=er_boost,
+            er_boost=1.0,         # neutralized: ER model R²=0.012 (Cycle 25)
             tbs_prob=tbs,
             timeout_prob=timeout,
             large_loss_prob=large_loss,
@@ -363,16 +386,16 @@ class AlphaEngine:
             feedback_mult=feedback_mult,
             ll_penalty=ll_penalty,
             vol_penalty=vol_penalty,
-            timeout_penalty=timeout_penalty,
+            timeout_penalty=0.0,  # neutralized: timeout model ROC=0.4023 (Cycle 25)
             corr_penalty=corr_penalty,
             liq_penalty=liq_penalty,
             numerator=numerator,
             denominator=denominator,
             audit={
-                "win_prob": win_prob, "er_boost": er_boost, "tbs": tbs,
+                "win_prob": win_prob, "er_boost": 1.0, "tbs": tbs,
                 "reg_score": reg_score, "breakout_boost": breakout_boost,
                 "numerator": numerator, "ll_penalty": ll_penalty,
-                "vol_penalty": vol_penalty, "timeout_penalty": timeout_penalty,
+                "vol_penalty": vol_penalty, "timeout_penalty": 0.0,
                 "corr_penalty": corr_penalty, "liq_penalty": liq_penalty,
                 "denominator": denominator, "raw_alpha": raw_alpha,
                 "rel_mult": rel_mult, "feedback_mult": feedback_mult,

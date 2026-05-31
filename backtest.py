@@ -629,8 +629,8 @@ def score_at(pc: dict, df: pd.DataFrame, pos: int,
             gates_failed.append("price_not_5_500")
         if dollar_vol20 <= 5_000_000:
             gates_failed.append("dollar_volume_below_5m")
-        if not (0.005 <= atr_pct <= 0.08):
-            gates_failed.append("atr_pct_not_0p5_to_8")
+        if not (0.015 <= atr_pct <= 0.08):
+            gates_failed.append("atr_pct_not_1p5_to_8")
         if not (spy_close and spy_sma50 and spy_sma200
                 and spy_close > spy_sma50 and spy_close > spy_sma200):
             gates_failed.append("spy_not_above_50_200")
@@ -655,12 +655,23 @@ def score_at(pc: dict, df: pd.DataFrame, pos: int,
         sig["pct_from_10d_high"] = round(pct_high, 4) if pct_high is not None else None
         if pct_high is None or not (-0.08 <= pct_high <= -0.02):
             gates_failed.append("not_2_to_8pct_below_10d_high")
-        # Tighter RSI band: 39-52 = healthy pullback, not extreme oversold or barely dipped
-        if not (39 <= rsi9 <= 52):
-            gates_failed.append("rsi9_not_39_52")
+        # RSI9 gate: 44-52 = healthy pullback recovery. Below 44 = deeper oversold = 45% stop rate vs 36% for 44+.
+        # Evidence (non-Monday, n=1047): rsi9<44 stop_hit=45.0% vs rsi9>=44 stop_hit=35.9%. Gap consistent 6/6 years.
+        if not (44 <= rsi9 <= 52):
+            gates_failed.append("rsi9_not_44_52")
         cci_prev = float(pc["cci14"].iloc[pos - 1]) if pos > 0 and pd.notna(pc["cci14"].iloc[pos - 1]) else None
         if cci14_val is None or cci_prev is None or cci14_val <= cci_prev:
             gates_failed.append("cci14_not_improving")
+        # CCI floor: reject if yesterday's CCI < -100 (deep oversold = breakdown, not pullback).
+        # Evidence: cci14_prev < -100 → WR=47.0% E=-0.515%/trade (n=598, z=-4.2, p<0.0001).
+        # cci14_prev >= -100 → WR=57.7% E=+0.074%/trade. Effect consistent 2019-2026.
+        if cci_prev is not None and cci_prev < -100:
+            gates_failed.append("cci14_prev_too_low")
+        # CCI daily jump cap: reject if CCI improved >25pts in one day (bounce-pop, not steady recovery).
+        # Evidence (cu1 data, n=1554): cci_change<=10 WR=63.8%%, <=25 WR=60.0%%, all WR=58.6%%.
+        # Spearman r=-0.07 p=0.006 (significant). Keeps 68.1%% of signals.
+        if cci14_val is not None and cci_prev is not None and (cci14_val - cci_prev) > 25:
+            gates_failed.append("cci14_jump_too_large")
         macd_prev1 = float(pc["macd_hist"].iloc[pos - 1]) if pos > 0 and pd.notna(pc["macd_hist"].iloc[pos - 1]) else None
         macd_prev2 = float(pc["macd_hist"].iloc[pos - 2]) if pos > 1 and pd.notna(pc["macd_hist"].iloc[pos - 2]) else None
         if macd_prev1 is None or macd_prev2 is None or not (macd_h > macd_prev1 > macd_prev2):
@@ -695,6 +706,11 @@ def score_at(pc: dict, df: pd.DataFrame, pos: int,
             sig["stock_regime"] = "unknown"
         sig["vix_1d_chg"] = round(vix_1d_chg, 4) if vix_1d_chg is not None else None
         sig["cci14_prev"] = round(cci_prev, 2) if cci_prev is not None else None
+        # Cycle 34 derived signals
+        if cci14_val is not None and cci_prev is not None:
+            sig["cci_change_today"] = round(cci14_val - cci_prev, 2)
+        if price > 0:
+            sig["atr_high_2pct"] = 1.0 if (atr / price) > 0.02 else 0.0
         sig["macd_hist_prev1"] = round(macd_prev1, 4) if macd_prev1 is not None else None
         sig["macd_hist_prev2"] = round(macd_prev2, 4) if macd_prev2 is not None else None
         # ── Additional features (were in ML_NUMERIC_FEATURES but missing from sig dict) ──
@@ -1955,6 +1971,11 @@ ML_NUMERIC_FEATURES = [
     # Derived ratio features (computed in _ml_prepare_frame)
     "rsi_spread",   # rsi14 - rsi9: momentum divergence between time frames
     "vol_accel",    # vol_ratio_10d / vol_ratio_20d: short vs medium volume surge
+    # MACD histogram trajectory (3-point series: prev2, prev1, today)
+    # macd_hist_slope3 captures rate-of-change; prev values capture absolute level trajectory
+    "macd_hist_prev1",   # MACD histogram yesterday: confirms momentum direction
+    "macd_hist_prev2",   # MACD histogram 2 days ago: enables acceleration detection
+    "macd_hist_accel",   # Second derivative of MACD hist: today - 2*prev1 + prev2 (acceleration)
     # Momentum slope and market microstructure features
     "rsi9_slope3",       # RSI9 change over 3 days: positive = recovering from oversold
     "macd_hist_slope3",  # MACD histogram slope: positive = building upward momentum
@@ -1981,6 +2002,9 @@ ML_NUMERIC_FEATURES = [
     "crash_risk_score",  # MarketRegimeEngine.crash_risk_score [0,1] tail-risk proxy
     "risk_on_score",     # breadth × above_sma200 × (1 - vol_expansion)
     "risk_off_score",    # (1 - breadth) × vol_expansion × 0.5
+    # ── New derived features (Cycle 34) ──────────────────────────────────
+    "cci_change_today",  # cci14 - cci14_prev: daily CCI improvement magnitude (Spearman r=-0.07 p=0.006; smaller=better)
+    "atr_high_2pct",     # atr_pct > 0.02 binary: higher-ATR stocks → larger bounces (PSI-stable, r=0.09 p=0.0003)
 ]
 
 ML_CATEGORICAL_FEATURES = [
@@ -2076,6 +2100,11 @@ def _ml_prepare_frame(rows_df: pd.DataFrame, hold: int) -> tuple:
         df["vol_accel"] = v10 / v20.replace(0, np.nan)
     if "macd_hist" in df.columns and "macd_hist_prev2" in df.columns:
         df["macd_hist_slope3"] = pd.to_numeric(df["macd_hist"], errors="coerce") - pd.to_numeric(df["macd_hist_prev2"], errors="coerce")
+    if "macd_hist" in df.columns and "macd_hist_prev1" in df.columns and "macd_hist_prev2" in df.columns:
+        h0 = pd.to_numeric(df["macd_hist"], errors="coerce")
+        h1 = pd.to_numeric(df["macd_hist_prev1"], errors="coerce")
+        h2 = pd.to_numeric(df["macd_hist_prev2"], errors="coerce")
+        df["macd_hist_accel"] = h0 - 2 * h1 + h2  # 2nd derivative: +ve = accelerating improvement
 
     # Knowledge-based trend quality features
     entry_price = pd.to_numeric(df.get("entry") if "entry" in df.columns else df.get("h1_entry", None), errors="coerce")
@@ -2106,6 +2135,19 @@ def _ml_prepare_frame(rows_df: pd.DataFrame, hold: int) -> tuple:
         _stop_dist = (_entry - _stop).clip(lower=0.001)
         df["setup_rr"] = ((_target - _entry) / _stop_dist).clip(-1.0, 10.0)
 
+    # Cycle 34 derived features
+    if "cci14" in df.columns and "cci14_prev" in df.columns:
+        _cci = pd.to_numeric(df["cci14"], errors="coerce")
+        _cci_prev = pd.to_numeric(df["cci14_prev"], errors="coerce")
+        df["cci_change_today"] = (_cci - _cci_prev).clip(-200.0, 200.0)
+    if "atr_pct" in df.columns:
+        df["atr_high_2pct"] = (pd.to_numeric(df["atr_pct"], errors="coerce") > 0.02).astype(float)
+    elif "atr" in df.columns and "entry" in df.columns:
+        _entry_p = pd.to_numeric(df.get("entry", df.get("h10_entry", pd.Series())), errors="coerce")
+        _atr = pd.to_numeric(df["atr"], errors="coerce")
+        if len(_entry_p) > 0 and _entry_p.notna().any():
+            df["atr_high_2pct"] = ((_atr / _entry_p.replace(0, np.nan)) > 0.02).astype(float)
+
     numeric = [c for c in ML_NUMERIC_FEATURES if c in df.columns]
     for col in numeric:
         df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -2119,7 +2161,7 @@ def _ml_prepare_frame(rows_df: pd.DataFrame, hold: int) -> tuple:
             f"h{hold}_outcome", f"h{hold}_return", f"h{hold}_mae", f"h{hold}_mfe",
             "h3_return", "h5_return", "h5_outcome", "h10_return",
             "rejection_reasons"] + numeric + categorical
-    keep = [c for c in keep if c in df.columns]
+    keep = list(dict.fromkeys(c for c in keep if c in df.columns))
     df = df[keep].dropna(subset=["_scan_dt", "_return"])
     return df, numeric, categorical
 
@@ -2887,10 +2929,14 @@ def _run_ml_analysis(trades_df: pd.DataFrame, rejected_rows: list, hold: int,
     frame = frame.sort_values("_scan_dt").reset_index(drop=True)
 
     if ml_walk_forward:
+        # Walk-forward requires valid outcome labels — rows with NaN _return
+        # (rejected_rows without measured outcomes) cause single-class fold
+        # failures. Filter to only rows with non-NaN _return for walk-forward.
+        wf_frame = frame.dropna(subset=["_return"]).reset_index(drop=True)
         # Leak-free path: out-of-sample win/loss probs via purged expanding
         # walk-forward, then the SAME account engine on the OOS trades.
         oos_df, wf_win, wf_loss, wf_expected_return = _ml_purged_walk_forward(
-            frame, numeric, categorical, hold,
+            wf_frame, numeric, categorical, hold,
             min_train_rows=int(ml_wf_min_train),
             step_days=int(ml_wf_step_days),
         )
@@ -3224,6 +3270,7 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
     max_price    = getattr(args, "max_price", None)
     max_atr_pct  = getattr(args, "max_atr_pct", None)
     min_adv      = getattr(args, "min_adv", None)
+    min_rr_filter = getattr(args, "min_risk_reward", 0.0)
     allow_friday = getattr(args, "allow_friday", False)
     threshold    = args.threshold
     target_mult  = args.target_mult
@@ -3292,6 +3339,10 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
                 continue
             if not allow_friday and df_idx[pos].dayofweek == 4:
                 continue
+            if getattr(args, "skip_thursday", False) and df_idx[pos].dayofweek == 3:
+                continue
+            if getattr(args, "skip_monday", False) and df_idx[pos].dayofweek == 0:
+                continue
 
             total_scored += 1
 
@@ -3343,13 +3394,16 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
                     _spy_abv200 = 1.0 if spy_close > spy_sma200 else 0.0
                     _spy_golden = 1.0 if spy_sma50 > spy_sma200  else 0.0
 
-            # VIX-based regime features: vix_20d_zscore, vol_expansion
-            _vix_20d_zscore = _vol_expansion = None
+            # VIX-based regime features: vix_20d_zscore, vol_expansion, vix_1d_chg
+            _vix_20d_zscore = _vol_expansion = _vix_1d_chg = None
             if vix_raw_df is not None:
                 try:
                     vi_gate = vix_raw_df.index.searchsorted(date_ts, side="right") - 1
                     if vi_gate >= 20:
-                        _vix_close_now = float(vix_raw_df["Close"].iloc[vi_gate])
+                        _vix_close_now  = float(vix_raw_df["Close"].iloc[vi_gate])
+                        _vix_close_prev = float(vix_raw_df["Close"].iloc[vi_gate - 1])
+                        if _vix_close_prev > 0:
+                            _vix_1d_chg = round((_vix_close_now - _vix_close_prev) / _vix_close_prev, 4)
                         _vix_20d_slice = vix_raw_df["Close"].iloc[max(0, vi_gate - 19):vi_gate + 1]
                         _vix_20d_mean  = float(_vix_20d_slice.mean())
                         _vix_20d_std   = float(_vix_20d_slice.std(ddof=1))
@@ -3385,6 +3439,7 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
             if _spy_golden is not None:   signals["spy_golden_cross"]   = _spy_golden
             if _vix_20d_zscore is not None: signals["vix_20d_zscore"]   = _vix_20d_zscore
             if _vol_expansion is not None:  signals["vol_expansion"]    = _vol_expansion
+            if _vix_1d_chg is not None:     signals["vix_1d_chg"]       = _vix_1d_chg
             # Regime engine scores (precomputed once per scan date)
             _rmap = _regime_score_map.get(str(date_ts.date()), {})
             if _rmap:
@@ -3413,10 +3468,32 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
                 if atr_pct is not None and atr_pct > max_atr_pct:
                     rejection_reasons.append("atr_pct_filter")
 
+            # Extended bounce filter: skip entry on 2nd+ consecutive up day.
+            # Evidence: consec_up>=2 trades have E=+0.057-0.157% vs +0.530% for <=1.
+            if getattr(args, "skip_extended_bounce", True):
+                _cu = int(signals.get("consec_up") or 0)
+                if _cu >= 2:
+                    rejection_reasons.append("extended_bounce")
+
+            # VIX low_vol filter: matches paper_trade_today.py --skip-vix-low-vol=True.
+            # Aligns training with production — paper trading never executes in low_vol regime.
+            # Evidence: VIX low_vol E=-0.094%/trade vs normal E=+0.352%/trade.
+            if getattr(args, "skip_vix_low_vol", False) and pre_vix_reg == "low_vol":
+                rejection_reasons.append("vix_low_vol")
+
             if min_adv is not None:
-                v50 = float(pc["vol50"].iloc[pos]) if pd.notna(pc["vol50"].iloc[pos]) else 0
-                if v50 < min_adv:
+                # Use 20-day avg volume to match paper_trade_today.py (uses last-20d avg)
+                v20 = float(pc["vol20"].iloc[pos]) if pd.notna(pc["vol20"].iloc[pos]) else 0
+                if v20 < min_adv:
                     rejection_reasons.append("min_adv_filter")
+
+            if min_rr_filter > 0:
+                # Filter signals with unfavorable scan-time R:R.
+                # Evidence: rr>=1.0 signals: WR=59%, E=+0.32%/trade; all signals: WR=55%, E=-0.02%.
+                # Aligns training with paper_trade_today.py --min-risk-reward filter.
+                sig_rr = signals.get("risk_reward", 0.0)
+                if sig_rr < min_rr_filter:
+                    rejection_reasons.append("min_risk_reward_filter")
 
             if rejection_reasons:
                 if diagnostics_enabled or ml_candidate_sample > 0:
@@ -3495,8 +3572,8 @@ def _collect_trades(precomputed: dict, scan_dates, spy_df, spy_regime,
 
             # Passed all filters.
             if min_adv is not None:
-                v50 = float(pc["vol50"].iloc[pos]) if pd.notna(pc["vol50"].iloc[pos]) else 0
-                if v50 < min_adv:
+                v20 = float(pc["vol20"].iloc[pos]) if pd.notna(pc["vol20"].iloc[pos]) else 0
+                if v20 < min_adv:
                     continue
 
             total_passed += 1
@@ -4309,11 +4386,16 @@ ARG_DEFAULTS = {
     "max_price": None,
     "max_atr_pct": 0.08,
     "min_adv": None,
-    "target_mult": 0.75,
+    "min_risk_reward": 0.0,
+    "target_mult": 1.2,
     "stop_mult": 1.0,
     "hold_periods": [3, 5, 10],
     "primary_hold": 10,
     "allow_friday": False,
+    "skip_thursday": False,
+    "skip_monday": False,
+    "skip_extended_bounce": True,
+    "skip_vix_low_vol": False,
     "regime_filter": "all",
     "benchmark": "SPY",
     "score_min": None,
@@ -4694,8 +4776,10 @@ def run_backtest(args):
         )
         if args.diagnostics else {}
     )
-    ml_analysis = (
-        _run_ml_analysis(
+    ml_analysis = {}
+    if getattr(args, "ml_analysis", True) and getattr(args, "score_mode", "") != "oversold_bounce":
+        print("\nRunning embedded ML diagnostics...")
+        ml_analysis = _run_ml_analysis(
             df,
             scan_diagnostics.get("ml_rejected_candidates", []),
             primary_h,
@@ -4713,8 +4797,6 @@ def run_backtest(args):
             ml_wf_step_days=getattr(args, "ml_wf_step_days", 21),
             ml_wf_min_train=getattr(args, "ml_wf_min_train", 400),
         )
-        if getattr(args, "ml_analysis", True) and getattr(args, "score_mode", "") != "oversold_bounce" else {}
-    )
     account_simulation    = _simulate_account(
         df,
         primary_h,
@@ -5046,6 +5128,8 @@ def run_backtest(args):
             "target_mult":          args.target_mult,
             "stop_mult":            args.stop_mult,
             "allow_friday":         args.allow_friday,
+            "skip_extended_bounce": getattr(args, "skip_extended_bounce", True),
+            "skip_vix_low_vol":     getattr(args, "skip_vix_low_vol", False),
             "regime_filter":        args.regime_filter,
             "benchmark":            args.benchmark,
             "score_min":            args.score_min,
@@ -5242,12 +5326,12 @@ if __name__ == "__main__":
 
     # ── Target / stop multipliers ─────────────────────────────────────────
     parser.add_argument(
-        "--target-mult", type=float, default=0.75,
-        help="Target = entry + mult * ATR (default: 0.9)"
+        "--target-mult", type=float, default=1.2,
+        help="Target = entry + mult * ATR (default: 1.2, matches live screener _ATR_TARGET=1.2)"
     )
     parser.add_argument(
         "--stop-mult", type=float, default=1.0,
-        help="Stop = tighter of signal low - 0.2 ATR or entry - mult * ATR (default: 1.1)"
+        help="Stop = tighter of signal low or entry - mult * ATR. Cycle 34: default raised 0.7→1.0 (0.7 ATR too tight: 58%% false stops, WR≈40%%; 1.0 ATR: WR≈55%%, Kelly≈17%%)"
     )
 
     # ── Hold periods ──────────────────────────────────────────────────────
@@ -5264,6 +5348,36 @@ if __name__ == "__main__":
     parser.add_argument(
         "--allow-friday", action="store_true",
         help="Include Friday signals (off by default — backtested as underperforming)"
+    )
+    parser.add_argument(
+        "--skip-thursday", dest="skip_thursday", action="store_true", default=False,
+        help="Skip Thursday signals (→ Friday opens). Default: off. "
+             "Evidence: Thu WR=50.4%% E=-0.26%%/trade vs non-Thu WR=57.4%% E=+0.07%% (n=3974, 2019-2026). "
+             "z=-3.5 p<0.0002. Thu signals especially bad in crash years (2026 Thu WR=16.1%%)."
+    )
+    parser.add_argument(
+        "--skip-monday", dest="skip_monday", action="store_true", default=False,
+        help="Skip Monday signals (→ Tuesday opens). Default: off. "
+             "Evidence: Mon WR=55.3%% vs non-Mon 66.9%% on production-eligible signals "
+             "(n=351 Mon, n=694 non-Mon, p=0.000125, Cycle 36 analysis). "
+             "Consistent effect 2019-2025 (gap -3pp to -23pp per year)."
+    )
+    parser.add_argument(
+        "--no-skip-extended-bounce", dest="skip_extended_bounce", action="store_false", default=True,
+        help="Disable extended-bounce filter (consec_up>=2 skip). Default: filter active. "
+             "Evidence: consec_up<=1 E=+0.530% vs consec_up>=2 E=+0.157% (VIX=normal, 1.2/0.7)."
+    )
+    parser.add_argument(
+        "--skip-vix-low-vol", dest="skip_vix_low_vol", action="store_true", default=False,
+        help="Reject signals when VIX regime is low_vol (VIX<15). Default: off. "
+             "Enable for retrain to align with paper_trade_today.py VIX filter. "
+             "Evidence: low_vol E=-0.094%%/trade vs normal E=+0.352%%/trade."
+    )
+    parser.add_argument(
+        "--min-risk-reward", dest="min_risk_reward", type=float, default=0.0,
+        help="Reject signals where scan-time R:R (target-entry)/(entry-stop) < this. Default: 0.0 (off). "
+             "Use 0.8 for retrain to filter negative-expectancy signals while keeping ~49%% of data. "
+             "Evidence: rr>=0.8 n=1932 E=+0.05%%/trade; all n=3974 E=-0.02%%/trade."
     )
     parser.add_argument(
         "--regime-filter", choices=["all", "bear", "bull"], default="all",

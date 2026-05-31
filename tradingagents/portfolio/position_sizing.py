@@ -25,16 +25,19 @@ class PositionSizer:
         if not (0 < win_rate < 1) or avg_win <= 0 or avg_loss >= 0 or portfolio_value <= 0:
             return 0.0
 
-        adjusted_win_rate = max(0.0, min(1.0, win_rate * confidence))
         b = abs(avg_win / avg_loss)
-        p = adjusted_win_rate
+        p = win_rate
         q = 1 - p
-        
+
         # Standard Discrete Kelly: f* = (bp - q) / b
         kelly_fraction = (b * p - q) / b
-        
-        # Apply the fractional Kelly multiplier (e.g. 0.5 for Half-Kelly, 0.25 for Quarter-Kelly)
-        adjusted_kelly = kelly_fraction * kelly_fraction_multiplier
+
+        # Cycle 44 SR-8: confidence is a fractional-Kelly multiplier on the OUTPUT,
+        # not a discount on the win probability. Multiplying p by confidence biased
+        # p downward (e.g. p=0.55, conf=0.5 → 0.275 → negative Kelly → size 0 for
+        # most setups). Now it scales the final bet, which is the correct use.
+        conf_mult = max(0.0, min(1.0, confidence))
+        adjusted_kelly = kelly_fraction * kelly_fraction_multiplier * conf_mult
         return max(0.0, min(adjusted_kelly, max_fraction))
 
     def calculate_position_size(
@@ -73,8 +76,10 @@ class PositionSizer:
             avg_win = float(ticker_stats["avg_win"]) / 100
             avg_loss = float(ticker_stats["avg_loss"]) / 100
         else:
+            # Cycle 44 SR-8: conservative no-history prior (b≈1.5, p=0.50 → Kelly≈0)
+            # so unproven tickers are not over-bet on an optimistic 5:1 default.
             win_rate = 0.50
-            avg_win = 0.10
+            avg_win = 0.03
             avg_loss = -0.02
 
         kelly_pct = self.calculate_kelly_size(
@@ -123,7 +128,7 @@ class PositionSizer:
         Parameters
         ----------
         tier_factor : float
-            Multiplier from AlphaEngine tier: A+=1.5, A=1.0, B=0.5.
+            Multiplier from AlphaEngine tier: A+=1.25, A=1.0, B=0.5.
             Applied after regime_factor. Hard cap still respected.
 
         Parameters
@@ -185,16 +190,21 @@ class PositionSizer:
             base_pct = cap_min
 
         # ── 3. Streak adjustment ───────────────────────────────────────────────────
+        # Cycle 44 DL-1: captured as an explicit factor so it also applies to the
+        # ATR (primary) path, which previously discarded base_pct entirely.
         if loss_streak >= 3:
-            base_pct *= 0.50   # 3+ losses: cut in half — protect from hole-digging
+            streak_factor = 0.50   # 3+ losses: cut in half — protect from hole-digging
         elif loss_streak == 2:
-            base_pct *= 0.70   # 2 losses: trim significantly
+            streak_factor = 0.70   # 2 losses: trim significantly
         elif loss_streak == 1:
-            base_pct *= 0.85   # 1 loss: slight caution
+            streak_factor = 0.85   # 1 loss: slight caution
         elif win_streak >= 4:
-            base_pct = min(cap_max, base_pct * 1.20)  # hot streak: press a bit
+            streak_factor = 1.20   # hot streak: press a bit
         elif win_streak >= 2:
-            base_pct = min(cap_max, base_pct * 1.10)  # 2+ wins: mild press
+            streak_factor = 1.10   # 2+ wins: mild press
+        else:
+            streak_factor = 1.0
+        base_pct = min(cap_max, base_pct * streak_factor)
 
         # ── 4. Time-of-day factor ──────────────────────────────────────────────────
         tod_factor = 1.0
@@ -223,16 +233,20 @@ class PositionSizer:
         
         starting_cash = getattr(account, "starting_cash", account_value)
         daily_profit_target = starting_cash * 0.01  # 1% daily profit target
+        # Cycle 44 DL-1: captured as a factor so it also applies to the ATR path.
         if today_pnl >= daily_profit_target * 2:
-            base_pct *= 0.50  # up 2%+ today: half size to protect
+            daily_factor = 0.50  # up 2%+ today: half size to protect
         elif today_pnl >= daily_profit_target:
-            base_pct *= 0.75  # hit daily target: reduce slightly
+            daily_factor = 0.75  # hit daily target: reduce slightly
+        else:
+            daily_factor = 1.0
+        base_pct *= daily_factor
 
         # ── 6. Apply regime factor (already includes drawdown from caller) ─────────
         base_pct *= regime_factor
         base_pct = max(cap_min * 0.5, min(cap_max_effective, base_pct))  # soft clamp
 
-        # ── 6b. Apply tier factor from AlphaEngine (A+=1.5×, A=1.0×, B=0.5×) ────────
+        # ── 6b. Apply tier factor from AlphaEngine (A+=1.25×, A=1.0×, B=0.5×) ───────
         # Tier factor is applied AFTER regime/streak so we don't amplify already-reduced sizes.
         # Hard cap (cap_max) is still the ceiling — tier can only push up to it, never above.
         tier_factor = max(0.0, min(2.0, tier_factor))  # safety clamp
@@ -250,11 +264,20 @@ class PositionSizer:
             risk_dollars = account_value * (risk_per_trade_pct / 100.0)
             # Apply tier_factor to risk_dollars so A+ risks more, B risks less
             risk_dollars = risk_dollars * tier_factor
+            # Cycle 44 DL-1: also apply the risk-management safety layers that
+            # previously only affected the (unused) base_pct on this path — regime,
+            # loss/win streak, time-of-day, and daily profit lock-in. Without this the
+            # ATR path was a pure vol-target × tier sizer and these controls were dead.
+            # (ML-confidence UP-scaling is intentionally NOT applied here — it increases
+            # size and needs walk-forward validation before going live.)
+            risk_dollars *= regime_factor * streak_factor * tod_factor * daily_factor
             stop_dist = (price - stop) if stop > 0 and price > stop else max(atr, price * 0.01)
             atr_shares = int(math.floor(risk_dollars / stop_dist)) if stop_dist > 0 else 0
 
-            # Hard cap by max allocation (uses cap_max, not cap_max_effective, as absolute ceiling)
-            cap_shares = int(math.floor(account_value * cap_max / price))
+            # Hard cap scaled by tier_factor so B-tier (0.5×) caps at cap_max×0.5 not cap_max.
+            # Without this: B-tier gets same 20% cap as A+ for low-ATR stocks (tier system bypassed).
+            tier_cap = cap_max * min(1.0, tier_factor) if tier_factor > 0 else cap_max
+            cap_shares = int(math.floor(account_value * tier_cap / price))
             final_shares = min(atr_shares, cap_shares)
 
             # Cash ceiling

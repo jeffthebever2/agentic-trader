@@ -226,11 +226,20 @@ class PortfolioState:
         thesis: str,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
+        atr: Optional[float] = None,
     ) -> None:
         ticker = ticker.upper()
         ok, reason = self.can_buy(ticker, shares, entry_price)
         if not ok:
             raise ValueError(reason)
+
+        # Cycle 44 V-24: derive fallback levels from ATR (1.0 stop / 1.2 target,
+        # matching the system geometry) when explicit levels are absent, instead of
+        # a fixed 2%/10% that ignores volatility.
+        if stop_loss is None:
+            stop_loss = (entry_price - 1.0 * atr) if atr and atr > 0 else entry_price * 0.98
+        if take_profit is None:
+            take_profit = (entry_price + 1.2 * atr) if atr and atr > 0 else entry_price * 1.10
 
         self.cash -= shares * entry_price
         self.positions[ticker] = Position(
@@ -238,8 +247,8 @@ class PortfolioState:
             entry_price=entry_price,
             shares=shares,
             entry_date=datetime.now(),
-            stop_loss=stop_loss if stop_loss is not None else entry_price * 0.98,
-            take_profit=take_profit if take_profit is not None else entry_price * 1.10,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
             thesis=thesis,
             sector=self.sector_lookup(ticker),
         )
@@ -250,7 +259,17 @@ class PortfolioState:
         if ticker not in self.positions:
             raise ValueError(f"Not holding {ticker}")
         pos = self.positions[ticker]
-        exit_price = self.price_lookup(ticker) or pos.entry_price
+        # Cycle 44 V-26: gap-aware fill. A stop must not fill ABOVE its level and a
+        # target must not fill BELOW its level — otherwise realized PnL is
+        # systematically optimistic vs the level that actually triggered the exit.
+        live = self.price_lookup(ticker) or pos.entry_price
+        reason_u = (reason or "").upper()
+        if "STOP" in reason_u:
+            exit_price = min(live, pos.stop_loss)
+        elif "TAKE_PROFIT" in reason_u or "TARGET" in reason_u:
+            exit_price = max(live, pos.take_profit)
+        else:
+            exit_price = live
         self.cash += pos.shares * exit_price
         self._log_trade_result(ticker, pos, exit_price, reason)
         del self.positions[ticker]

@@ -42,8 +42,8 @@ class SignalBreakdown:
 @dataclass
 class PriceTargets:
     entry: float       # suggested limit-order entry (current close)
-    target: float      # take-profit price (entry + 1.5× ATR)
-    stop: float        # stop-loss price   (entry − 0.8× ATR)
+    target: float      # take-profit price (entry + 1.2× ATR)
+    stop: float        # stop-loss price   (entry − 1.0× ATR, Cycle 44)
     atr: float         # 14-day ATR in dollars
     risk_reward: float # (target − entry) / (entry − stop)
     hold_days: str = "2-4"
@@ -251,7 +251,7 @@ class SwingScreener(StockScreener):
 
     # Multipliers for ATR-based targets
     _ATR_TARGET = 1.2   # upside = 1.2× ATR
-    _ATR_STOP   = 0.7   # downside = 0.7× ATR
+    _ATR_STOP   = 1.0   # downside = 1.0× ATR (Cycle 44: raised from 0.7 to match label/training geometry — retrain_weekly uses --stop-mult 1.0; 0.7 stopped predicted winners out early → WF HC WR anti-predictive)
 
     def screen_batch(
         self,

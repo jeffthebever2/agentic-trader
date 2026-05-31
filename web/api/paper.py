@@ -11,7 +11,7 @@ import time
 from collections import deque
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -30,8 +30,8 @@ DEFAULT_AUTOSTART_CONFIG = {
     "scan_interval_minutes": 15,
     "max_tickers": 0,
     "openrouter_model": "openai/gpt-4o-mini",
-    "model_bundle": "ml_models/stock_universe/model_bundle.joblib",
-    "new_model_bundle": "ml_models/latest/model_bundle.joblib",
+    "model_bundle": "ml_models/latest/model_bundle.joblib",
+    "new_model_bundle": None,
     "ai_shortlist_size": 30,
     "ai_max_picks": 5,
     "include_pure_ai": True,
@@ -41,23 +41,27 @@ DEFAULT_AUTOSTART_CONFIG = {
     "position_high_confidence_threshold": 0.80,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
-    "partial_profit_pct": 0.5,
+    "partial_profit_pct": 0.833,  # Synced with breakeven: stop_mult/target_mult = 1.0/1.2
     "partial_profit_fraction": 0.5,
     "trailing_stop_atr_mult": 0.5,
     "time_decay_scans": 0,
     "sector_max_positions": 3,
     "daily_loss_limit_pct": 2.0,
     "max_portfolio_drawdown": 0.05,
-    "risk_per_trade_pct": 0.0,
-    "min_risk_reward": 1.3,
+    "risk_per_trade_pct": 1.0,  # ATR-based: risk 1% of account per trade (matches CLI default)
+    "min_risk_reward": 0.8,
     "bear_regime_size_factor": 0.5,
     "neutral_regime_size_factor": 0.75,
     "max_positions": 5,
-    "ml_probability_threshold": 0.72,
-    "ml_large_loss_max": 0.20,
-    "ml_expected_return_min": 0.0,
-    "target_mult": 1.5,
+    "ml_probability_threshold": 0.0,
+    "ml_large_loss_max": 0.15,
+    "ml_expected_return_min": -99.0,
+    "target_mult": 1.2,
     "stop_mult": 1.0,
+    "skip_vix_low_vol": True,
+    "skip_extended_bounce": True,
+    "skip_thursday": True,
+    "skip_monday": True,
     "breadth_threshold": 0.40,
     "max_heat_pct": 80.0,
     "double_target_exit_pct": 0.5,
@@ -202,8 +206,8 @@ class PaperStartRequest(BaseModel):
     scan_interval_minutes: float = Field(15.0, ge=1.0, le=390.0)
     max_tickers: int = Field(0, ge=0, le=10000)
     openrouter_model: str = Field("openai/gpt-4o-mini", min_length=1, max_length=200)
-    model_bundle: str = Field("ml_models/stock_universe/model_bundle.joblib", max_length=500)
-    new_model_bundle: str = Field("ml_models/latest/model_bundle.joblib", max_length=500)
+    model_bundle: str = Field("ml_models/latest/model_bundle.joblib", max_length=500)
+    new_model_bundle: Optional[str] = Field(None, max_length=500)
     ai_shortlist_size: int = Field(30, ge=1, le=200)
     ai_max_picks: int = Field(5, ge=1, le=50)
     include_pure_ai: bool = True
@@ -216,22 +220,26 @@ class PaperStartRequest(BaseModel):
     position_high_confidence_threshold: float = Field(0.80, ge=0.5, le=0.99)
     take_profit_pct: float = Field(0.0, ge=0.0, le=50.0)
     stop_loss_pct: float = Field(0.0, ge=0.0, le=50.0)
-    partial_profit_pct: float = Field(0.5, ge=0.0, le=1.0)
+    partial_profit_pct: float = Field(0.833, ge=0.0, le=1.0)
     partial_profit_fraction: float = Field(0.5, ge=0.1, le=1.0)
     trailing_stop_atr_mult: float = Field(0.5, ge=0.0, le=5.0)
     time_decay_scans: int = Field(0, ge=0, le=200)
     sector_max_positions: int = Field(3, ge=0, le=20)
     daily_loss_limit_pct: float = Field(2.0, ge=0.0, le=50.0)
-    risk_per_trade_pct: float = Field(0.0, ge=0.0, le=10.0)
-    min_risk_reward: float = Field(1.3, ge=0.0, le=10.0)
+    risk_per_trade_pct: float = Field(1.0, ge=0.0, le=10.0)
+    min_risk_reward: float = Field(0.8, ge=0.0, le=10.0)
     bear_regime_size_factor: float = Field(0.5, ge=0.0, le=1.0)
     neutral_regime_size_factor: float = Field(0.75, ge=0.0, le=1.0)
     max_positions: int = Field(5, ge=1, le=50)
-    ml_probability_threshold: float = Field(0.72, ge=0.1, le=0.99)
-    ml_large_loss_max: float = Field(0.20, ge=0.01, le=0.99)
-    ml_expected_return_min: float = Field(0.0, ge=-0.5, le=0.5)
-    target_mult: float = Field(1.5, ge=0.05, le=10.0)
-    stop_mult: float = Field(1.0, ge=0.5, le=10.0)
+    ml_probability_threshold: float = Field(0.0, ge=0.0, le=0.99)
+    ml_large_loss_max: float = Field(0.15, ge=0.01, le=0.99)
+    ml_expected_return_min: float = Field(-99.0, ge=-99.0, le=0.5)
+    target_mult: float = Field(1.2, ge=0.05, le=10.0)
+    stop_mult: float = Field(1.0, ge=0.1, le=10.0)
+    skip_vix_low_vol: bool = True
+    skip_extended_bounce: bool = True
+    skip_thursday: bool = True
+    skip_monday: bool = True
     breadth_threshold: float = Field(0.40, ge=0.0, le=1.0)
     max_portfolio_drawdown: float = Field(0.05, ge=0.0, le=1.0)
     min_avg_volume: int = Field(500_000, ge=0, le=50_000_000)
@@ -1130,6 +1138,12 @@ async def start_paper_runner(body: PaperStartRequest, admin: dict = Depends(requ
         if body.sms_on_fills:
             command.append("--sms-on-fills")
         command.append("--hold-overnight" if body.hold_overnight else "--no-hold-overnight")
+        command.append("--skip-vix-low-vol" if body.skip_vix_low_vol else "--no-skip-vix-low-vol")
+        command.append("--skip-extended-bounce" if body.skip_extended_bounce else "--no-skip-extended-bounce")
+        if body.skip_thursday:
+            command.append("--skip-thursday")
+        if body.skip_monday:
+            command.append("--skip-monday")
         if body.model_bundle:
             command.extend(["--model-bundle", body.model_bundle])
         if body.new_model_bundle:

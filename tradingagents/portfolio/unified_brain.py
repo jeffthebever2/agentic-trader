@@ -7,7 +7,7 @@ Central decision layer that:
   3. Scores each with a unified alpha_score formula
   4. Assigns tier (A+/A/B/C/NO_TRADE)
   5. Allocates position sizes (risk-dollars based, not equal-shares)
-  6. Enforces short-hold constraints: max_hold_days=10, min_rr=1.5
+  6. Enforces short-hold constraints: max_hold_days=10, min_rr=1.15
   7. Writes full audit trail for every accept and reject decision
 
 This module does NOT delete or modify any existing strategy logic.
@@ -58,14 +58,14 @@ SHORT_HOLD_CONFIG: Dict[str, Any] = {
     "min_hold_days": 1,
     "horizon_target_days": 3,       # preferred exit window for scoring
     # Entry gates
-    "min_confidence": 0.58,         # min ML win_probability
+    "min_confidence": 0.0,          # disabled: win_prob ROC=0.4684 < 0.5 (anti-predictive). Re-enable after Cycle 17.
     "min_breakout_score": 55.0,     # min breakout_score (0=no gate)
-    "ll_hard_cap": 0.35,            # reject if large_loss_prob > this
-    "min_rr": 1.5,                  # min reward:risk ratio
-    # Tier thresholds (short-hold tuned — tighter than default alpha_engine)
-    "tier_aplus": {"alpha": 0.38, "win_prob": 0.66, "regime_score": 0.70, "breakout_score": 60.0},
-    "tier_a":     {"alpha": 0.22, "win_prob": 0.60},
-    "tier_b":     {"alpha": 0.09, "win_prob": 0.52},
+    "ll_hard_cap": 0.50,            # reject if large_loss_prob > this (0.35-0.50 bucket E=+0.29%, safe to include)
+    "min_rr": 1.15,                 # min reward:risk ratio. Cycle 44: screener now R:R = 1.2/1.0 = 1.20 (stop raised 0.7→1.0 for label coherence). Floor set 1.15 so cent-rounded 1.20 signals pass reliably (strict < at 1.20 would reject ~half on rounding noise).
+    # Tier thresholds — Cycle 38: win_prob removed (anti-predictive). Alpha range ~0.28–0.79.
+    "tier_aplus": {"alpha": 0.72, "win_prob": 0.0, "regime_score": 0.85, "breakout_score": 0.0},
+    "tier_a":     {"alpha": 0.55, "win_prob": 0.0},
+    "tier_b":     {"alpha": 0.38, "win_prob": 0.0},
     # Sizing
     "risk_pct_per_trade": 1.0,      # % of account to risk per trade (ATR-based)
     "position_cap_pct": 20.0,       # max % of account per position
@@ -75,14 +75,16 @@ SHORT_HOLD_CONFIG: Dict[str, Any] = {
     "max_sector_positions": 2,
     "adv_cap_pct": 0.01,            # max 1% of ADV
     # Tier size multipliers
-    "tier_mult_aplus": 1.5,
+    "tier_mult_aplus": 1.25, # Cycle 27: partially restored (no-Thu model ROC=0.5253, not full 1.5× until WF>0.55)
     "tier_mult_a": 1.0,
-    "tier_mult_b": 0.4,
+    "tier_mult_b": 0.5,  # Cycle 44: unified with live AlphaEngine TIER_SIZE_MULT B=0.50
     # Regime size factors
     "bear_size_factor": 0.5,
     "neutral_size_factor": 0.75,
     "crisis_size_factor": 0.0,
-    # Volatility (VIX) size factors
+    # Volatility (VIX) size factors / regime filters
+    "vix_low_vol_threshold": 15.0,       # VIX < this → low_vol regime, skip all trades
+    "skip_vix_low_vol": True,             # confirmed: low_vol expectancy = -0.248%/trade
     "vix_elevated_threshold": 25.0,
     "vix_crisis_threshold": 35.0,
     "vix_elevated_size_factor": 0.75,
@@ -90,17 +92,17 @@ SHORT_HOLD_CONFIG: Dict[str, Any] = {
     # Exit
     "breakeven_trigger_atr": 1.0,   # move stop to entry after 1 ATR gain
     "trail_atr_mult": 0.5,          # trail at peak - 0.5*ATR
-    "partial_profit_fraction": 0.5, # sell 50% at partial trigger
-    "partial_profit_trigger": 0.5,  # trigger at 50% of way to target
+    "partial_profit_fraction": 0.5,   # sell 50% at partial trigger
+    "partial_profit_trigger": 0.833,  # Cycle 38: synced with breakeven (stop_mult/target_mult=1.0/1.2)
     # Scoring penalty scales
     "ll_penalty_scale": 1.5,
-    "vol_penalty_atr_threshold": 0.03,
+    "vol_penalty_atr_threshold": 0.04,  # Cycle 42: raised from 0.03 (ATR 3-4% better outcomes)
     "vol_penalty_scale": 1.0,
     "timeout_penalty_scale": 0.3,
     "corr_penalty_scale": 0.25,
     "liq_penalty_scale": 0.20,
-    "breakout_max_boost": 0.30,
-    "er_clip_max": 3.0,
+    "breakout_max_boost": 0.50,  # Cycle 44: unified with live AlphaEngine (was 0.30)
+    "er_clip_max": 3.0,          # unused — ER neutralized (R²=0.012, Cycle 25)
     # Audit
     "write_audit_trail": True,
     "audit_filename_prefix": "unified_brain_audit",
@@ -379,8 +381,10 @@ class UnifiedBrain:
             regime_key = (spy_regime or "unknown").lower()
             reg_score = REGIME_SCORE.get(regime_key, REGIME_SCORE["unknown"])
 
-        # Ticker reliability
-        rel = 0.5
+        # Ticker reliability: default to 0.65 (neutral, rel_mult=1.0) when no tracker.
+        # Default of 0.5 gives rel_mult=0.76, penalizing ALL signals by 24% when
+        # paper_trade_today.py (which doesn't pass reliability_tracker) is used.
+        rel = 0.65
         if reliability_tracker is not None:
             try:
                 rel = float(reliability_tracker.get_score(ticker))
@@ -471,13 +475,13 @@ class UnifiedBrain:
             uc.rejection_reason = f"rr={rr:.2f} < min_rr={cfg['min_rr']}"
             return uc
 
-        if uc.confidence < float(cfg.get("min_confidence", 0.58)):
+        if uc.confidence < float(cfg.get("min_confidence", 0.0)):
             uc.alpha_score = 0.0
             uc.tier = "C"
             uc.rejection_reason = f"confidence={uc.confidence:.3f} < min={cfg['min_confidence']}"
             return uc
 
-        if uc.large_loss_probability > float(cfg.get("ll_hard_cap", 0.35)):
+        if uc.large_loss_probability > float(cfg.get("ll_hard_cap", 0.50)):
             uc.alpha_score = 0.0
             uc.tier = "C"
             uc.rejection_reason = f"large_loss_prob={uc.large_loss_probability:.3f} > cap={cfg['ll_hard_cap']}"
@@ -488,35 +492,30 @@ class UnifiedBrain:
         # Hard horizon gate is enforced by the runner, not the scorer
 
         # ── Score components ───────────────────────────────────────────────
-        # Expected return boost: clip to [0, er_clip_max], normalize
-        er_clip = float(cfg.get("er_clip_max", 3.0))
-        er_raw  = max(0.0, min(er_clip, uc.expected_return))
-        er_boost = 1.0 + er_raw / er_clip  # [1.0, 2.0]
+        # Cycle 38: win_prob removed (WF HC WR=39.5% anti-predictive on 679 OOS rows).
+        # Restore when WF ROC > 0.55 AND WF HC WR > base WR after new-geometry retrain.
 
         # Breakout boost: [1.0, 1.3] based on score [0, 100]
         bmax = float(cfg.get("breakout_max_boost", 0.30))
         breakout_boost = 1.0 + (uc.breakout_score / 100.0) * bmax
 
-        # Numerator
-        numerator = (
-            uc.confidence
-            * er_boost
-            * uc.target_before_stop_probability
-            * uc.regime_score
-            * breakout_boost
-        )
+        # Numerator: regime × breakout (win_prob removed — anti-predictive)
+        numerator = uc.regime_score * breakout_boost
 
-        # Penalties
+        # Penalties (timeout_pen removed: timeout model ROC=0.4023, anti-predictive)
         ll_pen  = float(cfg.get("ll_penalty_scale", 1.5)) * uc.large_loss_probability
         atr_pct = uc.atr / uc.entry if uc.entry > 0 else 0.0
-        vol_threshold = float(cfg.get("vol_penalty_atr_threshold", 0.03))
-        vol_pen = max(0.0, atr_pct - vol_threshold) * float(cfg.get("vol_penalty_scale", 1.0))
-        timeout_pen = uc.timeout_probability * float(cfg.get("timeout_penalty_scale", 0.3))
+        vol_threshold = float(cfg.get("vol_penalty_atr_threshold", 0.04))
+        # Cycle 44: normalize excess ATR by threshold to match live AlphaEngine
+        # (was raw excess → ~25× weaker vol penalty than the engine).
+        vol_pen = (
+            max(0.0, atr_pct - vol_threshold) / max(vol_threshold, 0.001)
+        ) * float(cfg.get("vol_penalty_scale", 1.0))
         liq_pen = max(0.0, 1.0 - uc.liquidity_score) * float(cfg.get("liq_penalty_scale", 0.20))
         # Correlation penalty: placeholder (computed by allocator if positions available)
         corr_pen = 0.0
 
-        denominator = 1.0 + ll_pen + vol_pen + timeout_pen + liq_pen + corr_pen
+        denominator = 1.0 + ll_pen + vol_pen + liq_pen + corr_pen
         raw_alpha   = numerator / denominator
 
         # Ticker reliability multiplier [0.6, 1.1]
@@ -526,7 +525,8 @@ class UnifiedBrain:
         elif rel >= 0.40:
             rel_mult = 0.60 + (rel - 0.40) / 0.25 * 0.40
         else:
-            rel_mult = 0.60
+            rel_mult = 0.50  # Cycle 44: unified with live AlphaEngine floor (was 0.60)
+        rel_mult = max(0.50, min(1.10, rel_mult))  # clamp to design range
 
         alpha_score = raw_alpha * rel_mult * feedback_mult
 
@@ -537,20 +537,20 @@ class UnifiedBrain:
         b_tier = t.get("tier_b", {})
 
         if (
-            alpha_score >= float(aplus.get("alpha", 0.38))
-            and uc.confidence >= float(aplus.get("win_prob", 0.66))
-            and uc.regime_score >= float(aplus.get("regime_score", 0.70))
-            and uc.breakout_score >= float(aplus.get("breakout_score", 60.0))
+            alpha_score >= float(aplus.get("alpha", 0.72))
+            and uc.confidence >= float(aplus.get("win_prob", 0.0))
+            and uc.regime_score >= float(aplus.get("regime_score", 0.85))
+            and uc.breakout_score >= float(aplus.get("breakout_score", 0.0))
         ):
             tier = "A+"
         elif (
-            alpha_score >= float(a_tier.get("alpha", 0.22))
-            and uc.confidence >= float(a_tier.get("win_prob", 0.60))
+            alpha_score >= float(a_tier.get("alpha", 0.55))
+            and uc.confidence >= float(a_tier.get("win_prob", 0.0))
         ):
             tier = "A"
         elif (
-            alpha_score >= float(b_tier.get("alpha", 0.09))
-            and uc.confidence >= float(b_tier.get("win_prob", 0.52))
+            alpha_score >= float(b_tier.get("alpha", 0.38))
+            and uc.confidence >= float(b_tier.get("win_prob", 0.0))
         ):
             tier = "B"
         else:
@@ -561,14 +561,14 @@ class UnifiedBrain:
 
         breakdown = {
             "confidence": round(uc.confidence, 4),
-            "er_boost": round(er_boost, 4),
+            "er_boost": 1.0,       # neutralized Cycle 25
             "tbs_prob": round(uc.target_before_stop_probability, 4),
             "regime_score": round(uc.regime_score, 4),
             "breakout_boost": round(breakout_boost, 4),
             "numerator": round(numerator, 5),
             "ll_penalty": round(ll_pen, 4),
             "vol_penalty": round(vol_pen, 4),
-            "timeout_penalty": round(timeout_pen, 4),
+            "timeout_penalty": 0.0,  # neutralized Cycle 25
             "liq_penalty": round(liq_pen, 4),
             "denominator": round(denominator, 5),
             "raw_alpha": round(raw_alpha, 5),
@@ -668,9 +668,12 @@ class UnifiedBrain:
                 uc.rejection_reason = "already_in_portfolio"
                 continue
 
-            # Sector cap
-            sec = "unknown"  # sector not always on UnifiedCandidate; extend if needed
-            if sector_counts.get(sec, 0) >= max_sector:
+            # Sector cap. Cycle 44: read real sector when available and only enforce
+            # for KNOWN sectors. Previously sec was hardcoded "unknown", so every fill
+            # incremented sector_counts["unknown"] and silently capped the whole book at
+            # max_sector positions (defeating max_open_positions).
+            sec = getattr(uc, "sector", None) or "unknown"
+            if sec != "unknown" and sector_counts.get(sec, 0) >= max_sector:
                 uc.rejection_reason = f"sector_cap_reached ({sec}: {max_sector})"
                 continue
 
@@ -678,14 +681,18 @@ class UnifiedBrain:
             tier_mults = {
                 "A+": float(cfg.get("tier_mult_aplus", 1.5)),
                 "A":  float(cfg.get("tier_mult_a", 1.0)),
-                "B":  float(cfg.get("tier_mult_b", 0.4)),
+                "B":  float(cfg.get("tier_mult_b", 0.5)),
             }
             tier_mult = tier_mults.get(uc.tier, 0.0)
             if tier_mult <= 0:
                 uc.rejection_reason = "tier_C_no_size"
                 continue
 
-            combined_factor = reg_factor * vix_factor * tier_mult
+            # Cycle 44 B-16: smooth heat taper. As the book fills toward max_heat,
+            # shrink each successive entry (sqrt taper) instead of hitting a hard wall,
+            # improving geometric growth by avoiding lumpy all-at-once exposure.
+            heat_taper = math.sqrt(max(0.0, 1.0 - (deployed / max_heat))) if max_heat > 0 else 1.0
+            combined_factor = reg_factor * vix_factor * tier_mult * heat_taper
             uc.size_factor = round(combined_factor, 4)
 
             # ATR-based risk sizing
@@ -697,8 +704,9 @@ class UnifiedBrain:
             risk_dollars = account_value * risk_pct * combined_factor
             raw_shares   = int(math.floor(risk_dollars / stop_dist))
 
-            # Hard position cap
-            cap_shares   = int(math.floor(account_value * cap_pct / uc.entry))
+            # Hard position cap scaled by tier_mult so B-tier capped lower than A/A+
+            tier_cap_pct = cap_pct * min(1.0, tier_mult)
+            cap_shares   = int(math.floor(account_value * tier_cap_pct / uc.entry))
             # Cash ceiling
             cash_shares  = int(math.floor(max(0.0, settled_cash) / uc.entry))
             # ADV cap (use 0.5 neutral liquidity → large stock approximation)
@@ -723,7 +731,7 @@ class UnifiedBrain:
                 uc.entry + float(cfg.get("breakeven_trigger_atr", 1.0)) * uc.atr, 4
             ) if uc.atr > 0 else uc.entry + stop_dist
             uc.partial_target = round(
-                uc.entry + float(cfg.get("partial_profit_trigger", 0.5)) * reward_dist, 4
+                uc.entry + float(cfg.get("partial_profit_trigger", 0.833)) * reward_dist, 4
             )
 
             # Update heat tracker
@@ -813,8 +821,13 @@ class UnifiedBrain:
             unified_candidates.append(uc)
 
         # Step 3: Score each
+        vix_no_trade = (
+            cfg.get("skip_vix_low_vol", True)
+            and vix_level is not None
+            and vix_level < float(cfg.get("vix_low_vol_threshold", 15.0))
+        )
         for uc in unified_candidates:
-            self.score_one(uc, no_trade=no_trade_regime)
+            self.score_one(uc, no_trade=no_trade_regime or vix_no_trade)
 
         # Step 4: Separate by tier
         tradeable   = [uc for uc in unified_candidates if uc.tier in ("A+", "A")]

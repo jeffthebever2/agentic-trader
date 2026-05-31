@@ -77,7 +77,7 @@ class DriftDetector:
         calibration_drift_threshold: float = 0.08,
         high_conf_failure_threshold: float = 0.45,
         paper_vs_wf_gap_threshold: float = 0.10,
-        psi_threshold: float = 0.20,
+        psi_threshold: float = 0.25,  # Cycle 44 TC-6: unified with feature_monitor.PSI_SIGNIFICANT (deploy & runtime fail at same level)
         min_trades_for_drift: int = 15,
         high_conf_min_prob: float = 0.70,
     ):
@@ -209,15 +209,9 @@ class DriftDetector:
                     feature_psi[fname] = float(fpsi)
 
         if not feature_psi:
-            # Try top-level drift value
-            drift_val = drift_data.get("drift")
-            if drift_val is not None:
-                psi_v = float(drift_val)
-                fail = 1 if psi_v > self.psi_threshold else 0
-                alerts = []
-                if fail:
-                    alerts.append(f"PSI_DRIFT: drift={psi_v:.3f} > {self.psi_threshold}")
-                return psi_v, fail, alerts
+            # Cycle 44 CR-2: the top-level `drift` field is win-rate calibration
+            # drift (|pred_wr − actual_wr|), NOT a population stability index.
+            # It is handled by _check_calibration; do not relabel it as PSI here.
             return None, 0, []
 
         max_psi = max(feature_psi.values())

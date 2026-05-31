@@ -6,7 +6,7 @@ return, and R:R constraints. All logic is deterministic and auditable.
 Usage:
     from tradingagents.portfolio.exit_manager import ExitManager
 
-    em = ExitManager(min_risk_reward=1.5, stop_atr_mult=1.0, target_atr_mult=0.75)
+    em = ExitManager(min_risk_reward=1.2, stop_atr_mult=1.0, target_atr_mult=1.2)
     result = em.calculate(
         entry_price=50.00,
         atr=1.50,
@@ -82,8 +82,8 @@ class ExitManager:
     stop_atr_mult : float
         Stop distance = atr * this. Default 1.0.
     target_atr_mult : float
-        Base target distance = atr * this. Default 0.75.
-        (target raised by min_rr enforcement, confidence, or expected_return)
+        Base target distance = atr * this. Default 1.2 (matches live screener _ATR_TARGET=1.2).
+        (target raised further by confidence or expected_return if above this floor)
     confidence_extension_threshold : float
         ML probability above this extends target by confidence_extension_factor. Default 0.70.
     confidence_extension_factor : float
@@ -105,11 +105,14 @@ class ExitManager:
 
     def __init__(
         self,
-        min_risk_reward: float = 1.5,
-        stop_atr_mult: float = 1.0,
-        target_atr_mult: float = 0.75,
+        min_risk_reward: float = 1.15,  # Cycle 44: match SHORT_HOLD_CONFIG (screener R:R=1.20 rounds ±)
+        stop_atr_mult: float = 1.0,  # Cycle 34: raised from 0.7 (false stops in pullback setups)
+        target_atr_mult: float = 1.2,
         confidence_extension_threshold: float = 0.70,
-        confidence_extension_factor: float = 1.3,
+        # Cycle 44 E-11: cap target extension near the trained 1.2-ATR label geometry
+        # (1.2 × 1.15 = 1.38 ATR). 1.3 pushed targets to 1.56 ATR — a move the model's
+        # target-hit probabilities were never trained on, lowering realized hit-rate.
+        confidence_extension_factor: float = 1.15,
         er_anchor_weight: float = 1.0,
         trail_atr_mult: float = 0.5,
         trail_activation_atr_mult: float = 1.0,

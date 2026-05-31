@@ -1,22 +1,15 @@
 """Candidate ranking for TradingAgents paper/live trading.
 
-Replaces the simple `_ml_composite_score()` in paper_trade_today.py with a
-richer formula that accounts for:
-  - ML win probability (calibrated)
-  - Expected return
-  - Target-before-stop probability (path quality)
-  - Large-loss probability (penalty)
-  - ATR volatility penalty (high-vol setups ranked lower)
-  - Market regime quality (from MarketRegimeState or fallback string)
-  - Timeout probability (avoid stale setups)
+Candidate ranking for capital allocation ordering.
 
-The score is designed to rank candidates for capital allocation, not just for
-binary pass/fail. A candidate ranked #1 should receive larger size than #5.
+Cycle 25/26: ML-neutralized formula. All models except large_loss are anti-predictive or
+useless on 2026 test set (win_prob ROC=0.4684, tbs ROC=0.4739, er R²=0.012, timeout ROC=0.4023).
+Removed from formula. large_loss (ROC=0.7116) retained in denominator penalty.
 
-Formula:
-  numerator   = win_prob * er_boost * tbs * regime_score
-  denominator = 1.0 + ll_penalty + vol_penalty + timeout_penalty
-  composite   = numerator / denominator
+Formula (Cycle 25/26):
+  numerator   = regime_score                              (rule-based, not ML)
+  denominator = 1.0 + ll_penalty + vol_penalty           (timeout_penalty removed — anti-predictive)
+  composite   = numerator / denominator × ticker_rel_mult
 
 All inputs are clipped to prevent outliers from dominating.
 """
@@ -99,9 +92,10 @@ class CandidateRanker:
     ----------
     ll_hard_cap : float
         Reject candidates where large_loss_probability > this value regardless
-        of win_probability. Default 0.35.
+        of win_probability. Default 0.50.
     min_win_prob : float
-        Reject candidates where win_probability < this value. Default 0.50.
+        Reject candidates where win_probability < this value. Default 0.0
+        (DISABLED — win_prob ROC=0.4684 anti-predictive; do not gate on it).
     vol_penalty_atr_threshold : float
         ATR% above this triggers a volatility penalty. Default 0.03 (3%).
     vol_penalty_scale : float
@@ -116,8 +110,8 @@ class CandidateRanker:
 
     def __init__(
         self,
-        ll_hard_cap: float = 0.35,
-        min_win_prob: float = 0.50,
+        ll_hard_cap: float = 0.50,
+        min_win_prob: float = 0.0,   # disabled: ROC=0.4684 < 0.5. Re-enable after Cycle 17 retrain.
         vol_penalty_atr_threshold: float = 0.03,
         vol_penalty_scale: float = 1.0,
         ll_penalty_scale: float = 1.5,
@@ -230,26 +224,27 @@ class CandidateRanker:
                 score_breakdown={},
             )
 
-        # ── Expected return boost ────────────────────────────────────────────
-        er_clipped = max(-0.5, min(self.er_clip_max, expected_ret))
-        er_boost = 1.0 + er_clipped  # er=0 → 1.0×; er=1.0 → 2.0×; er=−0.5 → 0.5×
-
         # ── Penalty terms (denominator) ──────────────────────────────────────
-        # Large-loss penalty: scales from 0 (ll=0) to 1.5×self.ll_penalty_scale (ll=1)
+        # ll_penalty: large_loss model ROC=0.7116 — GOOD, keep
         ll_penalty = large_loss * self.ll_penalty_scale
 
-        # Volatility penalty: excess ATR% above threshold
+        # Volatility penalty: excess ATR% above threshold (rule-based, keep)
         excess_atr = max(0.0, atr_pct - self.vol_penalty_atr_threshold)
         vol_penalty = excess_atr / max(self.vol_penalty_atr_threshold, 0.001) * self.vol_penalty_scale
+        vol_penalty = min(vol_penalty, 3.0)  # Cycle 44: clip (was unbounded; honors "all inputs clipped" invariant)
 
-        # Timeout penalty: high timeout → setup often doesn't resolve
-        timeout_penalty = timeout * self.timeout_penalty_scale
+        # timeout_penalty REMOVED: timeout model ROC=0.4023 (anti-predictive, Cycle 25/26)
+        # er_boost REMOVED: ER model R²=0.012 (noise, Cycle 25/26)
 
-        # ── Numerator ────────────────────────────────────────────────────────
-        numerator = win_prob * er_boost * tbs * reg_score
+        # ── Numerator: Cycle 38 — win_prob removed ───────────────────────────
+        # win_prob removed: WF HC WR=39.5% < 54.2% base at threshold=0.6 (679 OOS rows).
+        # Restore when WF ROC > 0.55 AND WF HC WR > base WR after new-geometry retrain.
+        numerator = reg_score
+        er_boost = 1.0   # kept for audit/logging only
+        timeout_penalty = 0.0  # kept for audit/logging only
 
         # ── Denominator ─────────────────────────────────────────────────────
-        denominator = 1.0 + ll_penalty + vol_penalty + timeout_penalty
+        denominator = 1.0 + ll_penalty + vol_penalty
         denominator = max(denominator, 0.01)  # never divide by zero
 
         composite = numerator / denominator
@@ -259,7 +254,6 @@ class CandidateRanker:
         # below 0.5 which would unfairly block candidates we have no data on.
         # Only apply the penalty when we have enough data (reliability < 0.4 means
         # we've seen it lose consistently).
-        rel_clipped = max(0.5, min(1.0, ticker_reliability))
         # Boost for proven tickers (>0.65), floor for unreliable (<0.5→0.5×)
         if ticker_reliability >= 0.65:
             rel_mult = 1.0 + (ticker_reliability - 0.65) / 0.35 * 0.15  # [1.0, 1.15]

@@ -413,6 +413,9 @@ class Position:
     entry_date: str = ""
     funded_by_unsettled: bool = False
     unsettled_settle_date: str = ""
+    # ML telemetry fields (for SELL event logging / per-signal analysis)
+    large_loss_probability: float | None = None
+    alpha_tier: str = "C"
     # Regime state at entry time (for SELL event logging / per-regime analysis)
     regime_at_entry: str = "unknown"
     regime_score_at_entry: float | None = None
@@ -719,6 +722,8 @@ class PaperAccount:
             score=candidate.score,
             ml_probability=candidate.ml_probability,
             expected_return=candidate.expected_return,
+            large_loss_probability=candidate.large_loss_probability,
+            alpha_tier=candidate.alpha_tier,
             atr=candidate.atr,
             breakeven_moved=False,
             entry_date=now.strftime("%Y-%m-%d"),
@@ -742,6 +747,12 @@ class PaperAccount:
                 "score": candidate.score,
                 "ml_probability": candidate.ml_probability,
                 "expected_return": candidate.expected_return,
+                # Cycle 44 GC-3: emit the alpha/ll/breakout fields the grader needs so
+                # by_tier / large-loss calibration are not graded on defaults.
+                "large_loss_probability": getattr(candidate, "large_loss_probability", None),
+                "alpha_tier": getattr(candidate, "alpha_tier", None),
+                "alpha_score": getattr(candidate, "alpha_score", None),
+                "breakout_score": getattr(candidate, "breakout_score", None),
                 "stop": candidate.stop,
                 "target": candidate.target,
                 "ai_reason": candidate.ai_reason or candidate.signals.get("ai_thesis") or candidate.signals.get("ai_reason") or "",
@@ -1011,6 +1022,8 @@ class PaperAccount:
             "score": position.score,
             "ml_probability": position.ml_probability,
             "expected_return": position.expected_return,
+            "large_loss_probability": position.large_loss_probability,
+            "alpha_tier": position.alpha_tier,
             "day_trade": is_day_trade,
             "gfv": gfv_triggered,
             "freeriding": freeriding_triggered,
@@ -1175,8 +1188,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-bundle", default="ml_models/latest/model_bundle.joblib", help="Path to model_bundle.joblib.")
     parser.add_argument("--new-model-bundle", default=None, help="Optional challenger model_bundle.joblib for separate ML New account. Never replaces --model-bundle.")
     parser.add_argument("--no-ml", action="store_true", help="Run the rule algorithm without the saved ML gate.")
-    parser.add_argument("--ml-probability-threshold", type=float, default=0.51,
-                        help="Override ML win-probability threshold from bundle (default: use bundle value, typically 0.51).")
+    parser.add_argument("--ml-probability-threshold", type=float, default=0.0,
+                        help="CandidateRanker min win_prob threshold. Default 0.0 (disabled). "
+                             "Win_prob model ROC=0.4684 < 0.5 → anti-predictive, disabling gate. "
+                             "Re-enable after Cycle 17 retrain with WF ROC > 0.52.")
     parser.add_argument("--ml-large-loss-max", type=float, default=None,
                         help="Override max large-loss probability from bundle (default: use bundle value, typically 0.20).")
     parser.add_argument("--ml-expected-return-min", type=float, default=None,
@@ -1213,8 +1228,26 @@ def parse_args() -> argparse.Namespace:
                         help="Allow Algorithm/Combined/Long Hold candidates that pass hard safety gates but miss a few soft confirmation gates.")
     parser.add_argument("--near-miss-max-soft-failures", type=int, default=3,
                         help="Max soft confirmed-pullback gate misses allowed when near-miss candidates are enabled.")
-    parser.add_argument("--target-mult", type=float, default=0.75)
-    parser.add_argument("--stop-mult", type=float, default=1.0)
+    parser.add_argument("--target-mult", type=float, default=1.2,
+                        help="ATR target multiplier (default: 1.2, matches screener _ATR_TARGET)")
+    parser.add_argument("--stop-mult", type=float, default=1.0,
+                        help="ATR stop multiplier. Cycle 34: raised from 0.7→1.0. "
+                             "Evidence: 0.7 ATR too tight, 58%% stop-outs (WR≈40%%). "
+                             "1.0 ATR: wider stop, fewer false exits, WR≈55%%, Kelly≈17%%.")
+    parser.add_argument("--skip-vix-low-vol", action=argparse.BooleanOptionalAction, default=True,
+                        help="Skip all trades when VIX < 15 (low_vol regime). Evidence: E=-0.094%/trade.")
+    parser.add_argument("--skip-thursday", action=argparse.BooleanOptionalAction, default=True,
+                        help="Skip Thursday scans (→ Friday opens). Evidence: Thu WR=50.4%% E=-0.26%%/trade "
+                             "vs non-Thu WR=57.4%% E=+0.07%% (n=3974, z=-3.5, p<0.0002). "
+                             "2026 crash especially severe on Thursdays (WR=16.1%%).")
+    parser.add_argument("--skip-monday", action=argparse.BooleanOptionalAction, default=True,
+                        help="Skip Monday scans (→ Tuesday opens). Evidence: Mon WR=55.3%% vs non-Mon 66.9%% "
+                             "on production-eligible signals (n=351 Mon, n=694 non-Mon, p=0.000125). "
+                             "Effect consistent 2019-2025 (gap -3pp to -23pp per year). "
+                             "Dominant in 2021 bull market (Mon WR=46.3%% vs Tue=68.0%%).")
+    parser.add_argument("--skip-extended-bounce", action=argparse.BooleanOptionalAction, default=True,
+                        help="Skip trades where consec_up>=2 (entering on 2nd+ consecutive up day). "
+                             "Evidence: consec_up<=1 E=+0.530% vs consec_up>=2 E=+0.157% (VIX=normal, 1.2/0.7).")
     parser.add_argument("--max-hold-days", type=int, default=14,
                         help="Time-stop: exit confirmed_pullback positions after this many "
                              "calendar days (~10 trading days). Validated optimum.")
@@ -1226,7 +1259,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--position-cap-min-pct", type=float, default=10.0, help="Min account %% per position at ML threshold confidence.")
     parser.add_argument("--position-high-confidence-threshold", type=float, default=0.80, help="ML probability at which position reaches full size (position-cap-pct).")
     parser.add_argument("--risk-per-trade-pct", type=float, default=1.0, help="Risk this %% of account per trade via ATR-based sizing. e.g. 1.0 = risk 1%% of account. 0=disabled, use cap-pct.")
-    parser.add_argument("--min-risk-reward", type=float, default=1.5, help="Skip entry if live R:R (target-price)/(price-stop) falls below this. Default 1.5.")
+    parser.add_argument("--min-risk-reward", type=float, default=0.8, help="Skip entry if live R:R (target-price)/(price-stop) falls below this. Default 0.8. "
+                        "Evidence: confirmed_pullback median scan-time R:R=0.79 (1.2 default was blocking all trades). "
+                        "rr>=0.8 keeps 49%% of signals with E=+0.05%%/trade.")
     parser.add_argument("--bear-regime-size-factor", type=float, default=0.5, help="Multiply position size by this in bear/sell regime (0–1). Default 0.5.")
     parser.add_argument("--neutral-regime-size-factor", type=float, default=0.75, help="Multiply position size by this in neutral regime (0–1). Default 0.75.")
     # SafeTradeGuard thresholds
@@ -1236,8 +1271,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rolling-wr-floor", type=float, default=0.30, help="Rolling win rate below this (last 10 trades) → halt new entries. Default 0.30.")
     parser.add_argument("--take-profit-pct", type=float, default=0.0, help="Percentage-based take-profit override (e.g. 2.5 = exit at +2.5%%). 0 = use ATR-based target.")
     parser.add_argument("--stop-loss-pct", type=float, default=0.0, help="Percentage-based stop-loss override (e.g. 1.5 = exit at -1.5%%). 0 = use ATR-based stop.")
-    parser.add_argument("--partial-profit-pct", type=float, default=0.5,
-        help="Trigger partial sell when price reaches this fraction of the way to target (0=disabled).")
+    parser.add_argument("--partial-profit-pct", type=float, default=0.833,
+        help="Trigger partial sell when price reaches this fraction of the way to target (0=disabled). "
+             "Default 0.833 = synced with breakeven trigger (stop_mult/target_mult = 1.0/1.2): "
+             "partial fires simultaneously with breakeven, so remaining shares have 0 downside.")
     parser.add_argument("--partial-profit-fraction", type=float, default=0.5,
         help="Fraction of shares to sell at partial-profit trigger (default 0.5 = half).")
     parser.add_argument("--trade-fidelity", action="store_true", help="Send approved Combined candidates to Fidelity.")
@@ -1248,8 +1285,8 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of shares to defensively trim before stop (default 0.5 = half).")
     parser.add_argument("--early-stop-buffer-pct", type=float, default=15.0,
         help="Exit before hard stop when price falls into this %% of the entry-stop distance above stop. 0=disabled.")
-    parser.add_argument("--scale-in-min-probability", type=float, default=0.55,
-        help="Minimum ML probability required to add shares to an existing winner.")
+    parser.add_argument("--scale-in-min-probability", type=float, default=0.0,
+                        help="[disabled] was 0.55 but win_prob anti-predictive. Effective: scale-in disabled via scale-in-add-pct=0.")
     parser.add_argument("--scale-in-trigger-atr", type=float, default=0.5,
         help="Add shares after price moves this many ATRs above average entry. 0 allows immediate scale-in.")
     parser.add_argument("--scale-in-add-pct", type=float, default=5.0,
@@ -1535,6 +1572,11 @@ def predict_ml(row: dict[str, Any], bundle: dict[str, Any],
         frame["rsi_spread"] = pd.to_numeric(frame["rsi14"], errors="coerce") - pd.to_numeric(frame["rsi9"], errors="coerce")
     if "macd_hist" in frame.columns and "macd_hist_prev2" in frame.columns:
         frame["macd_hist_slope3"] = pd.to_numeric(frame["macd_hist"], errors="coerce") - pd.to_numeric(frame["macd_hist_prev2"], errors="coerce")
+    if "macd_hist" in frame.columns and "macd_hist_prev1" in frame.columns and "macd_hist_prev2" in frame.columns:
+        h0 = pd.to_numeric(frame["macd_hist"], errors="coerce")
+        h1 = pd.to_numeric(frame["macd_hist_prev1"], errors="coerce")
+        h2 = pd.to_numeric(frame["macd_hist_prev2"], errors="coerce")
+        frame["macd_hist_accel"] = h0 - 2 * h1 + h2  # 2nd derivative: same formula as backtest.py
     if "vol_ratio_10d" in frame.columns and "vol_ratio_20d" in frame.columns:
         v10 = pd.to_numeric(frame["vol_ratio_10d"], errors="coerce")
         v20 = pd.to_numeric(frame["vol_ratio_20d"], errors="coerce")
@@ -1607,8 +1649,12 @@ def predict_ml(row: dict[str, Any], bundle: dict[str, Any],
     failed = []
     if win_prob is None or win_prob < ml_probability_threshold:
         failed.append(f"ml_probability_below_{ml_probability_threshold:.2f}")
-    if expected_return is None or expected_return <= ml_expected_return_min:
-        failed.append("expected_return_not_positive")
+    # Only gate on expected_return when threshold is meaningful (> -10).
+    # expected_return models often have r2 ≈ 0; gating on them with threshold=0
+    # randomly blocks ~50% of valid trades based on noise predictions.
+    if ml_expected_return_min > -10.0:
+        if expected_return is None or expected_return <= ml_expected_return_min:
+            failed.append("expected_return_not_positive")
     if loss_prob is not None and loss_prob > ml_large_loss_max:
         failed.append(f"large_loss_probability_above_{ml_large_loss_max:.2f}")
 
@@ -1955,7 +2001,11 @@ MIN_AVG_VOLUME = 500_000
 HARD_CONFIRMED_PULLBACK_GATES = {
     "price_not_5_500",
     "dollar_volume_below_5m",
-    "atr_pct_not_0p5_to_8",
+    "atr_pct_not_1p5_to_8",
+    "cci14_jump_too_large",
+    "cci14_prev_too_low",       # CCI<-100: WR=47%, E=-0.515%/trade (deep breakdown, not pullback)
+    "rsi9_not_44_52",           # RSI9<44: stop hit rate 45.0% vs 35.9% for RSI9>=44 (6/6 years consistent)
+    "vix_elevated_regime",      # VIX 25-35: grinding bear, pullbacks continue lower
     "spy_not_above_50_200",
     "spy_5d_too_weak",
     "stock_not_above_sma200",
@@ -2144,6 +2194,47 @@ def build_candidates(
         if not (rule_ok or near_miss_rule_ok) and bundle is None and args.no_ai:
             return None
 
+        # VIX low_vol regime filter: skip all trades when VIX < 15.
+        # Evidence: low_vol trades avg E=-0.094%/trade at 1.2/0.7 (n=1,020 backtest).
+        # Normal VIX trades avg E=+0.352%/trade — filter improves overall expectancy.
+        if vix_reg == "low_vol" and getattr(args, "skip_vix_low_vol", True):
+            return None
+
+        # Thursday signal filter: Thursday scans → Friday opens → hold spans 2 weekends.
+        # Evidence: Thu WR=50.4% E=-0.26%/trade vs non-Thu WR=57.4% E=+0.07% (n=3974, z=-3.5, p<0.0002).
+        # Especially severe in crash years (2026 Thu WR=16.1%, non-Thu WR=59.7%).
+        if as_of.dayofweek == 3 and getattr(args, "skip_thursday", True):
+            return None
+
+        # Monday skip: Mon WR=55.3% vs non-Mon 66.9% (n=351, p=0.000125, Cycle 36).
+        # Tuesday entries underperform consistently 2019-2025 (gap -3pp to -23pp per year).
+        if as_of.dayofweek == 0 and getattr(args, "skip_monday", True):
+            return None
+
+        # Consecutive up-day filter: skip when consec_up >= 2 (even bounce entries).
+        # Evidence at tm=1.2 sm=0.7 VIX=normal:
+        #   consec_up=0: E=+0.506%, consec_up=1: E=+0.593% → fresh pullback entries
+        #   consec_up=2: E=+0.057%, consec_up=4: E=+0.055% → chasing extended bounces
+        # consec_up<=1 filter: E +0.352% → +0.530% (+50%), stop_rate 49.8%→45.7%
+        _consec_up = int(signals.get("consec_up") or 0)
+        if _consec_up >= 2 and getattr(args, "skip_extended_bounce", True):
+            return None
+
+        # CCI floor gate: reject if yesterday's CCI < -100 (deep oversold = breakdown).
+        # Evidence: cci14_prev < -100 → WR=47.0% E=-0.515%/trade (n=598, z=-4.2, p<0.0001).
+        # cci14_prev >= -100 → WR=57.7% E=+0.074%. Consistent across all years 2019-2026.
+        _cci_prev = signals.get("cci14_prev")
+        if _cci_prev is not None and float(_cci_prev) < -100:
+            return None
+
+        # CCI daily jump cap: reject if CCI improved >25pts in one day (bounce-pop, not steady recovery).
+        # Evidence (cu1 n=1554): cci_change<=25 WR=60.0%% vs all WR=58.6%% (Spearman r=-0.07 p=0.006).
+        _cci_today = signals.get("cci14")
+        if _cci_prev is not None and _cci_today is not None:
+            _cci_chg = float(_cci_today) - float(_cci_prev)
+            if _cci_chg > 25:
+                return None
+
         row = {
             "ticker": ticker,
             "scan_date": str(as_of.date()),
@@ -2157,6 +2248,22 @@ def build_candidates(
             "rejection_reasons": [] if rule_ok else [r for r in gate_status.split(",") if r],
             **signals,
         }
+        # Add MarketRegimeEngine scores and binary SPY/VIX features to ML feature row.
+        # The model is trained with these features from the backtest; missing → imputed to constant.
+        try:
+            row["regime_score"]     = float(getattr(_regime_state, "regime_score", 0.80))
+            row["crash_risk_score"] = float(getattr(_regime_state, "crash_risk_score", 0.0))
+            row["risk_on_score"]    = float(getattr(_regime_state, "prob_risk_on", 0.5))
+            row["risk_off_score"]   = float(getattr(_regime_state, "prob_risk_off", 0.0))
+            # Extract SPY/VIX binary features from regime_state.features dict (computed in _compute_features).
+            # These were missing in production, causing 4+ features to be imputed with training constants.
+            _rf = getattr(_regime_state, "features", {}) or {}
+            for _feat in ("spy_above_sma50", "spy_above_sma200", "spy_golden_cross", "vol_expansion",
+                          "vix_20d_zscore", "spy_drawdown_20d"):
+                if _feat in _rf:
+                    row[_feat] = float(_rf[_feat])
+        except Exception:
+            pass  # regime_state not available; features stay absent → imputed to training mean
         ml = {
             "ml_probability": None,
             "expected_return": None,
@@ -2180,9 +2287,22 @@ def build_candidates(
                 ml_expected_return_min=getattr(args, "ml_expected_return_min", None),
             )
 
+        # Compute new_ml early so it can gate near-miss candidates.
+        # Stock_universe model (bundle) tops out at win_prob≈0.483 so always fails
+        # ml_pass — use signal-level new_bundle for near-miss approval when available.
+        new_ml = None
+        if new_bundle is not None:
+            new_ml = predict_ml(
+                row, new_bundle,
+                ml_prob_threshold=eff_ml_threshold,
+                ml_large_loss_max=getattr(args, "ml_large_loss_max", None),
+                ml_expected_return_min=getattr(args, "ml_expected_return_min", None),
+            )
+
         # If a risk model is available, require it to approve near-miss rule setups.
         # Strict rule passes remain rule-driven; this only guards relaxed entries.
-        if near_miss_rule_ok and bundle is not None and not bool(ml["ml_pass"]):
+        _near_miss_ml = new_ml if new_ml is not None else ml
+        if near_miss_rule_ok and bundle is not None and not bool(_near_miss_ml["ml_pass"]):
             near_miss_rule_ok = False
 
         rule_candidate_score = float(score)
@@ -2211,13 +2331,7 @@ def build_candidates(
             signals=signals,
         )
         new_candidate = None
-        if new_bundle is not None:
-            new_ml = predict_ml(
-                row, new_bundle,
-                ml_prob_threshold=eff_ml_threshold,
-                ml_large_loss_max=getattr(args, "ml_large_loss_max", None),
-                ml_expected_return_min=getattr(args, "ml_expected_return_min", None),
-            )
+        if new_ml is not None:
             new_candidate = _apply_ml(base_candidate, new_ml, reason_prefix="new_model:")
         return base_candidate, new_candidate
 
@@ -2289,7 +2403,7 @@ def build_candidates(
             _ar = _ae.evaluate(
                 candidate=_c,
                 regime_state=_regime_state_for_ae,
-                ticker_reliability=0.5,   # will be recomputed per-account in scan loop
+                ticker_reliability=0.65,  # neutral (rel_mult=1.0); 0.5 penalizes 24% unnecessarily
                 feedback_mult=_feedback_mult,
                 breakout_score=getattr(_c, "breakout_score", 0.0),
             )
@@ -3191,14 +3305,11 @@ def _enrich_candidate_fundamentals(
 
 
 def _ml_composite_score(c) -> float:
-    """Combined ML signal quality score for candidate ranking. Higher = better."""
-    p = c.ml_probability if c.ml_probability is not None else 0.5
-    er = c.expected_return if c.expected_return is not None else 0.0
-    tbs = c.target_before_stop_probability if c.target_before_stop_probability is not None else p
-    ll = c.large_loss_probability if c.large_loss_probability is not None else (1.0 - p)
-    to = c.timeout_probability if c.timeout_probability is not None else 0.3
-    er_boost = 1.0 + max(-0.5, min(2.0, er))
-    return p * er_boost * tbs * (1.0 - ll * 0.5) * (1.0 - to * 0.3)
+    """Fallback ranking score (ML-neutralized, Cycle 25/26). Used when alpha_score is unavailable.
+    Only large_loss model (ROC=0.7116) is reliable. win_prob/tbs/er/timeout all anti-predictive."""
+    ll = c.large_loss_probability if c.large_loss_probability is not None else 0.20
+    ll = max(0.0, min(1.0, ll))
+    return 1.0 / (1.0 + ll * 1.5)
 
 
 def scan_account_once(
@@ -3572,14 +3683,14 @@ def scan_account_once(
     # Combined sizing factor: drawdown × regime
     combined_size_factor = dd_size_factor * regime_size_factor
 
-    min_rr = getattr(args, "min_risk_reward", 1.5)
+    min_rr = getattr(args, "min_risk_reward", 0.8)
 
     # ── Re-rank candidates by composite ML score (CandidateRanker) ───────────
     from tradingagents.portfolio.candidate_ranker import CandidateRanker
     # High-vol mode: raise minimum win probability gate
     _effective_min_prob = getattr(args, "ml_probability_threshold", 0.50) + _hv_prob_boost
     _ranker = CandidateRanker(
-        ll_hard_cap=getattr(args, "ml_large_loss_max", 0.35),
+        ll_hard_cap=getattr(args, "ml_large_loss_max", None) or 0.50,
         min_win_prob=_effective_min_prob,
     )
     _ranked_objs = _ranker.rank(candidates, spy_regime=spy_regime, trades=account.trades)
@@ -3804,7 +3915,7 @@ def scan_account_once(
         _cand_er   = candidate.expected_return if candidate.expected_return is not None else 0.0
         _cand_stop = candidate.stop if hasattr(candidate, "stop") else 0.0
 
-        # Tier factor from AlphaEngine: A+=1.5, A=1.0, B=0.5, C→skip (already filtered above)
+        # Tier factor from AlphaEngine: A+=1.25, A=1.0, B=0.5, C→skip (already filtered above)
         from tradingagents.portfolio.alpha_engine import TIER_SIZE_MULT
         _tier = getattr(candidate, "alpha_tier", "A")  # default A if not yet scored
         _tier_factor = TIER_SIZE_MULT.get(_tier, 1.0)

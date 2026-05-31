@@ -38,7 +38,10 @@ class CorrelationAnalyzer:
                 return True, "Correlation data unavailable"
             new_corr = corr_matrix[new_ticker].drop(labels=[new_ticker], errors="ignore")
             high_corr = new_corr[new_corr > self.threshold]
-            if len(high_corr) > self.max_high_corr:
+            # Cycle 44 SR-10: block when the new name would be the (max_high_corr)-th
+            # correlated position, not the (max_high_corr+1)-th. `>` previously allowed
+            # a 3-way correlated cluster when max_high_corr=2.
+            if len(high_corr) >= self.max_high_corr:
                 names = ", ".join(high_corr.index.astype(str))
                 return False, (
                     f"{new_ticker} is highly correlated with {len(high_corr)} "

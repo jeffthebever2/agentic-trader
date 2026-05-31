@@ -120,7 +120,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-bundle",    default="ml_models/latest/model_bundle.joblib")
     parser.add_argument("--new-model-bundle",default=None)
     parser.add_argument("--no-ml",           action="store_true")
-    parser.add_argument("--ml-probability-threshold", type=float, default=0.51)
+    parser.add_argument("--ml-probability-threshold", type=float, default=0.0,
+                        help="Win_prob threshold. Default 0.0 (disabled, ROC<0.5). Re-enable after Cycle 17.")
     parser.add_argument("--max-tickers",     type=int,    default=0)
     parser.add_argument("--batch-size",      type=int,    default=100)
     parser.add_argument("--price-batch-size",type=int,    default=200)
@@ -129,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-price",       type=float,  default=15.0)
     parser.add_argument("--max-price",       type=float,  default=100.0)
     parser.add_argument("--threshold",       type=float,  default=100.0)
-    parser.add_argument("--target-mult",     type=float,  default=0.75)
+    parser.add_argument("--target-mult",     type=float,  default=1.2)
     parser.add_argument("--stop-mult",       type=float,  default=1.0)
     parser.add_argument("--once",            action="store_true",
                         help="Run one scan cycle and exit.")
@@ -144,8 +145,9 @@ def parse_args() -> argparse.Namespace:
     # ── Unified-specific ───────────────────────────────────────────────────
     parser.add_argument("--max-hold-days",   type=int,    default=10,
                         help="Hard max hold days for short-hold mode.")
-    parser.add_argument("--min-rr",          type=float,  default=1.5,
-                        help="Minimum reward:risk to accept a candidate.")
+    parser.add_argument("--min-rr",          type=float,  default=0.8,
+                        help="Minimum reward:risk to accept a candidate. "
+                             "Default 0.8 (1.2 was blocking all confirmed_pullback signals, median R:R=0.79).")
     parser.add_argument("--risk-pct",        type=float,  default=1.0,
                         help="Percent of account to risk per trade.")
     parser.add_argument("--position-cap-pct",type=float,  default=20.0,
@@ -153,14 +155,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-heat-pct",    type=float,  default=75.0,
                         help="Max account %% deployed at once.")
     parser.add_argument("--max-open-positions", type=int, default=5)
-    parser.add_argument("--min-confidence",  type=float,  default=0.60,
-                        help="Minimum ML confidence to enter (unified brain gate).")
+    parser.add_argument("--min-confidence",  type=float,  default=0.0,
+                        help="Minimum ML confidence. Default 0.0 (disabled, win_prob ROC<0.5). Re-enable after Cycle 17.")
     parser.add_argument("--vix-crisis-threshold",   type=float, default=35.0)
     parser.add_argument("--vix-elevated-threshold", type=float, default=25.0)
     parser.add_argument("--hold-overnight",  action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--exclude-long-hold", action=argparse.BooleanOptionalAction, default=True,
                         help="Exclude long_hold and pure_ai strategies from unified brain.")
     parser.add_argument("--commission",      type=float,  default=0.0)
+    parser.add_argument("--skip-vix-low-vol", action=argparse.BooleanOptionalAction, default=True,
+                        help="Skip trades when VIX regime is low_vol. Evidence: E=-0.094%%/trade.")
+    parser.add_argument("--skip-extended-bounce", action=argparse.BooleanOptionalAction, default=True,
+                        help="Skip when consec_up>=2. Evidence: consec_up<=1 E=+0.530%% vs 0.157%%.")
+    parser.add_argument("--skip-thursday", action=argparse.BooleanOptionalAction, default=True,
+                        help="Skip Thursday scans (→ Friday opens). Evidence: Thu WR=50.4%% vs 57.4%% non-Thu, z=-3.5.")
 
     return parser.parse_args()
 
@@ -606,6 +614,10 @@ def main() -> None:
         take_profit_pct                = 0.0,
         allow_near_miss_rule_candidates= getattr(args, "allow_near_miss_rule_candidates", True),
         near_miss_max_soft_failures    = getattr(args, "near_miss_max_soft_failures", 3),
+        skip_vix_low_vol               = getattr(args, "skip_vix_low_vol", True),
+        skip_extended_bounce           = getattr(args, "skip_extended_bounce", True),
+        skip_thursday                  = getattr(args, "skip_thursday", True),
+        skip_monday                    = getattr(args, "skip_monday", True),
         max_ml_candidates              = 200,
         no_ai                          = True,  # disable Pure AI to avoid API calls
         openrouter_model               = "openai/gpt-4o-mini",
