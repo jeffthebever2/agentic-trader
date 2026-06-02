@@ -642,8 +642,9 @@ def parse_args():
     parser.add_argument("--write-chunk-size", type=int, default=50000)
     parser.add_argument("--score-mode", default="confirmed_pullback")
     parser.add_argument("--rule-threshold", type=float, default=100.0)
-    parser.add_argument("--target-mult", type=float, default=0.9)
-    parser.add_argument("--stop-mult", type=float, default=1.1)
+    # SD-1: defaults 0.9/1.1 trained on easier geometry than live 1.2/1.0 → anti-predictive HC bucket
+    parser.add_argument("--target-mult", type=float, default=1.2)
+    parser.add_argument("--stop-mult", type=float, default=1.0)
     parser.add_argument("--bad-loss-pct", type=float, default=-0.03)
     parser.add_argument("--missed-big-win-pct", type=float, default=0.05)
     parser.add_argument("--skip-train", action="store_true", help="Only build the stock/date dataset CSV.")
@@ -657,6 +658,12 @@ def parse_args():
     parser.add_argument("--ml-expected-return-min", type=float, default=0.0)
     parser.add_argument("--ml-large-loss-max", type=float, default=0.15)
     parser.add_argument("--gate-diagnostics-limit", type=int, default=250)
+    # SD-3: expose missing args so they're not silently hard-coded in train_models
+    parser.add_argument("--calibrate", action="store_true", default=True)
+    parser.add_argument("--no-calibrate", dest="calibrate", action="store_false")
+    parser.add_argument("--executed-weight", type=float, default=1.0,
+                        help="Sample weight for executed rows (default 1.0 for stock-universe; "
+                             "use higher value only if this dataset has a tiny executed fraction)")
     return parser.parse_args()
 
 
@@ -679,6 +686,10 @@ def main():
         ml_expected_return_min=args.ml_expected_return_min,
         ml_large_loss_max=args.ml_large_loss_max,
         gate_diagnostics_limit=args.gate_diagnostics_limit,
+        # SD-3: these were missing — train_models silently used executed_weight=20.0 and
+        # calibrate=True with no CLI surface to disable.
+        calibrate=getattr(args, "calibrate", True),
+        executed_weight=getattr(args, "executed_weight", 1.0),  # SD-3: default 1.0 not 20.0 for stock-universe trainer
     )
     report = train_models(train_args)
     print("\nStock-universe ML training complete")

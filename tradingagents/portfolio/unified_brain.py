@@ -469,7 +469,7 @@ class UnifiedBrain:
             return uc
 
         rr = uc.risk_reward
-        if rr < float(cfg.get("min_rr", 1.5)):
+        if rr < float(cfg.get("min_rr", 1.15)):  # UB-A8: fallback was 1.5, config is 1.15
             uc.alpha_score = 0.0
             uc.tier = "C"
             uc.rejection_reason = f"rr={rr:.2f} < min_rr={cfg['min_rr']}"
@@ -495,9 +495,10 @@ class UnifiedBrain:
         # Cycle 38: win_prob removed (WF HC WR=39.5% anti-predictive on 679 OOS rows).
         # Restore when WF ROC > 0.55 AND WF HC WR > base WR after new-geometry retrain.
 
-        # Breakout boost: [1.0, 1.3] based on score [0, 100]
-        bmax = float(cfg.get("breakout_max_boost", 0.30))
-        breakout_boost = 1.0 + (uc.breakout_score / 100.0) * bmax
+        # Breakout boost: [1.0, 1+bmax] based on score [0, 100]
+        # AE-A6: clip to [0,100] before /100 — engine does this, brain didn't; malformed score>100 blows boost cap
+        bmax = float(cfg.get("breakout_max_boost", 0.50))  # UB-A9: fallback was 0.30, config is 0.50
+        breakout_boost = 1.0 + (min(max(uc.breakout_score, 0.0), 100.0) / 100.0) * bmax
 
         # Numerator: regime × breakout (win_prob removed — anti-predictive)
         numerator = uc.regime_score * breakout_boost
@@ -536,22 +537,17 @@ class UnifiedBrain:
         a_tier = t.get("tier_a", {})
         b_tier = t.get("tier_b", {})
 
+        # UB-A10: win_prob clauses removed — all thresholds are 0.0 (disabled).
+        # The dead clauses were a revert-to-pre-Cycle-44 landmine under partial-config override.
         if (
             alpha_score >= float(aplus.get("alpha", 0.72))
-            and uc.confidence >= float(aplus.get("win_prob", 0.0))
             and uc.regime_score >= float(aplus.get("regime_score", 0.85))
             and uc.breakout_score >= float(aplus.get("breakout_score", 0.0))
         ):
             tier = "A+"
-        elif (
-            alpha_score >= float(a_tier.get("alpha", 0.55))
-            and uc.confidence >= float(a_tier.get("win_prob", 0.0))
-        ):
+        elif alpha_score >= float(a_tier.get("alpha", 0.55)):
             tier = "A"
-        elif (
-            alpha_score >= float(b_tier.get("alpha", 0.38))
-            and uc.confidence >= float(b_tier.get("win_prob", 0.0))
-        ):
+        elif alpha_score >= float(b_tier.get("alpha", 0.38)):
             tier = "B"
         else:
             tier = "C"

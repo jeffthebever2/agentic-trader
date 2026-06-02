@@ -71,17 +71,24 @@ class TickerReliabilityTracker:
         -------
         float in [0.0, 1.0]. 0.5 if no data.
         """
+        def _pnl_value(t: dict):
+            """TR-3: accept pnl / pnl_pct / return_pct / actual_return aliases."""
+            for k in ("pnl", "pnl_pct", "return_pct", "actual_return"):
+                if k in t and t[k] is not None:
+                    return float(t[k])
+            return None
+
         ticker_trades = [
             t for t in trades
             if t.get("ticker", "").upper() == ticker.upper()
-            and "pnl" in t
+            and _pnl_value(t) is not None
         ][-self.window:]
 
         n = len(ticker_trades)
         if n == 0:
             return 0.5
 
-        raw_wr = sum(1 for t in ticker_trades if t["pnl"] > 0) / n
+        raw_wr = sum(1 for t in ticker_trades if (_pnl_value(t) or 0) > 0) / n
         blend = min(1.0, n / self.blend_at_n)
         score = 0.5 * (1.0 - blend) + raw_wr * blend
         return round(score, 4)

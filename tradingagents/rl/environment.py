@@ -104,8 +104,10 @@ class StockTradingEnv:
     # ------------------------------------------------------------------ #
 
     def reset(self, seed: Optional[int] = None) -> Tuple[np.ndarray, dict]:
+        # RL-8: global np.random.seed inside reset() pollutes all downstream NumPy randomness.
+        # Use a local Generator instead (doesn't affect global state).
         if seed is not None:
-            np.random.seed(seed)
+            self._rng = np.random.default_rng(seed)
         self._t = LOOKBACK
         self._cash = self.starting_cash
         self._shares = np.zeros(self.n)
@@ -345,14 +347,14 @@ def _compute_rsi(closes: np.ndarray, period: int = 14) -> float:
 
 
 def _compute_macd_hist(closes: np.ndarray) -> float:
+    # RL-3/BO-1: same bug as breakout_scanner — signal computed on a one-element Series
+    # so signal==macd → hist always 0. Fix: compute signal on the full MACD series.
     if len(closes) < 26:
         return 0.0
     s = pd.Series(closes)
-    ema12 = s.ewm(span=12, adjust=False).mean().iloc[-1]
-    ema26 = s.ewm(span=26, adjust=False).mean().iloc[-1]
-    macd = ema12 - ema26
-    signal = pd.Series([macd]).ewm(span=9, adjust=False).mean().iloc[-1]
-    return float(macd - signal)
+    macd_series = s.ewm(span=12, adjust=False).mean() - s.ewm(span=26, adjust=False).mean()
+    signal_series = macd_series.ewm(span=9, adjust=False).mean()
+    return float((macd_series - signal_series).iloc[-1])
 
 
 class _BoxSpace:

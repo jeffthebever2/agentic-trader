@@ -705,13 +705,14 @@ def _rsi(closes: pd.Series, period: int = 14) -> float:
 
 
 def _macd_hist(closes: pd.Series) -> float:
+    # BO-1: MACD histogram was always 0 because signal was computed on a one-element
+    # Series([macd_scalar]) so signal==macd → hist=0. Fix: compute signal on the full
+    # MACD series so the 9-EMA is meaningful.
     if len(closes) < 26:
         return 0.0
-    ema12   = float(closes.ewm(span=12, adjust=False).mean().iloc[-1])
-    ema26   = float(closes.ewm(span=26, adjust=False).mean().iloc[-1])
-    macd    = ema12 - ema26
-    signal  = float(pd.Series([macd]).ewm(span=9, adjust=False).mean().iloc[-1])
-    return float(macd - signal)
+    macd_series = closes.ewm(span=12, adjust=False).mean() - closes.ewm(span=26, adjust=False).mean()
+    signal_series = macd_series.ewm(span=9, adjust=False).mean()
+    return float((macd_series - signal_series).iloc[-1])
 
 
 def _bb(closes: pd.Series, period: int = 20) -> Tuple[float, float, float]:

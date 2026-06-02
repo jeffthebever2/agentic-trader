@@ -529,8 +529,14 @@ class MarketRegimeEngine:
         # ── regime_confidence ────────────────────────────────────────────
         # How unambiguous is the signal? High confidence = strong bull or strong crash.
         # Low confidence = sideways, mixed signals.
-        max_prob = max(prob_bull, prob_bear, prob_chop, prob_crash, prob_rebound)
-        prob_sorted = sorted([prob_bull, prob_bear, prob_chop, prob_high_vol, prob_crash, prob_rebound], reverse=True)
+        # MR-3: max_prob was computed but unused (prob_sorted already computes the maximum).
+        # Removed dead variable. Also ensure prob_rebound is included in prob_sorted (was
+        # inconsistently included in max_prob but not the full probability set — use one list).
+        prob_sorted = sorted(
+            [prob_bull, prob_bear, prob_chop, prob_high_vol, prob_crash, prob_rebound,
+             prob_risk_on, prob_risk_off],
+            reverse=True,
+        )
         # Confidence: gap between top and second-highest probability
         gap = prob_sorted[0] - prob_sorted[1] if len(prob_sorted) >= 2 else prob_sorted[0]
         regime_confidence = float(np.clip(0.5 + gap * 2.0, 0.05, 1.0))
@@ -594,21 +600,26 @@ class MarketRegimeEngine:
         )
 
     def _unknown_state(self, as_of_date: str) -> MarketRegimeState:
-        """Return safe unknown state when data download fails."""
+        """Return safe unknown state when data download fails or SPY history insufficient.
+
+        MR-6: previously returned size_factor=0.80 and no_trade=False — a data-truncation
+        or download failure silently dropped into 0.8× size instead of halting. A system that
+        can't determine the regime must not trade.
+        """
         return MarketRegimeState(
             regime="unknown",
             prob_bull=0.0, prob_bear=0.0, prob_chop=0.0,
             prob_high_vol=0.0, prob_crash=0.0, prob_rebound=0.0,
             prob_risk_on=0.5, prob_risk_off=0.5,
-            regime_score=0.80,
+            regime_score=0.0,
             crash_risk_score=0.0,
             regime_confidence=0.0,
-            no_trade=False,
-            size_factor=0.80,
-            ml_threshold=self.ml_base_threshold,
+            no_trade=True,      # MR-6: halt on unknown regime (was False → 0.8× size)
+            size_factor=0.0,    # MR-6: no position sizing when regime is unknown
+            ml_threshold=0.95,  # MR-6: effectively blocks all signals
             stop_mult=1.0,
             tp_mult=1.0,
-            max_open_trades=6,
+            max_open_trades=0,  # MR-6: block new entries
             features={},
             as_of_date=as_of_date,
         )

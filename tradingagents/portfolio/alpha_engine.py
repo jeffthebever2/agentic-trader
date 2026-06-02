@@ -350,14 +350,15 @@ class AlphaEngine:
         raw_alpha = numerator / denominator
 
         # Ticker reliability multiplier [0.5, 1.1]
-        rel_clipped = max(0.5, min(1.0, ticker_reliability))
+        # AE-A3: rel_clipped was computed but not used in math, then exported as audit value
+        # — telemetry reported a different reliability than what scored the trade. Removed.
         if ticker_reliability >= 0.65:
             rel_mult = 1.0 + (ticker_reliability - 0.65) / 0.35 * 0.10   # [1.00, 1.10]
         elif ticker_reliability >= 0.40:
             rel_mult = 0.60 + (ticker_reliability - 0.40) / 0.25 * 0.40  # [0.60, 1.00]
         else:
             rel_mult = 0.50  # max penalty
-        rel_mult = max(0.50, min(1.10, rel_mult))  # Cycle 44: clamp to design range (guards reliability>1.0)
+        rel_mult = max(0.50, min(1.10, rel_mult))
 
         alpha_score = raw_alpha * rel_mult * feedback_mult
 
@@ -382,7 +383,7 @@ class AlphaEngine:
             breakout_score=breakout_score,
             breakout_boost=breakout_boost,
             regime_score=reg_score,
-            ticker_reliability=rel_clipped,
+            ticker_reliability=ticker_reliability,  # AE-A3: export real value used in math
             feedback_mult=feedback_mult,
             ll_penalty=ll_penalty,
             vol_penalty=vol_penalty,

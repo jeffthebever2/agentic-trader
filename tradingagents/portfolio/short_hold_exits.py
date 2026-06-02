@@ -253,6 +253,25 @@ class ShortHoldExitManager:
         import copy
         p = copy.deepcopy(plan)  # work on copy; original stays clean
 
+        # SH-4: check stop BEFORE (and also within) MAX_HOLD — a day-10 gap-down should
+        # record STOP_HIT at the stop, not MAX_HOLD at current price (which would be above stop).
+        # Check stop first so the correct exit type and fill price are recorded.
+        effective_stop = p.effective_stop()
+        if current_price <= effective_stop:
+            if p.trail_active:
+                signal = ExitSignal.TRAILING_STOP
+                reason = f"trailing stop hit: price={current_price:.2f} <= trail_stop={p.trail_stop:.2f}"
+            else:
+                signal = ExitSignal.STOP_HIT
+                reason = f"stop hit: price={current_price:.2f} <= stop={p.stop:.2f}"
+            return ExitCheckResult(
+                signal         = signal,
+                exit_price     = current_price,
+                close_fraction = 1.0,
+                reason         = reason,
+                updated_plan   = p,
+            )
+
         # 1. Time-based exit. Cycle 44 E-9: conditional — the profit engine is the
         # ~44% of trades that time out positive (drift). Dumping a still-green,
         # still-trending position at the hard day count truncates that right tail.
@@ -273,16 +292,18 @@ class ShortHoldExitManager:
                     ),
                     updated_plan   = p,
                 )
+            # SH-4: floor MAX_HOLD fill at stop if price gapped through stop (conservative fill)
+            max_hold_exit_price = max(current_price, effective_stop) if current_price < effective_stop else current_price
             return ExitCheckResult(
                 signal         = ExitSignal.MAX_HOLD,
-                exit_price     = current_price,
+                exit_price     = max_hold_exit_price,
                 close_fraction = 1.0,
                 reason         = f"max_hold reached (open_days={open_days}, not trending)",
                 updated_plan   = p,
             )
 
-        # 2. Stop hit (handles both initial stop and active trail stop)
-        effective_stop = p.effective_stop()
+        # 2. Stop hit — already handled above before MAX_HOLD check.
+        # This block now only runs when NOT in MAX_HOLD territory (open_days < max_hold_days).
         if current_price <= effective_stop:
             if p.trail_active:
                 signal = ExitSignal.TRAILING_STOP
@@ -417,8 +438,8 @@ def build_exit_plan(
         breakeven_trigger_atr   = float(cfg.get("breakeven_trigger_atr", 1.0)),
         trail_atr_mult          = float(cfg.get("trail_atr_mult", 0.5)),
         partial_profit_fraction = float(cfg.get("partial_profit_fraction", 0.50)),
-        partial_profit_trigger  = float(cfg.get("partial_profit_trigger", 0.50)),
-        min_rr                  = float(cfg.get("min_rr", 1.5)),
+        partial_profit_trigger  = float(cfg.get("partial_profit_trigger", 0.833)),  # SH-1: was 0.50, must match from_candidate
+        min_rr                  = float(cfg.get("min_rr", 1.15)),  # SH-1: was 1.5, must match from_candidate
         trail_stop              = stop,
         peak_price              = entry,
         created_at              = dt.datetime.now().isoformat(timespec="seconds"),

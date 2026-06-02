@@ -97,7 +97,7 @@ class CandidateRanker:
         Reject candidates where win_probability < this value. Default 0.0
         (DISABLED — win_prob ROC=0.4684 anti-predictive; do not gate on it).
     vol_penalty_atr_threshold : float
-        ATR% above this triggers a volatility penalty. Default 0.03 (3%).
+        ATR% above this triggers a volatility penalty. Default 0.04 (4%) — CR-A2: unified with AlphaEngine.
     vol_penalty_scale : float
         Penalty strength per unit of excess ATR%. Default 1.0.
     ll_penalty_scale : float
@@ -112,7 +112,7 @@ class CandidateRanker:
         self,
         ll_hard_cap: float = 0.50,
         min_win_prob: float = 0.0,   # disabled: ROC=0.4684 < 0.5. Re-enable after Cycle 17 retrain.
-        vol_penalty_atr_threshold: float = 0.03,
+        vol_penalty_atr_threshold: float = 0.04,  # CR-A2: unified with AlphaEngine (was 0.03)
         vol_penalty_scale: float = 1.0,
         ll_penalty_scale: float = 1.5,
         timeout_penalty_scale: float = 0.3,
@@ -256,7 +256,7 @@ class CandidateRanker:
         # we've seen it lose consistently).
         # Boost for proven tickers (>0.65), floor for unreliable (<0.5→0.5×)
         if ticker_reliability >= 0.65:
-            rel_mult = 1.0 + (ticker_reliability - 0.65) / 0.35 * 0.15  # [1.0, 1.15]
+            rel_mult = 1.0 + (ticker_reliability - 0.65) / 0.35 * 0.10  # CR-A2: slope 0.10 unified with AlphaEngine (was 0.15)
         elif ticker_reliability >= 0.40:
             rel_mult = 0.60 + (ticker_reliability - 0.40) / 0.25 * 0.40  # [0.60, 1.0]
         else:

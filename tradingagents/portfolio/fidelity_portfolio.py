@@ -172,6 +172,16 @@ class FidelityPortfolio:
                 if p:
                     results.append(p)
 
+        # E2FP2: if data was non-empty but we got zero positions, warn loudly —
+        # a funded account can't legitimately appear flat from a non-empty data blob.
+        if not results and data:
+            import logging as _log
+            _log.getLogger("fidelity_portfolio").warning(
+                "Account %s: non-empty data produced 0 positions — unknown schema shape. "
+                "Re-buy / stop-management may be incorrect. Data type: %s",
+                account_key, type(data).__name__,
+            )
+
         return results
 
     @staticmethod
@@ -211,7 +221,12 @@ class FidelityPortfolio:
             gain_loss_pct = float(pick("gain_loss_pct", "unrealized_gain_loss_pct",
                                        "Gain/Loss Percent") or
                                   (gain_loss / cost_basis * 100 if cost_basis else 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            # E2FP1: never silently drop a row with a valid ticker — log it loudly
+            import logging as _log
+            _log.getLogger("fidelity_portfolio").warning(
+                "Failed to parse numeric fields for ticker %s: %s (row=%s)", ticker, exc, row
+            )
             return None
 
         return {

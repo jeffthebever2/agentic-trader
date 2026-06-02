@@ -182,13 +182,21 @@ class PredictionGrader:
             # winner (2.5) down to 0.025 — corrupting exactly the trades that matter
             # most. Trust the fraction at source; no magnitude guess.
             pnl_pct = float(sell_ev.get("pnl_pct", sell_ev.get("return_pct", 0.0)) or 0.0)
-            actual_win = pnl_pct > 0
+            # PG-3: use 0.5% deadband matching the model's trained win definition (_return>0.005)
+            # Previously used pnl>0 vs the model's trained 0.5% threshold → calibration drift
+            # was measured against a different win definition than the model learned.
+            actual_win = pnl_pct > 0.005
             actual_ret = pnl_pct
 
             # Max drawdown (how far price fell below entry while held)
-            max_dd_pct = float(sell_ev.get("max_drawdown_pct", sell_ev.get("max_adverse_pct", 0.0)) or 0.0)
-            if max_dd_pct > 0:
-                max_dd_pct = -max_dd_pct  # normalise to negative
+            # PG-1: if MAE is absent, leave as None — don't default to 0 which fakes "no large loss"
+            _mae_raw = sell_ev.get("max_drawdown_pct", sell_ev.get("max_adverse_pct"))
+            if _mae_raw is not None:
+                max_dd_pct = float(_mae_raw or 0.0)
+                if max_dd_pct > 0:
+                    max_dd_pct = -max_dd_pct  # normalise to negative
+            else:
+                max_dd_pct = None  # type: ignore[assignment]  # surfaced as None below
 
             # Cycle 44 GC-2: normalize exit_reason (emitters use STOP_LOSS /
             # TAKE_PROFIT, the grader matched lowercase "stop"/"target") so
@@ -212,8 +220,13 @@ class PredictionGrader:
             # ── Derived accuracy ──────────────────────────────────────────
             win_pred_correct = (pred_wp >= self.win_prob_threshold) == actual_win
             return_error = round(pred_ret - actual_ret, 6)
-            actual_large_loss = max_dd_pct <= -self.large_loss_drawdown_pct
-            ll_pred_correct = ((pred_ll >= self.ll_threshold) == actual_large_loss)
+            # PG-1: MAE absent → actual_large_loss unknown, exclude from accuracy
+            if max_dd_pct is None:
+                actual_large_loss = False  # placeholder; ll_pred_correct excluded below
+                ll_pred_correct = None  # type: ignore[assignment]
+            else:
+                actual_large_loss = max_dd_pct <= -self.large_loss_drawdown_pct
+                ll_pred_correct = ((pred_ll >= self.ll_threshold) == actual_large_loss)
 
             # ── Buckets ───────────────────────────────────────────────────
             if pred_wp >= 0.70:
@@ -250,7 +263,7 @@ class PredictionGrader:
                 model_version=model_version,
                 actual_win=actual_win,
                 actual_return=round(actual_ret, 6),
-                actual_max_drawdown=round(max_dd_pct, 6),
+                actual_max_drawdown=round(max_dd_pct, 6) if max_dd_pct is not None else 0.0,
                 stop_hit=stop_hit,
                 target_hit=target_hit,
                 hold_days=hold_days,
@@ -364,7 +377,9 @@ class PredictionGrader:
         win_pred_acc = sum(1 for g in grades if g.win_prediction_correct) / n
         avg_ret = sum(g.actual_return for g in grades) / n
         avg_ret_err = sum(abs(g.return_error) for g in grades) / n
-        ll_pred_acc = sum(1 for g in grades if g.ll_prediction_correct) / n
+        # PG-1: exclude None ll_prediction_correct (MAE absent) from accuracy
+        ll_gradeable = [g for g in grades if g.ll_prediction_correct is not None]
+        ll_pred_acc = sum(1 for g in ll_gradeable if g.ll_prediction_correct) / max(len(ll_gradeable), 1)
         stop_rate = sum(1 for g in grades if g.stop_hit) / n
         target_rate = sum(1 for g in grades if g.target_hit) / n
         return {

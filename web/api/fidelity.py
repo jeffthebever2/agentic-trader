@@ -1034,9 +1034,8 @@ async def _get_fidelity_balances(email: str) -> dict:
             if v is not None:
                 cash_val = (cash_val or 0) + v
 
-        # Fallback: if no explicit cash found, use 10% of grand total as rough estimate
-        if cash_val is None and grand_total:
-            cash_val = grand_total * 0.10
+        # E2FP5: do NOT invent a balance when cash scrape fails — a safety system must
+        # refuse to act on an unknown balance. Leave cash_val as None; callers will abort.
 
         return {
             "total_value":     grand_total,
@@ -1226,9 +1225,12 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
     if total_value is None or total_value <= 0:
         raise HTTPException(status_code=400, detail="Cannot determine Fidelity account value — check session. Refresh the portfolio page and retry.")
     if available_cash is None:
-        # Warn but use 15% conservative estimate (better than refusing entirely)
-        available_cash = total_value * 0.15
-        log.warning("Cash scrape failed — fallback estimate $%.0f (15%% of $%.0f). VERIFY before executing.", available_cash, total_value)
+        # E2FP5: hard-abort — never trade against an invented balance
+        raise HTTPException(
+            status_code=400,
+            detail="Cash balance could not be scraped from Fidelity. Refusing to size/execute. "
+                   "Refresh the Broker page to re-scrape, then retry."
+        )
     if available_cash <= 0:
         raise HTTPException(status_code=400, detail=f"No available cash (scraped: ${available_cash:.2f}). Check Fidelity account.")
 

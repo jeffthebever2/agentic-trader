@@ -96,7 +96,9 @@ class DriftDetector:
         window: int = 30,
     ) -> tuple[Optional[float], List[str]]:
         """Return (drift_value, alert_list)."""
-        recent = grades[-window:] if len(grades) > window else grades
+        # DD-2: sort by graded_at so windowing uses the most recent trades, not file-glob order
+        sorted_grades = sorted(grades, key=lambda g: getattr(g, "graded_at", ""), reverse=False)
+        recent = sorted_grades[-window:] if len(sorted_grades) > window else sorted_grades
         n = len(recent)
         if n < self.min_trades_for_drift:
             return None, []
@@ -123,7 +125,9 @@ class DriftDetector:
         window: int = 30,
     ) -> tuple[Optional[float], List[str]]:
         """Return (failure_rate, alerts)."""
-        recent = grades[-window:] if len(grades) > window else grades
+        # DD-2: sort chronologically before windowing
+        sorted_grades = sorted(grades, key=lambda g: getattr(g, "graded_at", ""), reverse=False)
+        recent = sorted_grades[-window:] if len(sorted_grades) > window else sorted_grades
         high_conf = [g for g in recent if g.predicted_win_prob >= self.high_conf_min_prob]
         n = len(high_conf)
         if n < max(5, self.min_trades_for_drift // 2):
@@ -156,16 +160,20 @@ class DriftDetector:
         except Exception:
             return None, []
 
-        # Walk-forward win rate from validation summary
+        # DD-5: trainer emits actual_win_rate / high_conf_win_rate, never wf_win_rate
+        wf_block = val.get("walk_forward") or val.get("train", {})
         wf_wr = (
-            val.get("train", {}).get("wf_win_rate")
-            or val.get("wf_win_rate")
+            wf_block.get("actual_win_rate")
+            or wf_block.get("high_conf_win_rate")
+            or val.get("actual_win_rate")
+            or val.get("wf_win_rate")  # legacy fallback
         )
         if wf_wr is None:
             return None, []
 
-        # Paper win rate from grades
-        recent = grades[-window:] if len(grades) > window else grades
+        # DD-2: sort chronologically before windowing
+        sorted_grades = sorted(grades, key=lambda g: getattr(g, "graded_at", ""), reverse=False)
+        recent = sorted_grades[-window:] if len(sorted_grades) > window else sorted_grades
         n = len(recent)
         if n < self.min_trades_for_drift:
             return None, []

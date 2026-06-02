@@ -141,9 +141,17 @@ def _calibrate_classifier(clf, x_val, y_val, method: str = "isotonic"):
     auto_method = "isotonic" if len(y_val) >= 1000 else "sigmoid"
     actual_method = method if method in ("isotonic", "sigmoid") else auto_method
     try:
-        # cv=None is the sklearn 1.8+ replacement for cv="prefit"
-        # (pre-fitted estimator, calibrate on x_val directly)
-        cal = CalibratedClassifierCV(clf, method=actual_method, cv=None)
+        # TM-1: CalibratedClassifierCV(clf, cv=None) with a non-frozen estimator does 5-fold
+        # CV internally — it re-trains clf on ~15% calibration slices, NOT on the full-train model.
+        # The shipped "calibrated" model is a weak small-sample re-fit.
+        # Fix: use FrozenEstimator (sklearn >= 1.6) so cv=None calibrates the pre-fitted model.
+        try:
+            from sklearn.frozen import FrozenEstimator
+            _clf_to_calibrate = FrozenEstimator(clf)
+        except ImportError:
+            # Fallback for older sklearn — cv="prefit" is deprecated but calibrates in-place
+            _clf_to_calibrate = clf  # type: ignore[assignment]
+        cal = CalibratedClassifierCV(_clf_to_calibrate, method=actual_method, cv=None)
         cal.fit(x_val, y_val)
         raw_prob = clf.predict_proba(x_val)[:, 1]
         cal_prob = cal.predict_proba(x_val)[:, 1]

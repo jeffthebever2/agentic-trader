@@ -1917,6 +1917,9 @@ async def approve_signal(
     stop_pct   = body.stop_pct   or sig.get("stop_pct", 7)
     target_pct = body.target_pct or sig.get("target_pct", 20)
     conviction = int(sig.get("conviction", 7))
+    # A3: ticker must be defined BEFORE the R:R log block below — 'ticker' in dir() is
+    # always False so the log always printed '?'. Move assignment here.
+    ticker = sig["ticker"]
 
     # ── R:R gate ──────────────────────────────────────────────────────────────
     from web import users as _us
@@ -1929,7 +1932,7 @@ async def approve_signal(
         rr_warning = f"R:R {rr:.2f} < minimum {min_rr:.1f} — target {target_pct}% vs stop {stop_pct}%"
         # Auto-widen target to meet minimum R:R
         target_pct = round(stop_pct * min_rr, 1)
-        log.info("R:R too low for %s — widened target to %.1f%%", ticker if 'ticker' in dir() else '?', target_pct)
+        log.info("R:R too low for %s — widened target to %.1f%%", ticker, target_pct)
 
     # ── Score gate ────────────────────────────────────────────────────────────
     raw_score = float(sig.get("raw_score", 0) or 0)
@@ -1944,7 +1947,7 @@ async def approve_signal(
     from web.api.thematic_portfolio import _load, _save, _fetch_prices, DEFAULT_THEMES
     import datetime as _dt
     port = _load(user["email"])
-    ticker = sig["ticker"]
+    # ticker already defined above (A3 fix)
     if ticker not in port["positions"]:
         port["positions"][ticker] = {
             "ticker":      ticker,

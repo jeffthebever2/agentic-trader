@@ -1,5 +1,11 @@
 """Dynamic exit level calculator for TradingAgents paper/live trading.
 
+EM-1 WARNING: THIS MODULE IS NOT ON THE LIVE EXECUTION PATH.
+The live exit engine is ShortHoldExitManager in short_hold_exits.py.
+ExitManager is used only for initial stop/target CALCULATION at entry time
+(via paper_trade_today.py score_at()). Do NOT tune exit behavior here expecting
+it to affect live positions — tune short_hold_exits.py instead.
+
 Computes stop-loss and take-profit levels from ATR, ML confidence, expected
 return, and R:R constraints. All logic is deterministic and auditable.
 

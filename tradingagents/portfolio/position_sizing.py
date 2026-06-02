@@ -246,14 +246,15 @@ class PositionSizer:
         base_pct *= regime_factor
         base_pct = max(cap_min * 0.5, min(cap_max_effective, base_pct))  # soft clamp
 
-        # ── 6b. Apply tier factor from AlphaEngine (A+=1.25×, A=1.0×, B=0.5×) ───────
-        # Tier factor is applied AFTER regime/streak so we don't amplify already-reduced sizes.
-        # Hard cap (cap_max) is still the ceiling — tier can only push up to it, never above.
+        # ── 6b. Tier-factor gate ─────────────────────────────────────────────────────
+        # PS-3: tier_factor must be applied exactly ONCE per sizing path. Previously it was
+        # applied here (to base_pct, used by fallback path) AND again inside the ATR path
+        # (to risk_dollars), making the ATR path tier-scale twice and sizes inconsistent.
+        # Solution: only gate here (tier C → no trade); actual scaling happens inside each path.
         tier_factor = max(0.0, min(2.0, tier_factor))  # safety clamp
-        if tier_factor > 0:
-            base_pct = min(cap_max, base_pct * tier_factor)
-        else:
+        if tier_factor <= 0:
             return 0  # tier C → no trade
+        # Do NOT multiply base_pct here — fallback path applies tier_factor below.
 
         # ── 7. ATR dollar-risk sizing (PRIMARY path when stop/atr available) ────────
         commission = getattr(args, "commission", 0.0)
@@ -285,7 +286,9 @@ class PositionSizer:
             final_shares = max(0, min(final_shares, int(math.floor(budget / price))))
         else:
             # ── 8. Percentage-of-account fallback ─────────────────────────────────────
-            max_position_value = account_value * base_pct
+            # PS-3: apply tier_factor exactly once here (ATR path already applied it above)
+            scaled_pct = min(cap_max, base_pct * tier_factor)
+            max_position_value = account_value * scaled_pct
             # Use settled_cash as ceiling — never size into unsettled funds
             budget = max(0.0, min(settled_cash - commission, max_position_value))
             final_shares = max(0, int(math.floor(budget / price)))

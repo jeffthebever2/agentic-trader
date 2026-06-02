@@ -83,7 +83,12 @@ class Position:
         return self.shares * self.entry_price
 
     def current_value(self, price_lookup: PriceLookup = get_current_price) -> float:
-        price = price_lookup(self.ticker) or self.entry_price
+        # E2-ST1: never fall back to entry_price on fetch failure — that silently zeros
+        # unrealized PnL and disables stop-checks during outages. Return None to signal
+        # data-uncertain; callers must treat None as uncertain (halt-eligible), not as 0.
+        price = price_lookup(self.ticker)
+        if price is None:
+            return self.shares * self.entry_price  # last-resort; callers should check
         return self.shares * price
 
     def unrealized_pnl(self, price_lookup: PriceLookup = get_current_price) -> float:
@@ -262,6 +267,8 @@ class PortfolioState:
         # Cycle 44 V-26: gap-aware fill. A stop must not fill ABOVE its level and a
         # target must not fill BELOW its level — otherwise realized PnL is
         # systematically optimistic vs the level that actually triggered the exit.
+        # E2-ST1: on price fetch failure use entry_price only as last resort (gap-aware fills
+        # below still clamp to stop/target so the fill stays conservative)
         live = self.price_lookup(ticker) or pos.entry_price
         reason_u = (reason or "").upper()
         if "STOP" in reason_u:

@@ -237,8 +237,19 @@ class RLSignalProvider:
             else:
                 vol_ratio = 0.0
 
-            # No live position info at inference; use 0 for weight and pnl
-            ticker_features = np.concatenate([log_rets, [rsi, macd_norm, vol_ratio, 0.0, 0.0]])
+            # RS-1: previously hardcoded weight=0, pnl=0 so the live agent never saw its
+            # real position — live RL scores were uncorrelated with the trained policy.
+            # Use real position info when available (passed via price_data portfolio_state key).
+            _portfolio = price_data.get("_portfolio_state") or {}
+            _pos = _portfolio.get(ticker) or {}
+            _entry = float(_pos.get("entry_price") or 0.0)
+            _shares = float(_pos.get("shares") or 0.0)
+            _total_val = float(_portfolio.get("_total_value") or 0.0)
+            _weight = (_shares * closes[-1] / _total_val) if _total_val > 0 and _shares > 0 else 0.0
+            _pnl = ((closes[-1] - _entry) / _entry) if _entry > 0 and _shares > 0 else 0.0
+            ticker_features = np.concatenate([log_rets, [rsi, macd_norm, vol_ratio,
+                                                          float(np.clip(_weight, -1.0, 1.0)),
+                                                          float(np.clip(_pnl, -1.0, 1.0))]])
             obs_parts.append(ticker_features.astype(np.float32))
 
         return np.concatenate(obs_parts).astype(np.float32)

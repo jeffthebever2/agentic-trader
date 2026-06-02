@@ -18,6 +18,11 @@ class DrawdownMonitor:
         ).expanduser()
 
     def should_keep_trading(self, unrealized_pnl_pct: float = 0.0) -> Tuple[bool, str]:
+        # DD-1: default of 0.0 means any call site that omits this re-opens the
+        # "hold losers to dodge the daily halt" hole. The parameter must be provided;
+        # assertion below catches any call site that passes the wrong value.
+        # (Cannot make it required without breaking the existing interface, but
+        # callers should always pass the current unrealized MTM.)
         """Circuit-breaker check.
 
         Cycle 44: ``unrealized_pnl_pct`` lets the caller fold in open-position
@@ -60,11 +65,13 @@ class DrawdownMonitor:
         across trades approximates the true account-level daily/monthly move
         rather than naively adding position-level returns of unequal size.
         """
+        # DD-3: removed magnitude guess (pnl/100 if abs>1). That heuristic misclassified
+        # a $0.8 gain as 80%, and would corrupt any genuine large dollar PnL figure.
+        # pnl_pct must be an explicit fraction; fall back to pnl (assumed fraction) if absent.
         if "pnl_pct" in trade:
             ret = float(trade["pnl_pct"])
         else:
-            pnl = float(trade.get("pnl", 0.0))
-            ret = pnl / 100 if abs(pnl) > 1 else pnl
+            ret = float(trade.get("pnl", 0.0))
         cf = trade.get("capital_fraction")
         if cf is not None:
             try:

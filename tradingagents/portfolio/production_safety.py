@@ -353,8 +353,9 @@ class ModelHealthChecker:
                     result["warn_reasons"].append(
                         f"WARN_model_stale: {age}d > {self.warn_age_days}d (retrain recommended)"
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                # E2-PS6: parse failure → warn, never silently pass as "healthy"
+                result["warn_reasons"].append(f"WARN_model_age_parse_error: {exc}")
 
         # ── Feature count ────────────────────────────────────────────────
         feats = _bundle.get("numeric_features") or _bundle.get("feature_names", [])
@@ -367,16 +368,13 @@ class ModelHealthChecker:
                 cal_dt = dt.datetime.fromisoformat(str(cal_date)[:19])
                 cal_age = (dt.datetime.now() - cal_dt).days
                 result["calibration_age_days"] = cal_age
-                # Cycle 44 V-23: probability calibration decays faster than model
-                # relevance; use an independent (shorter) staleness threshold rather
-                # than max_age_days+15 (~60d).
                 cal_stale_days = int(self.cfg.get("max_calibration_age_days", 25)) if hasattr(self, "cfg") else 25
                 if cal_age > cal_stale_days:
                     result["warn_reasons"].append(
                         f"WARN_calibration_stale: {cal_age}d > {cal_stale_days}d since last calibration"
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                result["warn_reasons"].append(f"WARN_calibration_age_parse_error: {exc}")
 
         # ── Drift log ────────────────────────────────────────────────────
         _drift_path = drift_log_path
@@ -388,13 +386,16 @@ class ModelHealthChecker:
                 if drift is not None:
                     result["drift"] = float(drift)
                     if float(drift) > self.max_drift:
+                        # E2-PS6: build halt reason after threshold check; format defensively
+                        pred_wr = drift_data.get("predicted_win_rate")
+                        act_wr = drift_data.get("actual_win_rate")
                         result["halt_reasons"].append(
-                            f"model_drift: {drift:.3f} > {self.max_drift} "
-                            f"(predicted_wr={drift_data.get('predicted_win_rate', '?'):.3f}, "
-                            f"actual_wr={drift_data.get('actual_win_rate', '?'):.3f})"
+                            f"model_drift: {float(drift):.3f} > {self.max_drift} "
+                            f"(predicted_wr={pred_wr:.3f if isinstance(pred_wr, float) else '?'}, "
+                            f"actual_wr={act_wr:.3f if isinstance(act_wr, float) else '?'})"
                         )
-            except Exception:
-                pass
+            except Exception as exc:
+                result["warn_reasons"].append(f"WARN_drift_log_parse_error: {exc}")
 
         # ── Validation summary ───────────────────────────────────────────
         _val_path = validation_summary_path
@@ -406,20 +407,19 @@ class ModelHealthChecker:
                 brier = val_data.get("brier_score") or val_data.get("model_brier")
                 result["roc_auc"] = roc
                 result["brier"] = brier
-                if roc is not None and float(roc) < 0.45:
-                    # Cycle 44 V-22: hard halt for a clearly anti-predictive model.
-                    # Floor set at 0.45 (well below the deployed model's test ROC ~0.49
-                    # and WF ROC 0.5121) so it catches catastrophic degradation without
-                    # halting the current model whose trusted safeguard is the ll head.
-                    result["halt_reasons"].append(
-                        f"model_roc_broken: roc_auc={float(roc):.3f} < 0.45 (anti-predictive)"
-                    )
-                elif roc is not None and float(roc) < 0.52:
-                    result["warn_reasons"].append(
-                        f"WARN_low_roc: roc_auc={roc:.3f} < 0.52 (weak discrimination)"
-                    )
-            except Exception:
-                pass
+                if roc is not None:
+                    roc_f = float(roc)
+                    if roc_f < 0.45:
+                        result["halt_reasons"].append(
+                            f"model_roc_broken: roc_auc={roc_f:.3f} < 0.45 (anti-predictive)"
+                        )
+                    elif roc_f < 0.52:
+                        result["warn_reasons"].append(
+                            f"WARN_low_roc: roc_auc={roc_f:.3f} < 0.52 (weak discrimination)"
+                        )
+            except Exception as exc:
+                # E2-PS7: parse failure → warn, not silent pass
+                result["warn_reasons"].append(f"WARN_validation_summary_parse_error: {exc}")
 
         return result
 
@@ -505,7 +505,15 @@ class ProductionSafetyMonitor:
             try:
                 shares = float(getattr(pos, "shares", 0) or 0)
                 entry_px = float(getattr(pos, "entry_price", 0) or 0)
-                px = float(prices.get(getattr(pos, "ticker", ""), entry_px) or entry_px)
+                ticker = getattr(pos, "ticker", "")
+                # E2-PS1: on price fetch failure, count MTM as 0 (not entry_price) so
+                # the breaker conservatively sees no unrealized gain — never fall back to
+                # cost because that zeros out any actual loss and disables the breaker.
+                raw_px = prices.get(ticker)
+                if raw_px is None:
+                    # price unknown — don't assume 0 PnL; leave position out of MTM
+                    continue
+                px = float(raw_px)
                 open_unrealized += shares * (px - entry_px)
             except (TypeError, ValueError):
                 continue

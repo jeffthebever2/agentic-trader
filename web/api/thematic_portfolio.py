@@ -61,8 +61,11 @@ def _fetch_prices(tickers: list[str]) -> dict[str, float]:
             closes = data["Close"] if hasattr(data["Close"], "columns") else data["Close"].to_frame()
             for t in needed:
                 try:
-                    col = t if t in closes.columns else closes.columns[0]
-                    price = float(closes[col].dropna().iloc[-1])
+                    # P6: only assign when the ticker's own column exists.
+                    # Previously fell back to columns[0] which could assign one ticker's price to another.
+                    if t not in closes.columns:
+                        continue
+                    price = float(closes[t].dropna().iloc[-1])
                     _price_cache[t] = (price, now)
                 except Exception:
                     pass
@@ -582,6 +585,9 @@ async def thematic_paper_trade(body: ThematicTradeIn, user: dict = Depends(get_c
         "crash_risk_at_entry": None,
         "regime_confidence_at_entry": None,
         "_source": "thematic",
+        # P1: set entry_raw_score from latest scan so buzz_decay exit can fire.
+        # Without this, the entry_raw > 0 guard always fails for manually-injected positions.
+        "entry_raw_score": _get_social_score_from_history(ticker) * 10.0,  # normalize back to ~raw-score scale
     }
 
     state["positions"]    = positions

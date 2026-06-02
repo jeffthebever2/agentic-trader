@@ -57,7 +57,10 @@ def _psi_one(ref_vals: np.ndarray, prod_vals: np.ndarray, n_bins: int = 10) -> f
     # drift. Below the floor we cannot assess, so return 0.0 (do not flag) and let
     # the caller treat scarce data as "unknown" rather than a drift signal.
     if len(ref_clean) < 50 or len(prod_clean) < 30:
-        return 0.0  # not enough data to assess
+        # FM-1: returning 0.0 ("perfectly stable") on insufficient data allows a scarce-data
+        # feature to pass the deploy gate AND runtime drift as definitively stable.
+        # Return None so the gate can distinguish "insufficient" from "checked and stable".
+        return None  # type: ignore[return-value]  # callers must handle None
 
     # Bin edges from reference distribution
     quantiles = np.linspace(0, 100, n_bins + 1)
@@ -142,7 +145,10 @@ class FeatureMonitor:
                 report[feat] = {"psi": None, "status": "error"}
                 continue
 
-            if psi >= self.fail_threshold:
+            # FM-1: _psi_one returns None when data is insufficient — tag as "insufficient"
+            if psi is None:
+                status = "insufficient"
+            elif psi >= self.fail_threshold:
                 status = "fail"
             elif psi >= self.warn_threshold:
                 status = "watch"
@@ -166,7 +172,14 @@ class FeatureMonitor:
         n_stable = sum(1 for d in report.values() if d.get("status") == "stable")
         n_watch = sum(1 for d in report.values() if d.get("status") == "watch")
         n_fail = sum(1 for d in report.values() if d.get("status") == "fail")
-        n_missing = sum(1 for d in report.values() if d.get("status") in ("missing", "error"))
+        n_missing = sum(1 for d in report.values() if d.get("status") in ("missing", "error", "insufficient"))
+        n_total = len(report)
+        # FM-4: passes_gate must account for n_missing — a bundle with half its features
+        # absent should NOT pass (previously n_fail==0 let a bundle with missing features deploy).
+        # Require at least 80% of features to be stable or watch (checked, not missing/fail).
+        n_assessable = n_stable + n_watch
+        min_assessable_pct = 0.80
+        enough_coverage = (n_assessable / max(n_total, 1)) >= min_assessable_pct
         worst = sorted(
             [(f, d["psi"]) for f, d in report.items() if d.get("psi") is not None],
             key=lambda x: x[1], reverse=True
@@ -176,8 +189,9 @@ class FeatureMonitor:
             "n_watch": n_watch,
             "n_fail": n_fail,
             "n_missing": n_missing,
-            "total": len(report),
-            "passes_gate": n_fail == 0,
+            "total": n_total,
+            "passes_gate": n_fail == 0 and enough_coverage,  # FM-4: must have coverage too
+            "coverage_pct": round(n_assessable / max(n_total, 1), 3),
             "worst_features": worst,
         }
 
