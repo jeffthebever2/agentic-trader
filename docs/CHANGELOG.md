@@ -6,6 +6,75 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [1.1.0] — 2026-06-02
+
+### Added
+
+- **Thematic portfolio Phase 3 safety gates** — `POST /api/thematic/trade` now
+  enforces: R:R gate (auto-widens target to `min_rr` instead of rejecting, returns
+  `warnings[]`); conviction-scaled position size (conviction 1→0.4×, 10→1.5×);
+  portfolio heat + daily loss circuit breakers via `_check_portfolio_circuit_breakers`;
+  real 14-day ATR from yfinance (replaced hardcoded `price × 0.02` proxy).
+- **Auto-trade loop** — after each scan, users with `auto_trade_paper=True` in HIL
+  settings automatically have confirmed signals (2+ scan appearances, score ≥ 40)
+  executed via `_auto_execute_confirmed_signals()`. Spike-only signals never auto-execute.
+- **Thematic Phase 1+2** (shipped 2026-06-01) — 34 improvements including: multi-source
+  confirmation bonus (+3 per extra source, cap +15); insider+social combo bonus (+8);
+  per-source breakdown stored per signal; `_validate_pick()` sanitizes all AI output;
+  non-blocking yfinance ticker validation via executor; auto-exit monitor checking stop/
+  target/max-hold/buzz-collapse/buzz-decay after every scan; atomic writes throughout;
+  social score pulled from live scan history; 4-hour auto-scan loop (`THEMATIC_AUTO_SCAN=true`).
+- **15 thematic data sources** — added StockAnalysis, Marketaux, Press Releases
+  (BusinessWire/PRN/GlobeNewswire), Finviz (top gainers + unusual vol), RSS news feeds
+  (MarketWatch/CNBC/WSJ/NYT/Bloomberg), Yahoo Finance movers, Brave Search, scan memory
+  (historical persistence bonus), Google News RSS, SeekingAlpha RSS to original 9 sources.
+- **Frontend: Signals + Logs pages** — new nav items with error boundaries; Signals page
+  shows thematic signal queue with source breakdown chips; Logs page streams server logs.
+- **Frontend nav restructure** — error boundary wrappers on every page; nav items reordered.
+- **`ta` CLI operational toolkit** — `ta ml retrain`, `ta paper run`, `ta paper status`
+  and related subcommands for managing trading operations from the terminal.
+- **Self-healing autofix monitor** (`scripts/autofix_monitor.py`) — watches for broken
+  paper trading processes, auto-restarts, sends SMS/email alerts on failure.
+- **Daily log rotation** via launchd (`scripts/rotate_logs.py`) — 10 MB cap, 7 gzip
+  archives, runs at 00:05 daily.
+- **Redundancy layer** — tunnel launchd plist, state file backups, deep health-check
+  endpoint; CodeQL security scan integration.
+- **Bulletproof news** — 3-source fallback chain (Google News RSS → yfinance → DDG) for
+  Dashboard and CandidatePanel news feeds.
+- **Cloudflare AI gateway** support for thematic auto-picker; falls back to OpenRouter.
+- **`scripts/backtest_thematic_signals.py`** — validates thematic signal quality from
+  scan history + exit log; reports WR/return by score bucket, source combo, and exit reason.
+
+### Changed
+
+- **Cycle 46 — retrain backtest row count fix** — removed `--min-price 15.0` and
+  `--min-adv 500000` from the training backtest command. These filters cut ~66% of data,
+  reducing training rows to ~420 (well below quality-gate minimum). The 2026-05-30 retrain
+  failed (gate: WF ROC ≥ 0.49) because of this filtering. Removed from
+  `scripts/retrain_weekly.py` backtest_cmd; price/ADV filters remain at inference time.
+- **Cycle 44 — stop geometry fix** — live screener `_ATR_STOP` corrected 0.7 → 1.0 ATR
+  to match ML label geometry. EV/trade improved +0.117%/trade (+87%) on 1,554-trade
+  realized-MAE replay. `min_rr` lowered 1.2 → 1.15 to handle cent-rounding noise.
+- **Cycle 45 — portfolio audit remediation** — ~40 fixes across 15 files: vol-penalty
+  normalized; B-16 heat taper in allocator; SR-8 Kelly fix (confidence as output
+  multiplier, not p-discount); DL-1 ATR-path safety layers; E-9 conditional time-exit;
+  E-12 breakeven lock; sector cap reads real sector; correlation off-by-one; prediction
+  grader exit-reason normalization; production safety high-water-mark drawdown.
+- **CandidatePanel redesigned** as signal cards with conviction badges and news chips.
+- **Retrain pipeline** — `retrain_weekly.py` now uses `--skip-thursday --skip-vix-low-vol
+  --skip-extended-bounce --target-mult 1.2 --stop-mult 1.0` in backtest command.
+
+### Fixed
+
+- **Autofix monitor false-positive alerts** — argparse `%` in help strings caused
+  `TypeError: not all format codes converted` when autofix monitor printed help.
+- **Paper trading VIX low-vol filter** — was computed but not applied to paper_trade_today.py
+  (Cycle 7 fix carried through to all execution paths).
+- **Thematic paper trade fake ATR** — `round(price * 0.02, 4)` replaced with real 14-day ATR.
+- **Double-load in `get_thematic_portfolio`** — was calling `_load(user["email"])` twice.
+- **Variable name collision in scan** — `results` from `asyncio.gather()` overwritten by
+  inner DDG loop; renamed to `gather_results`.
+
 ## [1.0.0] — 2026-05-21
 
 ### Added

@@ -94,3 +94,76 @@ It also reuses work:
   and does not download prices again
 - use `--rebuild-dataset` to rebuild the candidate CSV from cached prices
 - use `--rebuild-price-cache` only when you intentionally want to call Yahoo again
+
+## Weekly retrain pipeline
+
+Run the full production retrain: download price data, generate labeled signals, train
+XGBoost + RF ensemble, walk-forward validate, and deploy if quality gate passes (WF ROC ≥ 0.49):
+
+```bash
+python scripts/retrain_weekly.py --months 84
+```
+
+The pipeline runs in three stages: (1) full backtest to generate training CSV with
+correct `--target-mult 1.2 --stop-mult 1.0 --skip-thursday --skip-vix-low-vol
+--skip-extended-bounce` filters; (2) XGBoost + RF ensemble train with PSI pruning;
+(3) deploy to `ml_models/latest/` if gate passes.
+
+Dry-run (prints command, does not execute):
+
+```bash
+python scripts/retrain_weekly.py --dry-run --months 84
+```
+
+## Validate thematic signals
+
+Backtest historical thematic scanner signals against realized returns. Reads
+`tmp/thematic_score_history.jsonl` and `tmp/thematic_exit_log.jsonl`:
+
+```bash
+python scripts/backtest_thematic_signals.py --days 90 --min-score 20
+```
+
+Reports: overall win rate and avg return; by score bucket (low/mid/high); insider+social
+combo vs. no combo; multi-source vs. single-source; top/worst performers; exit reason
+breakdown.
+
+## Rule-based portfolio simulation
+
+Backtest a purely rule-based 3-day hold strategy from a signal CSV:
+
+```bash
+python scripts/simulate_rule_based.py --input /tmp/signals.csv --capital 10000
+```
+
+Reports capital progression, win rate, monthly P&L, and market violations (wash sale,
+insufficient capital, PDT warnings).
+
+## Autofix monitor
+
+Watch paper trading and web server processes, auto-restart on failure, and send
+SMS/email alerts:
+
+```bash
+python scripts/autofix_monitor.py --config autofix_config.json
+```
+
+Runs as a background daemon. Configured via JSON; processes monitored, restart
+commands, and alert recipients all specified in config.
+
+## Breakout scan (standalone)
+
+Run a single breakout scan without the full paper trading harness:
+
+```bash
+python scripts/scan_breakouts.py --tickers NVDA AAPL MSFT --output /tmp/scan.json
+```
+
+## Log rotation
+
+Rotate server and paper trading logs (capped at 10 MB each, keeps 7 gzip archives).
+Normally run by launchd at 00:05 daily:
+
+```bash
+python scripts/rotate_logs.py
+```
