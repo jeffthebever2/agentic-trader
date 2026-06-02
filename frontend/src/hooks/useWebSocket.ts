@@ -15,7 +15,8 @@ export function useWebSocket(path: string, opts: UseWebSocketOptions) {
     if (!enabled) return
     handleRef.current = openWs(path, onMessage, onClose)
     return () => { handleRef.current?.close() }
-  }, [path, enabled])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, enabled]) // onMessage/onClose stored in refs to avoid reconnecting on every render
 
   const send = useCallback((msg: unknown) => {
     handleRef.current?.send(msg)

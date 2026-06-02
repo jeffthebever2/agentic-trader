@@ -20,7 +20,7 @@ _sparkline_cache: dict = {}
 
 _fetch_lock = asyncio.Lock()
 
-WATCHLIST = ['SPY', 'QQQ', 'AAPL', 'NVDA', 'TSLA', 'MSFT', 'AMZN', 'META', 'BTC-USD']
+WATCHLIST = ['SPY', 'QQQ', 'AAPL', 'NVDA', 'TSLA', 'MSFT', 'AMZN', 'META', 'GOOGL', 'BRK-B', 'BTC-USD']
 
 
 def _download_symbol(symbol: str, *, period: str, interval: str):
@@ -84,42 +84,54 @@ def _get_sp500_tickers() -> list[str]:
         return fallback
 
 
+async def _fetch_syms(syms: list[str]) -> dict:
+    result = {}
+    for sym in syms:
+        try:
+            data = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda symbol=sym: _download_symbol(symbol, period="5d", interval="1d"),
+            )
+            prices = _close_series(data)
+            if prices is None or len(prices) < 1:
+                continue
+            last = float(prices.iloc[-1])
+            prev = float(prices.iloc[-2]) if len(prices) >= 2 else last
+            chg = last - prev
+            pct = (chg / prev * 100) if prev else 0
+            result[sym] = {"price": round(last, 2), "change": round(chg, 2), "change_pct": round(pct, 2)}
+        except Exception:
+            continue
+    return result
+
+
 async def _fetch_quotes_bg():
     global _quotes_cache, _quotes_ts
     async with _fetch_lock:
         if _quotes_cache and (time.time() - _quotes_ts) < QUOTES_TTL:
             return
         try:
-            quotes = []
-            for sym in WATCHLIST:
-                try:
-                    data = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda symbol=sym: _download_symbol(symbol, period="5d", interval="1d"),
-                    )
-                    prices = _close_series(data)
-                    if prices is None or len(prices) < 1:
-                        continue
-                    last = float(prices.iloc[-1])
-                    prev = float(prices.iloc[-2]) if len(prices) >= 2 else last
-                    chg = last - prev
-                    pct = (chg / prev * 100) if prev else 0
-                    quotes.append({"symbol": sym, "price": round(last, 2),
-                                   "change": round(chg, 2), "change_pct": round(pct, 2)})
-                except Exception:
-                    continue
-            _quotes_cache = {"quotes": quotes, "ts": int(time.time()), "count": len(quotes)}
+            fetched = await _fetch_syms(WATCHLIST)
+            _quotes_cache = fetched
             _quotes_ts = time.time()
         except Exception as e:
             log.error(f"Quote fetch failed: {e}")
 
 
 @router.get("/market/quotes")
-async def market_quotes():
-    # Never block — always return immediately (empty or stale) and refresh in background
+async def market_quotes(tickers: str = Query("")):
+    requested = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else []
+    # Warm cache in background if stale
     if not _quotes_cache or (time.time() - _quotes_ts) >= QUOTES_TTL:
         asyncio.create_task(_fetch_quotes_bg())
-    return _quotes_cache or {"quotes": [], "ts": 0, "count": 0}
+    # For tickers not in cache, fetch synchronously (first hit only)
+    missing = [t for t in requested if t not in _quotes_cache] if requested else []
+    if missing:
+        fresh = await _fetch_syms(missing)
+        _quotes_cache.update(fresh)
+    if requested:
+        return {t: _quotes_cache[t] for t in requested if t in _quotes_cache}
+    return dict(_quotes_cache)
 
 
 @router.get("/market/chart")
@@ -128,7 +140,7 @@ async def market_chart(symbol: str = Query("SPY"), period: str = Query("5d"), in
     cached = _chart_cache.get(key)
     if cached and (time.time() - cached.get("_ts", 0)) < 300:
         return cached
-    data = await asyncio.get_event_loop().run_in_executor(
+    data = await asyncio.get_running_loop().run_in_executor(
         None,
         lambda: _download_symbol(symbol, period=period, interval=interval),
     )
@@ -203,7 +215,7 @@ async def market_sparklines():
     result: dict = {"_ts": int(time.time())}
     for sym in WATCHLIST:
         try:
-            data = await asyncio.get_event_loop().run_in_executor(
+            data = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda symbol=sym: _download_symbol(symbol, period="5d", interval="1h"),
             )
@@ -221,7 +233,7 @@ async def market_sparklines():
 
 @router.get("/market/sp500-list")
 async def sp500_list():
-    tickers = await asyncio.get_event_loop().run_in_executor(None, _get_sp500_tickers)
+    tickers = await asyncio.get_running_loop().run_in_executor(None, _get_sp500_tickers)
     return {"tickers": tickers, "count": len(tickers)}
 
 
@@ -381,7 +393,7 @@ async def market_news(symbol: str):
     if cached and (time.time() - cached.get("_ts", 0)) < 900:  # 15 min TTL
         return cached
 
-    items, source = await asyncio.get_event_loop().run_in_executor(
+    items, source = await asyncio.get_running_loop().run_in_executor(
         None, _fetch_news_with_fallbacks, symbol
     )
 
@@ -412,7 +424,7 @@ def _call_cf_ai(prompt: str, max_tokens: int = 400) -> str:
         base = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1"
 
     model = os.getenv("CLOUDFLARE_DEFAULT_QUICK_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast")
-    req_model = ("workers-ai/" + model) if (gateway and model.startswith("@cf/")) else model
+    req_model = model  # compat endpoint uses model name as-is (no workers-ai/ prefix)
 
     with httpx.Client(timeout=30.0) as client:
         r = client.post(
@@ -444,7 +456,7 @@ async def market_news_summary(symbol: str):
     if news_cached and news_cached.get("news"):
         articles = news_cached["news"]
     else:
-        articles, _ = await asyncio.get_event_loop().run_in_executor(
+        articles, _ = await asyncio.get_running_loop().run_in_executor(
             None, _fetch_news_with_fallbacks, symbol
         )
 
@@ -484,17 +496,33 @@ Respond ONLY with a valid JSON object (no markdown, no explanation) with exactly
 }}"""
 
     def _do_summary():
-        try:
-            raw = _call_cf_ai(prompt, max_tokens=500)
-            import json, re
-            # Strip markdown code fences if present
-            clean = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
-            return json.loads(clean)
-        except Exception as e:
-            log.warning(f"AI summary failed for {symbol}: {e}")
-            return None
+        for attempt in range(2):
+            try:
+                if attempt == 0:
+                    raw = _call_cf_ai(prompt, max_tokens=500)
+                else:
+                    import os, httpx as _httpx
+                    key = os.getenv("OPENROUTER_API_KEY", "")
+                    if not key:
+                        return None
+                    r = _httpx.Client(timeout=20).post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                        json={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": prompt}], "max_tokens": 500},
+                    )
+                    r.raise_for_status()
+                    raw = r.json()["choices"][0]["message"]["content"].strip()
+                import json as _json, re as _re
+                clean = _re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
+                m = _re.search(r"\{.*\}", clean, _re.DOTALL)
+                if m:
+                    clean = m.group(0)
+                return _json.loads(clean)
+            except Exception as e:
+                log.warning(f"AI summary attempt {attempt} failed for {symbol}: {e}")
+        return None
 
-    parsed = await asyncio.get_event_loop().run_in_executor(None, _do_summary)
+    parsed = await asyncio.get_running_loop().run_in_executor(None, _do_summary)
 
     if parsed and isinstance(parsed, dict):
         result = {
@@ -562,8 +590,68 @@ async def market_quote_detail(symbol: str):
         }
 
     try:
-        data = await asyncio.get_event_loop().run_in_executor(None, _fetch)
+        data = await asyncio.get_running_loop().run_in_executor(None, _fetch)
     except Exception as e:
         log.warning(f"Quote detail failed for {symbol}: {e}")
         data = {"symbol": symbol.upper(), "price": None, "change": None, "change_pct": None}
     return data
+
+
+@router.get("/market/watchlist")
+async def market_watchlist():
+    """Return the default watchlist tickers."""
+    return {"tickers": WATCHLIST, "watchlist": WATCHLIST}
+
+
+_opp_cache: dict = {}
+OPP_TTL = 300  # 5 minutes
+
+
+@router.get("/market/opportunities")
+async def market_opportunities(mode: str = "gainers"):
+    """Return market movers: gainers, losers, or active (by volume)."""
+    now = time.time()
+    cache_key = mode
+    if cache_key in _opp_cache and now - _opp_cache.get("_ts", 0) < OPP_TTL:
+        return _opp_cache[cache_key]
+
+    def _fetch():
+        import yfinance as yf
+        import pandas as pd
+
+        screener_map = {
+            "gainers": "day_gainers",
+            "losers": "day_losers",
+            "active": "most_actives",
+        }
+        screener_key = screener_map.get(mode, "day_gainers")
+        try:
+            df: pd.DataFrame = yf.screen(screener_key, count=20)
+            if df is None or df.empty:
+                return []
+            results = []
+            for _, row in df.iterrows():
+                symbol = str(row.get("symbol", ""))
+                if not symbol:
+                    continue
+                results.append({
+                    "ticker": symbol,
+                    "symbol": symbol,
+                    "price": row.get("regularMarketPrice") or row.get("price"),
+                    "change": row.get("regularMarketChange") or row.get("change"),
+                    "change_pct": row.get("regularMarketChangePercent") or row.get("changesPercentage"),
+                    "volume": row.get("regularMarketVolume") or row.get("volume"),
+                    "name": row.get("shortName") or row.get("displayName") or symbol,
+                })
+            return results
+        except Exception:
+            return []
+
+    try:
+        results = await asyncio.get_running_loop().run_in_executor(None, _fetch)
+    except Exception:
+        results = []
+
+    _opp_cache[cache_key] = results
+    _opp_cache["_ts"] = time.time()
+    return results

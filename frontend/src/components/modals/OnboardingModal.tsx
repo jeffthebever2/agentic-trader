@@ -64,7 +64,7 @@ export function OnboardingModal({ onClose }: Props) {
       const updated = (r as { data?: { name?: string } }).data
       if (user) setUser({ ...user, name: (updated as { name?: string })?.name ?? name })
       setNameStatus('✓ Saved.')
-    } catch (e: unknown) {
+    } catch {
       setNameStatus('Save failed.')
     }
   }
@@ -121,7 +121,7 @@ export function OnboardingModal({ onClose }: Props) {
       <div style={dialog}>
         {/* Header */}
         <div style={{ padding: '22px 26px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', gap: 12 }}>
-          <img src="/static/agentic-trader-icon.png" alt="Logo"
+          <img src="/app/agentic-trader-icon.png" alt="Logo"
             style={{ width: 32, height: 32, borderRadius: 8 }}
             onError={e => { (e.target as HTMLImageElement).style.display = 'none' }} />
           <div style={{ flex: 1, minWidth: 0 }}>

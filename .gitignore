@@ -247,6 +247,7 @@ rl_models/runs/
 
 # TradingAgents: Sensitive / personal files
 .fidelity_session.json
+.fidelity_session_*.json
 .webull_session.json
 *_session.json
 did.bin
@@ -287,3 +288,13 @@ logs/
 # Dev tools
 .tools/
 .codeql-db/
+.codeql-results/
+
+# Desktop app build artifacts
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+
+# Generated archives
+docs.zip
+*.zip

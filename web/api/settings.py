@@ -8,9 +8,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, validator, field_validator
 
-from web.auth import require_admin
+from web.auth import get_current_user, require_admin
 
 router = APIRouter()
 
@@ -105,7 +105,16 @@ def _save_env_file(updates: dict):
             lines_map[key] = f'{key}={val}'
 
     all_lines = header_lines + list(lines_map.values())
-    env_path.write_text("\n".join(all_lines) + "\n", encoding="utf-8")
+    content = "\n".join(all_lines) + "\n"
+    import tempfile as _tf, os as _os
+    fd, tmp = _tf.mkstemp(dir=env_path.parent, prefix=".tmp_env_")
+    try:
+        with _os.fdopen(fd, "w", encoding="utf-8") as f: f.write(content)
+        _os.replace(tmp, env_path)
+    except Exception:
+        try: _os.unlink(tmp)
+        except Exception: pass
+        raise
 
 
 def _mask(val: str) -> str:
@@ -117,7 +126,7 @@ def _mask(val: str) -> str:
 
 
 @router.get("/settings")
-async def get_settings():
+async def get_settings(_user: dict = Depends(get_current_user)):
     env = _load_env_file()
     result: dict = {}
 
@@ -163,11 +172,30 @@ async def get_settings():
 class SettingsUpdate(BaseModel):
     updates: Dict[str, Any]
 
+    @field_validator("updates")
+    @classmethod
+    def validate_updates(cls, v: dict) -> dict:
+        if not v:
+            raise ValueError("updates must not be empty")
+        if len(v) > 50:
+            raise ValueError("too many keys in a single update")
+        return v
+
 
 @router.post("/settings")
 async def update_settings(body: SettingsUpdate, admin: dict = Depends(require_admin)):
     allowed = set(SENSITIVE_KEYS + CONFIG_KEYS)
-    safe = {k: v for k, v in body.updates.items() if k in allowed}
+    safe = {}
+    for k, v in body.updates.items():
+        if k not in allowed:
+            continue
+        # Strip whitespace; convert non-strings to string
+        val = str(v).strip() if v is not None else ""
+        # Never write obviously injected values (newlines in env values break the file)
+        if "\n" in val or "\r" in val:
+            continue
+        safe[k] = val
+
     if not safe:
         return {"success": False, "error": "No valid keys to update"}
     try:

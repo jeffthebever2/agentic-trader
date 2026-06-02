@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 /**
  * Global toast notification system.
  * Usage: const { toast } = useToast()  →  toast.success('msg')

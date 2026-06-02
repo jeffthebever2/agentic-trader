@@ -224,6 +224,38 @@ def set_hil_prefs(email: str, prefs: dict[str, Any]) -> dict[str, Any]:
         return data[email]
 
 
+DEFAULT_THEMATIC_HIL: dict[str, Any] = {
+    "enabled": False,            # require human approval before signals execute
+    "fidelity_trade": False,     # route approved signals to Fidelity (real money)
+    "dollar_amount": 500.0,      # base dollar size per trade (scaled by conviction)
+    "sms_notify": True,          # send SMS when new signals are pending
+    "auto_trade_paper": False,   # auto-execute confirmed signals to paper (no click needed)
+    "auto_trade_fidelity": False, # auto-execute confirmed signals to Fidelity (real money)
+    "min_rr": 1.5,               # minimum reward:risk ratio (target_pct / stop_pct)
+    "max_portfolio_heat": 80.0,  # max % of paper cash deployed at once
+    "daily_loss_limit_pct": 3.0, # halt new entries if today's P&L < -X%
+    "conviction_scale": True,    # scale position size by conviction (8/10 → 1.2× base, 5/10 → 0.7×)
+}
+
+
+def get_thematic_hil(rec: dict[str, Any]) -> dict[str, Any]:
+    stored = (rec or {}).get("thematic_hil") or {}
+    return {**DEFAULT_THEMATIC_HIL, **stored}
+
+
+def set_thematic_hil(email: str, prefs: dict[str, Any]) -> dict[str, Any]:
+    email = email.strip().lower()
+    clean = {k: prefs[k] for k in DEFAULT_THEMATIC_HIL if k in prefs}
+    with _LOCK:
+        data = _load()
+        if email not in data:
+            raise KeyError(f"user {email!r} not found")
+        merged = {**DEFAULT_THEMATIC_HIL, **(data[email].get("thematic_hil") or {}), **clean}
+        data[email]["thematic_hil"] = merged
+        _save(data)
+        return data[email]
+
+
 def update_user(email: str, **fields: Any) -> dict[str, Any]:
     """Merge arbitrary fields into a user record. Internal helper for 2FA."""
     email = email.strip().lower()

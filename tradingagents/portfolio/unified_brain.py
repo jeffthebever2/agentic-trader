@@ -930,4 +930,5 @@ class UnifiedBrain:
                     )
                     f.write(json.dumps(row) + "\n")
         except Exception as exc:
-            print(f"[unified_brain] Audit write failed: {exc}")
+            import logging as _logging
+            _logging.getLogger("unified_brain").warning("Audit write failed: %s", exc)

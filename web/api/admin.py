@@ -83,7 +83,16 @@ def _write_flags(flags: dict[str, bool]) -> dict[str, bool]:
         if key in flags:
             cleaned[key] = bool(flags[key])
     TMP.mkdir(parents=True, exist_ok=True)
-    FLAGS_FILE.write_text(json.dumps(cleaned, indent=2, sort_keys=True), encoding="utf-8")
+    import tempfile as _tf, os as _os
+    content = json.dumps(cleaned, indent=2, sort_keys=True)
+    fd, tmp = _tf.mkstemp(dir=TMP, prefix=".tmp_flags_")
+    try:
+        with _os.fdopen(fd, "w", encoding="utf-8") as f: f.write(content)
+        _os.replace(tmp, FLAGS_FILE)
+    except Exception:
+        try: _os.unlink(tmp)
+        except Exception: pass
+        raise
     return cleaned
 
 
@@ -360,12 +369,23 @@ async def admin_runtime_tunnel_stop(admin: dict[str, Any] = Depends(require_admi
     return {"success": True, "results": results, "remaining_cloudflared_pids": _cloudflared_pids()}
 
 
+_EXPORT_UNSAFE_FIELDS = frozenset({
+    "password", "password_hash", "_password", "token", "_token",
+    "secret", "_secret", "api_key", "_api_key", "session",
+})
+
+
+def _sanitize_user(user: dict[str, Any]) -> dict[str, Any]:
+    """Remove sensitive internal fields before including user in export."""
+    return {k: v for k, v in user.items() if k.lower() not in _EXPORT_UNSAFE_FIELDS}
+
+
 @router.get("/admin/export")
 async def admin_export(admin: dict[str, Any] = Depends(require_admin)):
     payload: dict[str, Any] = {
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "generated_by": admin["email"],
-        "users": user_store.list_users(),
+        "users": [_sanitize_user(u) for u in user_store.list_users()],
         "feature_flags": _read_flags(),
         "cloudflare": {
             "access_configured": _env_set("CF_ACCESS_TEAM_DOMAIN"),

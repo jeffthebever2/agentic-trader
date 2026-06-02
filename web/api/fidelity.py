@@ -11,11 +11,64 @@ Once authenticated, REST endpoints use the stored browser session.
 """
 import asyncio
 import hashlib
+import json
+import logging
 import os
 import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger("fidelity")
+
+# Per-(user, ticker) idempotency lock — prevents duplicate simultaneous orders
+_ORDER_LOCKS: dict[str, asyncio.Lock] = {}
+_ORDER_LOCKS_META: dict[str, float] = {}  # key → last-acquire timestamp
+_ORDER_LOCK_TTL = 120.0  # seconds before lock is considered stale
+
+
+def _get_order_lock(key: str) -> asyncio.Lock:
+    """Return (or create) a per-(user,ticker) lock to prevent duplicate orders."""
+    if key not in _ORDER_LOCKS:
+        _ORDER_LOCKS[key] = asyncio.Lock()
+    return _ORDER_LOCKS[key]
+
+
+def _validate_account_number(account: str | None) -> str | None:
+    """Fidelity account numbers are numeric, 8-12 digits. Reject anything else."""
+    if account is None:
+        return None
+    cleaned = account.strip().replace("-", "").replace(" ", "")
+    if not cleaned.isdigit() or not (6 <= len(cleaned) <= 15):
+        raise ValueError(f"Invalid account number '{account}' — must be 6-15 digits only.")
+    return cleaned
+
+
+# Confirmation patterns on Fidelity order success page
+_ORDER_CONFIRM_PATTERNS = [
+    "order received", "order submitted", "order number", "confirmation",
+    "order #", "order has been placed", "order was placed",
+]
+_ORDER_ERROR_PATTERNS = [
+    "insufficient", "not enough", "buying power", "error", "failed",
+    "unable to process", "cannot process", "rejected", "invalid",
+    "market is closed", "after hours",
+]
+
+
+def _verify_fidelity_order_page(page_text: str) -> tuple[bool, str]:
+    """
+    Return (confirmed, reason) from Fidelity post-submit page text.
+    confirmed=True means the page shows order acceptance.
+    """
+    lower = page_text.lower()
+    for pat in _ORDER_CONFIRM_PATTERNS:
+        if pat in lower:
+            return True, f"confirmed: '{pat}' found in page"
+    for pat in _ORDER_ERROR_PATTERNS:
+        if pat in lower:
+            return False, f"order rejected by Fidelity: '{pat}' found in page"
+    return False, "order confirmation NOT found in page — status unknown"
 
 ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
@@ -680,201 +733,1160 @@ async def fidelity_screenshot(admin: dict = Depends(require_admin)):
         await page.close()
 
 class FidelityTradeRequest(BaseModel):
-    symbol: str
-    action: str = Field(..., description="Buy, Sell")
-    quantity: float
-    order_type: str = Field("Limit", description="Market, Limit")
-    limit_price: Optional[float] = None
-    time_in_force: str = Field("Day")
-    account: Optional[str] = None
-    execute: bool = False
+    symbol:       str
+    action:       str   = Field(..., description="Buy or Sell only")
+    quantity:     int   = Field(..., gt=0, description="Whole shares only, must be > 0")
+    order_type:   str   = Field("Limit", description="Only Limit supported")
+    limit_price:  Optional[float] = None
+    time_in_force: str  = Field("Day")   # passed for UI display; Fidelity default = Day
+    account:      Optional[str] = None
+    execute:      bool  = False
+
+    @classmethod
+    def __get_validators__(cls):
+        yield cls.validate_model
+
+    def model_post_init(self, __context) -> None:
+        from fastapi import HTTPException
+        self.symbol = self.symbol.upper().strip()
+        if not self.symbol.isalpha() or len(self.symbol) > 5:
+            raise ValueError(f"Invalid symbol '{self.symbol}'")
+        if self.action.lower() not in ("buy", "sell"):
+            raise ValueError(f"action must be 'Buy' or 'Sell', got '{self.action}'")
+        if self.order_type.lower() not in ("limit",):
+            raise ValueError("Only 'Limit' order type supported")
+        if self.limit_price is not None and self.limit_price <= 0:
+            raise ValueError(f"limit_price must be > 0, got {self.limit_price}")
+        if self.limit_price is not None and self.limit_price > 100_000:
+            raise ValueError(f"limit_price ${self.limit_price:.2f} exceeds $100,000 sanity cap")
+        try:
+            _validate_account_number(self.account)
+        except ValueError as e:
+            raise ValueError(str(e))
 
 @router.post("/fidelity/trade")
 async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(require_step_up)):
     from fastapi import HTTPException
     from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
-    # ── Compliance hard block ──────────────────────────────────────────────────
-    # Two independent gates must both pass before any real order is placed:
-    #   1. LIVE_TRADING_HARD_BLOCKED (source-code constant) — absolute kill switch
-    #   2. LIVE_TRADING_ENABLED (.env toggle, default off) — operational switch
-    if LIVE_TRADING_HARD_BLOCKED:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Live trading is hard-blocked in compliance.py. "
-                "Set LIVE_TRADING_HARD_BLOCKED = False in source to enable, "
-                "then also set LIVE_TRADING_ENABLED=true in .env."
-            ),
-        )
-    decision = validate_live_order(body.model_dump())
-    if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.reason)
-    if not live_trading_enabled():
-        raise HTTPException(
-            status_code=403,
-            detail="Live trading is disabled. Set LIVE_TRADING_ENABLED=true in .env to enable.",
-        )
-    # ── End compliance check ───────────────────────────────────────────────────
-    ctx = await _ensure_browser(admin["email"])
+
+    # ── Idempotency lock ───────────────────────────────────────────────────────
+    lock_key = f"{admin['email']}:{body.symbol}:{body.action.lower()}"
+    order_lock = _get_order_lock(lock_key)
+    if order_lock.locked():
+        raise HTTPException(status_code=429, detail=f"Order for {body.symbol} already in progress.")
+
+    async with order_lock:
+        if LIVE_TRADING_HARD_BLOCKED:
+            raise HTTPException(status_code=403, detail="LIVE_TRADING_HARD_BLOCKED=True in compliance.py")
+        decision = validate_live_order(body.model_dump())
+        if not decision.allowed:
+            raise HTTPException(status_code=403, detail=decision.reason)
+        if not live_trading_enabled():
+            raise HTTPException(status_code=403, detail="LIVE_TRADING_ENABLED not set to true in .env")
+        try:
+            account = _validate_account_number(body.account)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        ctx = await _ensure_browser(admin["email"])
+        page = None
+        try:
+            page = await ctx.new_page()
+            await _nav(page, "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry", sleep=5)
+
+            if "login" in page.url.lower():
+                raise HTTPException(status_code=401, detail="Not authenticated with Fidelity")
+
+            if account:
+                try:
+                    await page.locator('#dest-acct-dropdown').click()
+                    await asyncio.sleep(1)
+                    await page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
+                    await asyncio.sleep(1)
+                except Exception:
+                    log.warning("Could not select account %s — using default", account)
+
+            try:
+                sym = page.locator('#eq-ticket-dest-symbol')
+                await sym.wait_for(state="visible", timeout=10000)
+                await sym.click()
+                await sym.fill(body.symbol)
+                await asyncio.sleep(1.5)
+                await page.keyboard.press("ArrowDown")
+                await asyncio.sleep(0.5)
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(2)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to enter symbol: {e}")
+
+            try:
+                await page.locator('#dest-dropdownlist-button-action').click()
+                await asyncio.sleep(1)
+                clicked = False
+                for sel in ['[role="option"]:has-text("Buy")', '[role="option"]:has-text("Sell")',
+                            f'li:has-text("{body.action}")', f'a:has-text("{body.action}")']:
+                    try:
+                        loc = page.locator(sel).first
+                        if await loc.is_visible(timeout=1500):
+                            await loc.click()
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+                if not clicked:
+                    presses = 1 if body.action.lower() == "buy" else 2
+                    for _ in range(presses):
+                        await page.keyboard.press("ArrowDown")
+                        await asyncio.sleep(0.3)
+                    await page.keyboard.press("Enter")
+                await asyncio.sleep(0.8)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to select action: {e}")
+
+            try:
+                qty_val = str(body.quantity)
+                await page.evaluate(f"""
+                () => {{
+                    const el = document.getElementById('eqt-shared-quantity');
+                    if (!el) throw new Error('qty input not found');
+                    el.focus();
+                    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                    nativeSetter.set.call(el, '{qty_val}');
+                    el.dispatchEvent(new Event('input',  {{bubbles:true}}));
+                    el.dispatchEvent(new Event('change', {{bubbles:true}}));
+                    el.dispatchEvent(new KeyboardEvent('keyup', {{bubbles:true}}));
+                }}
+                """)
+                await asyncio.sleep(0.8)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to enter quantity: {e}")
+
+            # Order type = Limit only
+            try:
+                await page.locator('#dest-dropdownlist-button-ordertype').click()
+                await asyncio.sleep(1)
+                for sel in ['[role="option"]:has-text("Limit")', 'li:has-text("Limit")', 'a:has-text("Limit")']:
+                    try:
+                        loc = page.locator(sel).first
+                        if await loc.is_visible(timeout=1500):
+                            await loc.click()
+                            break
+                    except Exception:
+                        continue
+                await asyncio.sleep(0.8)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Failed to select order type: {e}")
+
+            if body.limit_price is not None:
+                try:
+                    price_input = page.locator('input[id*="price" i], input[name*="price" i], input[class*="price" i]').first
+                    await price_input.wait_for(state="visible", timeout=5000)
+                    await price_input.click(click_count=3)
+                    await price_input.fill(str(body.limit_price))
+                    await asyncio.sleep(0.8)
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Failed to enter limit price: {e}")
+
+            try:
+                preview_btn = page.locator(
+                    'button.pvd-button--primary.pvd-button--full-width,'
+                    'button:has-text("Preview order"),'
+                    'button:has-text("Preview Order")'
+                ).first
+                await preview_btn.wait_for(state="visible", timeout=8000)
+                await preview_btn.click()
+                await asyncio.sleep(5)
+            except Exception as e:
+                err_text = ""
+                try:
+                    err_text = await page.locator('.pvd-inline-alert, .message-error, .alert-error').first.inner_text()
+                except Exception:
+                    pass
+                raise HTTPException(status_code=400, detail=f"Preview failed: {err_text or str(e)}")
+
+            preview_text = await page.evaluate("() => document.body.innerText")
+
+            order_status = "previewed"
+            if body.execute:
+                try:
+                    place_btn = page.locator('button:has-text("Place Order")').first
+                    await place_btn.wait_for(state="visible", timeout=8000)
+                    await place_btn.click()
+                    await asyncio.sleep(6)
+
+                    confirm_text = await page.evaluate("() => document.body.innerText")
+                    confirmed, confirm_msg = _verify_fidelity_order_page(confirm_text)
+                    if not confirmed:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Order submitted but NOT confirmed: {confirm_msg}\nPage: {confirm_text[:400]}\nCheck Fidelity manually."
+                        )
+                    order_status = "executed"
+                    log.info("Fidelity order CONFIRMED: %s %s x%d (%s)", body.action, body.symbol, body.quantity, confirm_msg)
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Failed to place order: {e}")
+
+            await _save_storage(admin["email"])
+            return {"success": True, "status": order_status, "preview_text_snippet": preview_text[:1000]}
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Fidelity trade failed: {e}")
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+
+
+# ── Balance / account helpers ──────────────────────────────────────────────────
+
+ACCOUNTS_URL = "https://digital.fidelity.com/ftgw/digital/portfolio/summary"
+TRADE_HISTORY_FILE = ROOT / "tmp" / "fidelity_trade_log.jsonl"
+
+
+def _parse_dollar(text: str) -> float | None:
+    """Parse '$12,345.67' or '-$1,234' → float."""
+    try:
+        cleaned = text.replace("$", "").replace(",", "").strip()
+        if cleaned.startswith("(") and cleaned.endswith(")"):
+            cleaned = "-" + cleaned[1:-1]
+        return float(cleaned)
+    except (ValueError, AttributeError):
+        return None
+
+
+async def _get_fidelity_balances(email: str) -> dict:
+    """
+    Scrape available cash + total value from Fidelity portfolio page.
+    Returns: {total_value, available_cash, accounts: [{number, value, cash}]}
+    """
+    ctx = await _ensure_browser(email)
     page = await ctx.new_page()
     try:
-        # Navigate to Trade Entry
-        await _nav(page, "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry", sleep=5)
-
+        await _nav(page, PORTFOLIO_URL, sleep=6)
         if "login" in page.url.lower():
-            raise HTTPException(status_code=401, detail="Not authenticated with Fidelity")
+            return {"error": "not_authenticated"}
 
-        # Select Account (if provided)
-        if body.account:
-            try:
-                await page.locator('#dest-acct-dropdown').click()
-                await asyncio.sleep(1)
-                await page.locator(f'.dropdown-menu li:has-text("{body.account}")').first.click()
-                await asyncio.sleep(1)
-            except Exception:
-                pass
-
-        # Symbol — confirmed ID from live page inspection
         try:
-            sym = page.locator('#eq-ticket-dest-symbol')
-            await sym.wait_for(state="visible", timeout=10000)
-            await sym.click()
-            await sym.fill(body.symbol)
+            await page.wait_for_selector(
+                '.ag-pinned-left-cols-container .ag-row[row-index]', timeout=15_000
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+        result = await page.evaluate("""
+        () => {
+            // Try to find account summary tiles (top of page)
+            const tiles = {};
+            document.querySelectorAll('[class*="account-summary"], [class*="AccountSummary"], .acct-summary, .acct-value').forEach(el => {
+                const label = el.querySelector('[class*="label"], [class*="Label"], span')?.innerText?.trim() || '';
+                const value = el.querySelector('[class*="value"], [class*="Value"], strong, b')?.innerText?.trim() || '';
+                if (label && value) tiles[label] = value;
+            });
+
+            // Fall back to pinned-row Cash scraping
+            const cashRows = [];
+            document.querySelectorAll('.ag-pinned-left-cols-container .ag-row[row-index]').forEach(row => {
+                const sym = row.querySelector('[col-id="sym"]')?.innerText?.trim() || '';
+                if (sym.startsWith('Cash') || sym === 'CASH') {
+                    const ri = row.getAttribute('row-index');
+                    const center = document.querySelector(`.ag-center-cols-container .ag-row[row-index="${ri}"]`);
+                    const val = center?.querySelector('[col-id="curVal"]')?.innerText?.trim().split('\\n')[0] || '';
+                    cashRows.push({label: sym, value: val});
+                }
+            });
+
+            // Grand total
+            let grandTotal = null;
+            document.querySelectorAll('.ag-pinned-left-cols-container .ag-row[row-index]').forEach(row => {
+                const sym = row.querySelector('[col-id="sym"]')?.innerText?.trim() || '';
+                if (sym.startsWith('Grand total')) {
+                    const ri = row.getAttribute('row-index');
+                    const center = document.querySelector(`.ag-center-cols-container .ag-row[row-index="${ri}"]`);
+                    grandTotal = center?.querySelector('[col-id="curVal"]')?.innerText?.trim().split('\\n')[0] || null;
+                }
+            });
+
+            // Account dropdown options (multiple accounts)
+            const accountOptions = [];
+            document.querySelectorAll('#dest-acct-dropdown option, .account-dropdown option, [data-acct], [data-account-number]').forEach(el => {
+                const text = el.innerText?.trim() || el.getAttribute('data-account-number') || '';
+                if (text && text.length > 2) accountOptions.push(text);
+            });
+
+            return { tiles, cashRows, grandTotal, accountOptions };
+        }
+        """)
+
+        await _save_storage(email)
+
+        # Parse results
+        grand_total = _parse_dollar(result.get("grandTotal") or "")
+        cash_val    = None
+        for row in result.get("cashRows", []):
+            v = _parse_dollar(row.get("value", ""))
+            if v is not None:
+                cash_val = (cash_val or 0) + v
+
+        # Fallback: if no explicit cash found, use 10% of grand total as rough estimate
+        if cash_val is None and grand_total:
+            cash_val = grand_total * 0.10
+
+        return {
+            "total_value":     grand_total,
+            "available_cash":  cash_val,
+            "cash_rows":       result.get("cashRows", []),
+            "summary_tiles":   result.get("tiles", {}),
+            "account_options": result.get("accountOptions", []),
+            "raw":             result,
+        }
+    finally:
+        await page.close()
+
+
+def _size_fidelity_position(
+    account_value: float,
+    available_cash: float,
+    price: float,
+    dollar_amount: float | None = None,
+    pct_of_account: float | None = None,
+) -> tuple[int, float]:
+    """
+    Compute (shares, cost) respecting:
+      - available_cash hard cap
+      - MAX_POSITION_PCT_OF_ACCOUNT from compliance (default 10%)
+      - Minimum 1 share
+    """
+    from tradingagents.compliance import MAX_POSITION_PCT_OF_ACCOUNT
+    max_alloc = account_value * MAX_POSITION_PCT_OF_ACCOUNT / 100
+
+    if dollar_amount and dollar_amount > 0:
+        alloc = dollar_amount
+    elif pct_of_account and pct_of_account > 0:
+        alloc = account_value * pct_of_account / 100
+    else:
+        alloc = max_alloc
+
+    alloc = min(alloc, max_alloc, available_cash)
+
+    if alloc <= 0 or price <= 0:
+        return 0, 0.0
+
+    # Do NOT enforce min=1 if price > available_cash — would bypass cash cap
+    shares = int(alloc / price)
+    if shares <= 0:
+        return 0, 0.0
+
+    cost = round(shares * price, 2)
+    # Final safety: cost must never exceed available_cash
+    if cost > available_cash:
+        return 0, 0.0
+    return shares, cost
+
+
+def _log_fidelity_trade(record: dict) -> None:
+    """Append trade record to fidelity_trade_log.jsonl."""
+    try:
+        TRADE_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with TRADE_HISTORY_FILE.open("a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as e:
+        import logging
+        logging.getLogger("fidelity").warning("Trade log write: %s", e)
+
+
+# ── Accounts endpoint ──────────────────────────────────────────────────────────
+
+@router.get("/fidelity/accounts")
+async def fidelity_accounts(admin: dict = Depends(require_admin)):
+    """Return account balances + available cash from Fidelity."""
+    from fastapi import HTTPException
+    connected = await _is_logged_in(admin["email"])
+    if not connected:
+        raise HTTPException(status_code=401, detail="Not authenticated with Fidelity. Log in first.")
+    balances = await _get_fidelity_balances(admin["email"])
+    if "error" in balances:
+        raise HTTPException(status_code=401, detail=balances["error"])
+    return {
+        "ok":             True,
+        "total_value":    balances.get("total_value"),
+        "available_cash": balances.get("available_cash"),
+        "cash_rows":      balances.get("cash_rows", []),
+        "accounts":       balances.get("account_options", []),
+        "summary_tiles":  balances.get("summary_tiles", {}),
+    }
+
+
+# ── Thematic trade endpoint ────────────────────────────────────────────────────
+
+class FidelityThematicTradeRequest(BaseModel):
+    ticker:           str
+    dollar_amount:    Optional[float] = None   # fixed dollar allocation
+    pct_of_account:   Optional[float] = None   # % of account (e.g. 2.5 = 2.5%)
+    stop_pct:         float = 5.0
+    target_pct:       float = 10.0
+    hold_days:        int   = 5
+    theme:            str   = "future_tech"
+    thesis:           str   = ""
+    catalyst:         str   = ""
+    account:          Optional[str] = None     # Fidelity account number (None = default)
+    execute:          bool  = False            # False = preview only, True = place order
+    also_paper_trade: bool  = True             # Mirror trade in paper account for tracking
+
+
+@router.post("/fidelity/thematic-trade")
+async def fidelity_thematic_trade(
+    body: FidelityThematicTradeRequest,
+    admin: dict = Depends(require_step_up),
+):
+    """
+    Size and place a thematic conviction trade on Fidelity.
+
+    Flow:
+      1. Fetch current price from yfinance
+      2. Fetch Fidelity available cash + account value
+      3. Size position (respects MAX_POSITION_PCT_OF_ACCOUNT and available_cash)
+      4. Validate via compliance
+      5. If execute=True AND LIVE_TRADING_ENABLED: place Limit order on Fidelity
+      6. If also_paper_trade=True: mirror in paper account for P&L tracking
+      7. Log to tmp/fidelity_trade_log.jsonl
+    """
+    import datetime as _dt
+    from fastapi import HTTPException
+    from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
+
+    ticker = body.ticker.upper().strip()
+    if not ticker.isalpha() or len(ticker) > 5:
+        raise HTTPException(status_code=400, detail=f"Invalid ticker '{ticker}'")
+
+    # Validate account number to prevent selector injection
+    try:
+        account = _validate_account_number(body.account)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # ── Idempotency lock: prevent duplicate simultaneous orders ────────────────
+    lock_key = f"{admin['email']}:{ticker}"
+    order_lock = _get_order_lock(lock_key)
+    if order_lock.locked():
+        raise HTTPException(status_code=429, detail=f"Order for {ticker} already in progress — wait for it to complete.")
+
+    async with order_lock:
+        _ORDER_LOCKS_META[lock_key] = __import__("time").time()
+        return await _fidelity_thematic_trade_inner(body, admin, ticker, account)
+
+
+async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
+    import datetime as _dt
+    from fastapi import HTTPException
+    from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
+
+    # ── 1. Fetch price ────────────────────────────────────────────────────────
+    loop = asyncio.get_running_loop()
+    def _get_price_fresh(sym: str) -> tuple[float | None, bool]:
+        """Returns (price, is_fresh) — fresh=True if from today's trading."""
+        try:
+            import yfinance as yf
+            import datetime as dt_
+            data = yf.download(sym, period="5d", auto_adjust=True, progress=False)
+            closes = data["Close"]
+            series = closes[sym] if hasattr(closes, "columns") else closes
+            series = series.dropna()
+            if len(series) == 0:
+                return None, False
+            last_dt = series.index[-1]
+            last_dt_date = last_dt.date() if hasattr(last_dt, "date") else last_dt
+            is_fresh = (last_dt_date == dt_.date.today())
+            return float(series.iloc[-1]), is_fresh
+        except Exception:
+            return None, False
+
+    price_result = await loop.run_in_executor(None, _get_price_fresh, ticker)
+    price, price_is_fresh = price_result
+    if not price:
+        raise HTTPException(status_code=400, detail=f"Cannot fetch price for {ticker}")
+    if not price_is_fresh:
+        log.warning("Price for %s is from a prior trading day — limit may be stale", ticker)
+
+    # ── 2. Fetch Fidelity balances (validates session + gets cash) ────────────
+    balances = await _get_fidelity_balances(admin["email"])
+    if "error" in balances:
+        raise HTTPException(status_code=401, detail="Not authenticated with Fidelity. Log in at /fidelity.")
+
+    total_value    = balances.get("total_value")
+    available_cash = balances.get("available_cash")
+
+    # Refuse to size if we can't confirm account balance — never use hardcoded fallback
+    if total_value is None or total_value <= 0:
+        raise HTTPException(status_code=400, detail="Cannot determine Fidelity account value — check session. Refresh the portfolio page and retry.")
+    if available_cash is None:
+        # Warn but use 15% conservative estimate (better than refusing entirely)
+        available_cash = total_value * 0.15
+        log.warning("Cash scrape failed — fallback estimate $%.0f (15%% of $%.0f). VERIFY before executing.", available_cash, total_value)
+    if available_cash <= 0:
+        raise HTTPException(status_code=400, detail=f"No available cash (scraped: ${available_cash:.2f}). Check Fidelity account.")
+
+    # ── 3. Size position ──────────────────────────────────────────────────────
+    shares, cost = _size_fidelity_position(
+        account_value   = total_value,
+        available_cash  = available_cash,
+        price           = price,
+        dollar_amount   = body.dollar_amount,
+        pct_of_account  = body.pct_of_account,
+    )
+    if shares <= 0:
+        raise HTTPException(status_code=400, detail=f"Cannot size position: alloc=${body.dollar_amount}, cash=${available_cash:.2f}, price=${price:.2f}")
+
+    # Limit price = 0.2% above current (improves fill, still limit protection)
+    limit_price = round(price * 1.002, 2)
+    stop_price  = round(price * (1 - body.stop_pct / 100), 4)
+    target_price= round(price * (1 + body.target_pct / 100), 4)
+    now_iso     = _dt.datetime.now().isoformat(timespec="seconds")
+    today       = _dt.date.today().isoformat()
+
+    # ── 4. Compliance validation ──────────────────────────────────────────────
+    order_dict = {
+        "symbol":      ticker,
+        "action":      "Buy",
+        "order_type":  "Limit",
+        "quantity":    shares,
+        "limit_price": limit_price,
+    }
+    decision = validate_live_order(order_dict)
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=f"Compliance: {decision.reason}")
+
+    # ── 5. Place order on Fidelity ────────────────────────────────────────────
+    order_status  = "sized"
+    fidelity_resp = None
+
+    if body.execute:
+        if LIVE_TRADING_HARD_BLOCKED:
+            raise HTTPException(status_code=403, detail="LIVE_TRADING_HARD_BLOCKED=True in compliance.py")
+        if not live_trading_enabled():
+            raise HTTPException(status_code=403, detail="LIVE_TRADING_ENABLED not set to true in .env")
+
+        ctx = await _ensure_browser(admin["email"])
+        page = await ctx.new_page()
+        try:
+            trade_url = "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry"
+            await _nav(page, trade_url, sleep=5)
+
+            if "login" in page.url.lower():
+                raise HTTPException(status_code=401, detail="Session expired — log in again")
+
+            # Account — use pre-validated numeric account number only
+            if account:
+                try:
+                    await page.locator('#dest-acct-dropdown').click()
+                    await asyncio.sleep(1)
+                    # Use exact text match on numeric account number (injection-safe)
+                    await page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
+                    await asyncio.sleep(1)
+                except Exception:
+                    log.warning("Could not select account %s — using default", account)
+
+            # Symbol
+            sym_input = page.locator('#eq-ticket-dest-symbol')
+            await sym_input.wait_for(state="visible", timeout=10000)
+            await sym_input.click()
+            await sym_input.fill(ticker)
             await asyncio.sleep(1.5)
-            # Accept first autocomplete suggestion
             await page.keyboard.press("ArrowDown")
             await asyncio.sleep(0.5)
             await page.keyboard.press("Enter")
             await asyncio.sleep(2)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to enter symbol: {e}")
 
-        # Action — click dropdown button then find option by text or keyboard
-        try:
+            # Action = Buy
             await page.locator('#dest-dropdownlist-button-action').click()
             await asyncio.sleep(1)
-            # Try visible list items / options first
-            clicked = False
-            for sel in [
-                f'[role="option"]:has-text("{body.action}")',
-                f'[role="listitem"]:has-text("{body.action}")',
-                f'li:has-text("{body.action}")',
-                f'a:has-text("{body.action}")',
-                f'span:has-text("{body.action}")',
-            ]:
+            for sel in ['[role="option"]:has-text("Buy")', 'li:has-text("Buy")', 'a:has-text("Buy")']:
                 try:
                     loc = page.locator(sel).first
                     if await loc.is_visible(timeout=1500):
                         await loc.click()
-                        clicked = True
                         break
                 except Exception:
                     continue
-            if not clicked:
-                # Keyboard fallback: Buy=first option, Sell=second
-                presses = 1 if body.action.lower() == "buy" else 2
-                for _ in range(presses):
-                    await page.keyboard.press("ArrowDown")
-                    await asyncio.sleep(0.3)
-                await page.keyboard.press("Enter")
             await asyncio.sleep(0.8)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to select action '{body.action}': {e}")
 
-        # Quantity — label overlays the input, use JS to set + trigger Angular events
-        try:
-            qty_val = str(int(body.quantity))
+            # Quantity
+            qty_val = str(shares)
             await page.evaluate(f"""
             () => {{
                 const el = document.getElementById('eqt-shared-quantity');
                 if (!el) throw new Error('qty input not found');
                 el.focus();
-                const nativeInput = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-                nativeInput.set.call(el, '{qty_val}');
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');
+                nativeSetter.set.call(el, '{qty_val}');
                 el.dispatchEvent(new Event('input',  {{bubbles:true}}));
                 el.dispatchEvent(new Event('change', {{bubbles:true}}));
                 el.dispatchEvent(new KeyboardEvent('keyup', {{bubbles:true}}));
             }}
             """)
             await asyncio.sleep(0.8)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to enter quantity: {e}")
 
-        # Order Type — dropdown button
-        try:
+            # Order type = Limit
             await page.locator('#dest-dropdownlist-button-ordertype').click()
             await asyncio.sleep(1)
-            clicked = False
-            for sel in [
-                f'[role="option"]:has-text("{body.order_type}")',
-                f'[role="listitem"]:has-text("{body.order_type}")',
-                f'li:has-text("{body.order_type}")',
-                f'a:has-text("{body.order_type}")',
-                f'span:has-text("{body.order_type}")',
-            ]:
+            for sel in ['[role="option"]:has-text("Limit")', 'li:has-text("Limit")', 'a:has-text("Limit")']:
                 try:
                     loc = page.locator(sel).first
                     if await loc.is_visible(timeout=1500):
                         await loc.click()
-                        clicked = True
                         break
                 except Exception:
                     continue
-            if not clicked:
-                # Keyboard fallback: Limit=1st, Market=2nd (typical Fidelity order)
-                presses = 1 if body.order_type.lower() == "limit" else 2
-                for _ in range(presses):
-                    await page.keyboard.press("ArrowDown")
-                    await asyncio.sleep(0.3)
-                await page.keyboard.press("Enter")
             await asyncio.sleep(0.8)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to select order type '{body.order_type}': {e}")
 
-        # Limit Price (input appears after selecting Limit order type)
-        if body.order_type.lower() == "limit" and body.limit_price is not None:
-            try:
-                price_input = page.locator('input[id*="price" i], input[name*="price" i], input[class*="price" i]').first
-                await price_input.wait_for(state="visible", timeout=5000)
-                await price_input.click(click_count=3)
-                await price_input.fill(str(body.limit_price))
-                await asyncio.sleep(0.8)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Failed to enter limit price: {e}")
+            # Limit price
+            price_input = page.locator('input[id*="price" i], input[name*="price" i]').first
+            await price_input.wait_for(state="visible", timeout=5000)
+            await price_input.click(click_count=3)
+            await price_input.fill(str(limit_price))
+            await asyncio.sleep(0.8)
 
-        # Preview Order — only full-width primary button on page
-        try:
-            preview_btn = page.locator('button.pvd-button--primary.pvd-button--full-width, button:has-text("Preview order"), button:has-text("Preview Order")').first
+            # Preview
+            preview_btn = page.locator(
+                'button.pvd-button--primary.pvd-button--full-width,'
+                'button:has-text("Preview order"),'
+                'button:has-text("Preview Order")'
+            ).first
             await preview_btn.wait_for(state="visible", timeout=8000)
             await preview_btn.click()
             await asyncio.sleep(5)
+
+            preview_text = await page.evaluate("() => document.body.innerText")
+
+            # Check preview page for errors BEFORE placing
+            preview_ok, preview_msg = _verify_fidelity_order_page(preview_text)
+            if not preview_ok and any(p in preview_text.lower() for p in _ORDER_ERROR_PATTERNS):
+                raise HTTPException(status_code=400, detail=f"Fidelity rejected at preview stage: {preview_msg}\n\nPage excerpt:\n{preview_text[:400]}")
+
+            # Place order
+            place_btn = page.locator('button:has-text("Place Order")').first
+            await place_btn.wait_for(state="visible", timeout=8000)
+            await place_btn.click()
+            await asyncio.sleep(6)
+
+            # Verify confirmation — NEVER assume success
+            confirm_text = await page.evaluate("() => document.body.innerText")
+            confirmed, confirm_msg = _verify_fidelity_order_page(confirm_text)
+            if not confirmed:
+                # Order status unknown — do NOT mark executed
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Order submitted but confirmation NOT verified: {confirm_msg}\n\nPage: {confirm_text[:400]}\n\nCheck Fidelity account manually."
+                )
+
+            order_status = "executed"
+            fidelity_resp = confirm_text[:500]
+            log.info("Fidelity BUY order CONFIRMED: %s x%d @ $%.2f limit=%.2f (%s)", ticker, shares, price, limit_price, confirm_msg)
+
+        except HTTPException:
+            raise
         except Exception as e:
-            err_text = ""
+            raise HTTPException(status_code=500, detail=f"Fidelity order failed: {e}")
+        finally:
+            await _save_storage(admin["email"])
+            await page.close()
+    else:
+        order_status = "preview"
+
+    # ── 6. Mirror in paper account — ONLY when order actually executed ────────
+    paper_result = None
+    if body.also_paper_trade and body.execute and order_status == "executed":
+        try:
+            PAPER_STATE = ROOT / "tmp" / "paper_trading_today" / "unified_brain" / "state.json"
+            PAPER_STATE.parent.mkdir(parents=True, exist_ok=True)
+            state: dict = {}
+            if PAPER_STATE.exists():
+                try:
+                    state = json.loads(PAPER_STATE.read_text())
+                except Exception:
+                    pass
+
+            positions = state.get("positions", {})
+            if ticker not in positions:
+                positions[ticker] = {
+                    "ticker": ticker, "shares": shares, "entry_price": price,
+                    "stop": stop_price, "target": target_price,
+                    "entry_time": now_iso, "signal_date": today,
+                    "score": 80.0, "alpha_tier": "A",
+                    "atr": round(price * 0.02, 4),
+                    "breakeven_moved": False, "peak_price": price, "scans_held": 0,
+                    "partial_sold": False, "defensive_trimmed": False, "scaled_in": False,
+                    "sector": "thematic", "theme": body.theme,
+                    "strategy_label": "fidelity_thematic",
+                    "thesis": body.thesis, "catalyst": body.catalyst,
+                    "hold_days": body.hold_days,
+                    "exit_plan": f"Target +{body.target_pct}%, stop -{body.stop_pct}%, {body.hold_days}d",
+                    "entry_date": today,
+                    "funded_by_unsettled": False, "unsettled_settle_date": "",
+                    "regime_at_entry": "thematic",
+                    "regime_score_at_entry": None, "crash_risk_at_entry": None,
+                    "regime_confidence_at_entry": None,
+                    "_source": "fidelity_thematic",
+                    "_fidelity_order_status": order_status,
+                }
+                cash = float(state.get("cash", 100_000))
+                settled = float(state.get("settled_cash", cash))
+                state["positions"]    = positions
+                state["cash"]         = round(cash - cost, 4)
+                state["settled_cash"] = round(settled - cost, 4)
+                # Atomic write
+                fd, tmp_p = tempfile.mkstemp(dir=PAPER_STATE.parent, prefix=".tmp_")
+                try:
+                    with os.fdopen(fd, "w") as f:
+                        f.write(json.dumps(state, indent=2))
+                    os.replace(tmp_p, PAPER_STATE)
+                except Exception:
+                    try: os.unlink(tmp_p)
+                    except Exception: pass
+                paper_result = {"ok": True, "shares": shares, "cost": cost}
+        except Exception as pe:
+            paper_result = {"ok": False, "error": str(pe)}
+
+    # ── 7. Log trade ──────────────────────────────────────────────────────────
+    log_record = {
+        "ts": now_iso, "ticker": ticker, "shares": shares, "entry": price,
+        "limit_price": limit_price, "stop": stop_price, "target": target_price,
+        "cost": cost, "status": order_status, "theme": body.theme,
+        "thesis": body.thesis, "catalyst": body.catalyst,
+        "account": body.account, "user": admin["email"],
+        "fidelity_account_value": total_value, "fidelity_cash": available_cash,
+    }
+    _log_fidelity_trade(log_record)
+
+    return {
+        "ok":            True,
+        "ticker":        ticker,
+        "shares":        shares,
+        "entry_price":   price,
+        "limit_price":   limit_price,
+        "stop":          stop_price,
+        "target":        target_price,
+        "cost":          cost,
+        "order_status":  order_status,
+        "fidelity":      fidelity_resp,
+        "paper_trade":   paper_result,
+        "account_value": total_value,
+        "cash_used":     cost,
+        "cash_remaining":round(available_cash - cost, 2) if available_cash else None,
+    }
+
+
+# ── Thematic exit endpoint ─────────────────────────────────────────────────────
+
+class FidelityExitRequest(BaseModel):
+    ticker:     str
+    shares:     Optional[float] = None  # None = sell all found in Fidelity positions
+    order_type: str = "Limit"           # Limit or Market
+    limit_pct:  float = -0.2            # Limit = last_price - limit_pct% (default 0.2% below)
+    account:    Optional[str] = None
+    execute:    bool = False
+
+
+@router.post("/fidelity/thematic-exit")
+async def fidelity_thematic_exit(
+    body: FidelityExitRequest,
+    admin: dict = Depends(require_step_up),
+):
+    """
+    Exit a Fidelity thematic position.
+    Looks up current shares from Fidelity positions (or uses body.shares).
+    Places Sell Limit order (default) or Sell Market.
+    """
+    import datetime as _dt
+    from fastapi import HTTPException
+    from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
+
+    ticker = body.ticker.upper().strip()
+    if not ticker.isalpha() or len(ticker) > 5:
+        raise HTTPException(status_code=400, detail=f"Invalid ticker '{ticker}'")
+
+    try:
+        account = _validate_account_number(body.account)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Idempotency: prevent simultaneous exit orders for same ticker
+    lock_key = f"{admin['email']}:exit:{ticker}"
+    order_lock = _get_order_lock(lock_key)
+    if order_lock.locked():
+        raise HTTPException(status_code=429, detail=f"Exit for {ticker} already in progress.")
+
+    async with order_lock:
+        return await _fidelity_thematic_exit_inner(body, admin, ticker, account)
+
+
+async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
+    import datetime as _dt
+    from fastapi import HTTPException
+    from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
+
+    # ── Fetch current Fidelity positions to find share count ──────────────────
+    ctx = await _ensure_browser(admin["email"])
+    page = await ctx.new_page()
+    fidelity_shares = None
+    last_price      = None
+
+    try:
+        await _nav(page, PORTFOLIO_URL, sleep=6)
+        if "login" in page.url.lower():
+            raise HTTPException(status_code=401, detail="Not authenticated with Fidelity.")
+
+        try:
+            await page.wait_for_selector('.ag-pinned-left-cols-container .ag-row[row-index]', timeout=15_000)
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+        pos_data = await page.evaluate(f"""
+        () => {{
+            let result = null;
+            document.querySelectorAll('.ag-pinned-left-cols-container .ag-row[row-index]').forEach(row => {{
+                const sym = row.querySelector('[col-id="sym"]')?.innerText?.trim().split('\\n')[0] || '';
+                if (sym.toUpperCase() !== '{ticker}') return;
+                const ri = row.getAttribute('row-index');
+                const center = document.querySelector(`.ag-center-cols-container .ag-row[row-index="${{ri}}"]`);
+                if (!center) return;
+                const qty   = center.querySelector('[col-id="qty"]')?.innerText?.trim() || '';
+                const price = center.querySelector('[col-id="lstPrStk"]')?.innerText?.trim().split('\\n')[0] || '';
+                result = {{ qty, price }};
+            }});
+            return result;
+        }}
+        """)
+
+        if pos_data:
             try:
-                err_text = await page.locator('.pvd-inline-alert, .message-error, .alert-error').first.inner_text()
+                fidelity_shares = float(str(pos_data.get("qty", "")).replace(",", ""))
             except Exception:
                 pass
-            raise HTTPException(status_code=400, detail=f"Failed to click Preview: {err_text or str(e)}")
-
-        # Check for preview warnings/errors on page
-        preview_text = await page.evaluate("() => document.body.innerText")
-
-        # Place Order
-        order_status = "previewed"
-        if body.execute:
-            try:
-                place_btn = page.locator('button:has-text("Place Order")').first
-                await place_btn.click()
-                await asyncio.sleep(5)
-                order_status = "executed"
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"Failed to place order: {e}")
-
-        await _save_storage(admin["email"])
-        return {"success": True, "status": order_status, "preview_text_snippet": preview_text[:1000]}
+            last_price = _parse_dollar(pos_data.get("price", "") or "")
 
     finally:
         await page.close()
+
+    shares_to_sell = body.shares or fidelity_shares
+    if not shares_to_sell or shares_to_sell <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{ticker} not found in Fidelity positions or shares=0 (found: {fidelity_shares})"
+        )
+
+    shares_to_sell = int(shares_to_sell)
+
+    # Use Fidelity's own real-time price if available (more accurate than yfinance after-hours)
+    if not last_price:
+        loop = asyncio.get_running_loop()
+        def _get_exit_price(sym: str) -> float | None:
+            try:
+                import yfinance as yf
+                data = yf.download(sym, period="5d", auto_adjust=True, progress=False)
+                closes = data["Close"]
+                series = closes[sym] if hasattr(closes, "columns") else closes
+                return float(series.dropna().iloc[-1])
+            except Exception:
+                return None
+        last_price = await loop.run_in_executor(None, _get_exit_price, ticker)
+
+    if not last_price:
+        raise HTTPException(status_code=400, detail=f"Cannot determine price for {ticker}")
+
+    # Always use Limit order for exits — compliance blocks Market
+    limit_price = round(last_price * (1 + body.limit_pct / 100), 2)
+
+    order_dict = {
+        "symbol": ticker, "action": "Sell",
+        "order_type": "Limit",
+        "quantity": shares_to_sell,
+        "limit_price": limit_price,
+    }
+    decision = validate_live_order(order_dict)
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=f"Compliance: {decision.reason}")
+
+    order_status = "preview"
+    fidelity_resp = None
+
+    if body.execute:
+        if LIVE_TRADING_HARD_BLOCKED:
+            raise HTTPException(status_code=403, detail="LIVE_TRADING_HARD_BLOCKED=True in compliance.py")
+        if not live_trading_enabled():
+            raise HTTPException(status_code=403, detail="LIVE_TRADING_ENABLED not set to true in .env")
+
+        exit_page = None  # define before try so finally can safely check
+        try:
+            exit_page = await ctx.new_page()
+            await _nav(exit_page, "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry", sleep=5)
+
+            # Account — pre-validated numeric only, injection-safe
+            if account:
+                try:
+                    await exit_page.locator('#dest-acct-dropdown').click()
+                    await asyncio.sleep(1)
+                    await exit_page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
+                    await asyncio.sleep(1)
+                except Exception:
+                    log.warning("Could not select account %s — using default", account)
+
+            sym_input = exit_page.locator('#eq-ticket-dest-symbol')
+            await sym_input.wait_for(state="visible", timeout=10000)
+            await sym_input.click()
+            await sym_input.fill(ticker)
+            await asyncio.sleep(1.5)
+            await exit_page.keyboard.press("ArrowDown")
+            await asyncio.sleep(0.5)
+            await exit_page.keyboard.press("Enter")
+            await asyncio.sleep(2)
+
+            # Action = Sell
+            await exit_page.locator('#dest-dropdownlist-button-action').click()
+            await asyncio.sleep(1)
+            for sel in ['[role="option"]:has-text("Sell")', 'li:has-text("Sell")', 'a:has-text("Sell")']:
+                try:
+                    loc = exit_page.locator(sel).first
+                    if await loc.is_visible(timeout=1500):
+                        await loc.click()
+                        break
+                except Exception:
+                    continue
+            await asyncio.sleep(0.8)
+
+            # Quantity — integer shares only, no injection risk
+            qty_val = str(int(shares_to_sell))
+            await exit_page.evaluate(f"""
+            () => {{
+                const el = document.getElementById('eqt-shared-quantity');
+                if (!el) throw new Error('qty not found');
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');
+                nativeSetter.set.call(el, '{qty_val}');
+                el.dispatchEvent(new Event('input',  {{bubbles:true}}));
+                el.dispatchEvent(new Event('change', {{bubbles:true}}));
+            }}
+            """)
+            await asyncio.sleep(0.8)
+
+            # Order type — validated: only "Limit" allowed (compliance blocks Market)
+            await exit_page.locator('#dest-dropdownlist-button-ordertype').click()
+            await asyncio.sleep(1)
+            order_type_label = "Limit"  # always use Limit for exits (Market blocked by compliance)
+            for sel in [f'[role="option"]:has-text("{order_type_label}")', f'li:has-text("{order_type_label}")', f'a:has-text("{order_type_label}")']:
+                try:
+                    loc = exit_page.locator(sel).first
+                    if await loc.is_visible(timeout=1500):
+                        await loc.click()
+                        break
+                except Exception:
+                    continue
+            await asyncio.sleep(0.8)
+
+            if limit_price:
+                price_input = exit_page.locator('input[id*="price" i], input[name*="price" i]').first
+                await price_input.wait_for(state="visible", timeout=5000)
+                await price_input.click(click_count=3)
+                await price_input.fill(str(limit_price))
+                await asyncio.sleep(0.8)
+
+            preview_btn = exit_page.locator(
+                'button.pvd-button--primary.pvd-button--full-width,'
+                'button:has-text("Preview order"),'
+                'button:has-text("Preview Order")'
+            ).first
+            await preview_btn.wait_for(state="visible", timeout=8000)
+            await preview_btn.click()
+            await asyncio.sleep(5)
+
+            preview_text = await exit_page.evaluate("() => document.body.innerText")
+
+            # Check for errors before placing
+            _, preview_msg = _verify_fidelity_order_page(preview_text)
+            if any(p in preview_text.lower() for p in _ORDER_ERROR_PATTERNS):
+                raise HTTPException(status_code=400, detail=f"Fidelity rejected at preview: {preview_msg}\n{preview_text[:400]}")
+
+            place_btn = exit_page.locator('button:has-text("Place Order")').first
+            await place_btn.wait_for(state="visible", timeout=8000)
+            await place_btn.click()
+            await asyncio.sleep(6)
+
+            # Verify confirmation — NEVER assume success
+            confirm_text = await exit_page.evaluate("() => document.body.innerText")
+            confirmed, confirm_msg = _verify_fidelity_order_page(confirm_text)
+            if not confirmed:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Exit submitted but NOT confirmed: {confirm_msg}\n\nPage: {confirm_text[:400]}\n\nCheck Fidelity manually."
+                )
+
+            order_status  = "executed"
+            fidelity_resp = confirm_text[:500]
+            log.info("Fidelity SELL order CONFIRMED: %s x%d @ limit=%.2f (%s)", ticker, shares_to_sell, limit_price or 0, confirm_msg)
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Fidelity exit failed: {e}")
+        finally:
+            await _save_storage(admin["email"])
+            if exit_page is not None:
+                try:
+                    await exit_page.close()
+                except Exception:
+                    pass
+
+    now_iso  = _dt.datetime.now().isoformat(timespec="seconds")
+    proceeds = round(last_price * shares_to_sell, 2)
+    _log_fidelity_trade({
+        "ts": now_iso, "ticker": ticker, "shares": shares_to_sell,
+        "action": "Sell", "order_type": "Limit",
+        "price": last_price, "limit_price": limit_price,
+        "proceeds": proceeds, "status": order_status, "user": admin["email"],
+    })
+
+    return {
+        "ok":           True,
+        "ticker":       ticker,
+        "shares":       shares_to_sell,
+        "price":        last_price,
+        "limit_price":  limit_price,
+        "proceeds":     proceeds,
+        "order_status": order_status,
+        "fidelity":     fidelity_resp,
+        "price_source": "fidelity_realtime" if fidelity_shares else "yfinance",
+    }
+
+
+# ── Fidelity → Thematic sync ───────────────────────────────────────────────────
+
+@router.get("/fidelity/thematic-sync")
+async def fidelity_thematic_sync(admin: dict = Depends(require_admin)):
+    """
+    Return Fidelity real positions mapped to thematic format.
+    Enriches with yfinance scores, marks which are also in thematic portfolio.
+    Useful for seeing real vs. paper thematic exposure side-by-side.
+    """
+    from fastapi import HTTPException
+    from web.api.thematic_portfolio import _load, DEFAULT_THEMES
+
+    connected = await _is_logged_in(admin["email"])
+    if not connected:
+        raise HTTPException(status_code=401, detail="Not authenticated with Fidelity.")
+
+    # Fetch Fidelity positions
+    ctx = await _ensure_browser(admin["email"])
+    page = await ctx.new_page()
+    try:
+        await _nav(page, PORTFOLIO_URL, sleep=6)
+        if "login" in page.url.lower():
+            raise HTTPException(status_code=401, detail="Not authenticated with Fidelity.")
+        try:
+            await page.wait_for_selector('.ag-pinned-left-cols-container .ag-row[row-index]', timeout=15_000)
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+
+        raw = await page.evaluate("""
+        () => {
+            const SKIP = ['Cash', 'Pending', 'Account:', 'Grand', 'HELD'];
+            const symMap = {};
+            document.querySelectorAll('.ag-pinned-left-cols-container .ag-row[row-index]').forEach(row => {
+                const cell = row.querySelector('[col-id="sym"]');
+                if (cell) symMap[row.getAttribute('row-index')] = cell.innerText.trim();
+            });
+            const dataMap = {};
+            document.querySelectorAll('.ag-center-cols-container .ag-row[row-index]').forEach(row => {
+                const cells = {};
+                row.querySelectorAll('[col-id]').forEach(cell => {
+                    cells[cell.getAttribute('col-id')] = cell.innerText.trim();
+                });
+                if (Object.keys(cells).length >= 2) dataMap[row.getAttribute('row-index')] = cells;
+            });
+            const positions = [];
+            Object.entries(symMap).forEach(([ri, symText]) => {
+                const ticker = symText.split('\\n')[0].trim();
+                if (!ticker || ticker.length > 10 || !/^[A-Z]/.test(ticker) ||
+                    SKIP.some(s => ticker.startsWith(s))) return;
+                const d = dataMap[ri] || {};
+                const lstLines = (d.lstPrStk || '').split('\\n');
+                const cstLines = (d.cstBasStk || '').split('\\n');
+                const totLines = (d.totGLStk || '').split('\\n');
+                positions.push({
+                    ticker,
+                    qty:             d.qty || '',
+                    last_price:      lstLines[0] || '',
+                    cost_per_share:  cstLines[1] || '',
+                    market_value:    (d.curVal || '').split('\\n')[0],
+                    total_gain_pct:  totLines[1] || '',
+                });
+            });
+            return positions;
+        }
+        """)
+        await _save_storage(admin["email"])
+    finally:
+        await page.close()
+
+    # Load thematic portfolio for this user
+    port = _load(admin["email"])
+    thematic_tickers = set(port["positions"].keys())
+
+    # Map Fidelity positions to thematic-compatible format
+    result = []
+    for pos in raw:
+        ticker = pos["ticker"]
+        qty_raw = pos.get("qty", "").replace(",", "").strip()
+        shares  = float(qty_raw) if qty_raw else 0
+        price   = _parse_dollar(pos.get("last_price", "") or "")
+        cost_ps = _parse_dollar(pos.get("cost_per_share", "") or "")
+        mv      = _parse_dollar(pos.get("market_value", "") or "")
+        thematic_pos = port["positions"].get(ticker, {})
+        result.append({
+            "ticker":          ticker,
+            "shares":          shares,
+            "last_price":      price,
+            "cost_per_share":  cost_ps,
+            "market_value":    mv,
+            "total_gain_pct":  pos.get("total_gain_pct", ""),
+            "in_thematic":     ticker in thematic_tickers,
+            "theme":           thematic_pos.get("theme", "—"),
+            "thesis":          thematic_pos.get("thesis", ""),
+            "conviction":      thematic_pos.get("conviction", None),
+            "source":          "fidelity_real",
+        })
+
+    return {
+        "ok":        True,
+        "positions": result,
+        "count":     len(result),
+        "thematic_overlap": sum(1 for p in result if p["in_thematic"]),
+    }
+
+
+# ── Trade log endpoint ─────────────────────────────────────────────────────────
+
+@router.get("/fidelity/trade-log")
+async def fidelity_trade_log(admin: dict = Depends(require_admin), limit: int = 50):
+    """Return recent Fidelity trades placed through this system."""
+    entries: list[dict] = []
+    if TRADE_HISTORY_FILE.exists():
+        try:
+            lines = TRADE_HISTORY_FILE.read_text().splitlines()
+            for line in lines[-limit:]:
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return {"ok": True, "trades": list(reversed(entries)), "count": len(entries)}
 
 
 @router.get("/fidelity/debug-trade")

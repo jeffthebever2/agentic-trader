@@ -20,6 +20,7 @@ const TermsPage    = lazy(() => import('@/pages/Terms'))
 const PrivacyPage  = lazy(() => import('@/pages/Privacy'))
 const LogsPage     = lazy(() => import('@/pages/Logs'))
 const SignalsPage  = lazy(() => import('@/pages/Signals'))
+const ThematicPortfolioPage = lazy(() => import('@/pages/ThematicPortfolio'))
 
 function PageSkeleton() {
   return (
@@ -56,6 +57,7 @@ function AppRoutes() {
             <Route path="/admin"    element={<ErrorBoundary><AdminPage /></ErrorBoundary>} />
             <Route path="/hil"      element={<ErrorBoundary><HILPage /></ErrorBoundary>} />
             <Route path="/logs"     element={<ErrorBoundary><LogsPage /></ErrorBoundary>} />
+            <Route path="/thematic" element={<ErrorBoundary><ThematicPortfolioPage /></ErrorBoundary>} />
             <Route path="/terms"    element={<TermsPage />} />
             <Route path="/privacy"  element={<PrivacyPage />} />
             <Route path="*"         element={<DashboardPage />} />

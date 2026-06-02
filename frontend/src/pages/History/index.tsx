@@ -161,6 +161,7 @@ function VirtualTable({ items, expandedIds, onToggleExpand }: VirtualTableProps)
     }
   }
 
+  // eslint-disable-next-line react-hooks/incompatible-library
   const rowVirtualizer = useVirtualizer({
     count: flatRows.length,
     getScrollElement: () => parentRef.current,

@@ -56,12 +56,9 @@ function sortData<T extends Record<string, unknown>>(
   return [...data].sort((a, b) => {
     const av = a[key]
     const bv = b[key]
-    let cmp = 0
-    if (typeof av === 'number' && typeof bv === 'number') {
-      cmp = av - bv
-    } else {
-      cmp = String(av ?? '').toLowerCase().localeCompare(String(bv ?? '').toLowerCase())
-    }
+    const cmp = (typeof av === 'number' && typeof bv === 'number')
+      ? av - bv
+      : String(av ?? '').toLowerCase().localeCompare(String(bv ?? '').toLowerCase())
     return dir === 'asc' ? cmp : -cmp
   })
 }

@@ -471,6 +471,7 @@ function WebullPlaceOrder() {
     defaultValues: { action: 'BUY', order_type: 'Market', tif: 'GTC' },
   })
 
+  // eslint-disable-next-line react-hooks/incompatible-library
   const orderType = watch('order_type')
 
   const orderMut = useMutation({
@@ -800,7 +801,7 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null)
   const [interval, setInterval]   = useState('D')
   const [chartStyle, setChartStyle] = useState('1')
-  const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
+
 
   const posQ = useQuery<{ positions: FidelityPosition[]; grand_totals: FidelitySummary }>({
     queryKey: ['fidelity', 'positions'],
@@ -808,9 +809,7 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
     refetchInterval: 60_000,
   })
 
-  useEffect(() => {
-    if (posQ.data) setRefreshedAt(new Date())
-  }, [posQ.data])
+  const refreshedAt = posQ.dataUpdatedAt ? new Date(posQ.dataUpdatedAt) : null
 
   const fidStatusQ = useQuery<FidelityStatus>({
     queryKey: ['fidelity', 'status'],

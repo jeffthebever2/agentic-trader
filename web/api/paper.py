@@ -391,17 +391,11 @@ async def approve_page(request: Request, t: str = None):
                         "close": float(row['Close'])
                     })
                 except Exception as e:
-                    print(f"Row error: {e}")
-            
-            # Debug: Write the first 5 points to a file
-            debug_path = Path("tmp/chart_debug.json")
-            debug_path.write_text(json.dumps(chart_data[:5], indent=2))
+                    import logging; logging.getLogger("paper").debug("Chart row error: %s", e)
         else:
-            print(f"No history found for {ticker}")
-            Path("tmp/chart_debug.json").write_text("EMPTY")
+            import logging; logging.getLogger("paper").debug("No chart history for %s", ticker)
     except Exception as e:
-        print(f"Chart download error: {e}")
-        Path("tmp/chart_debug.json").write_text(f"ERROR: {e}")
+        import logging; logging.getLogger("paper").warning("Chart download error for %s: %s", ticker, e)
 
     chart_data = sorted(chart_data, key=lambda x: x['time'])
 
@@ -624,7 +618,15 @@ async def resolve_hil(req: HilResolveRequest, admin: dict = Depends(require_admi
             state = json.loads(HIL_STATE_FILE.read_text())
             if state.get("id") == req.id and state.get("status") == "pending":
                 state["status"] = "approved" if req.action == "approve" else "rejected"
-                HIL_STATE_FILE.write_text(json.dumps(state))
+                import tempfile as _tf, os as _os
+                _fd, _tmp = _tf.mkstemp(dir=HIL_STATE_FILE.parent, prefix=".tmp_")
+                try:
+                    with _os.fdopen(_fd, "w") as _f: _f.write(json.dumps(state))
+                    _os.replace(_tmp, HIL_STATE_FILE)
+                except Exception:
+                    try: _os.unlink(_tmp)
+                    except Exception: pass
+                    raise
                 return {"success": True}
         except Exception:
             pass
@@ -1222,7 +1224,15 @@ async def get_autostart():
 async def set_autostart(body: dict, admin: dict = Depends(require_admin)):
     AUTOSTART_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     config = {**DEFAULT_AUTOSTART_CONFIG, **body}
-    AUTOSTART_CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    import tempfile as _tf2, os as _os2
+    _fd2, _tmp2 = _tf2.mkstemp(dir=AUTOSTART_CONFIG_PATH.parent, prefix=".tmp_")
+    try:
+        with _os2.fdopen(_fd2, "w", encoding="utf-8") as _f2: _f2.write(json.dumps(config, indent=2))
+        _os2.replace(_tmp2, AUTOSTART_CONFIG_PATH)
+    except Exception:
+        try: _os2.unlink(_tmp2)
+        except Exception: pass
+        raise
     return {"success": True, "config": config}
 
 

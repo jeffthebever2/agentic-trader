@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 /**
  * 2FA Step-Up Modal — shown when a protected action requires re-verification.
  * Trigger by calling openStepUp(resolve, reject) from the stepUpStore.

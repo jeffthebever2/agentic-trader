@@ -600,11 +600,11 @@ function AnalyticsTab() {
                 <tr key={name}>
                   <td style={tdStyle}>{name}</td>
                   <td style={tdStyle}>{s.trades}</td>
-                  <td style={{ ...tdStyle, color: winRateColor(s.win_rate) }}>
-                    {(s.win_rate * 100).toFixed(1)}%
+                  <td style={{ ...tdStyle, color: winRateColor(s.win_rate ?? 0) }}>
+                    {s.win_rate != null ? `${(s.win_rate * 100).toFixed(1)}%` : '—'}
                   </td>
-                  <td style={{ ...tdStyle, color: pnlColor(s.total_pnl) }}>
-                    ${s.total_pnl.toFixed(2)}
+                  <td style={{ ...tdStyle, color: pnlColor(s.total_pnl ?? 0) }}>
+                    {s.total_pnl != null ? `$${s.total_pnl.toFixed(2)}` : '—'}
                   </td>
                 </tr>
               ))}
@@ -684,7 +684,7 @@ function ApprovalsTab() {
                 {item.action}
               </td>
               <td style={tdStyle}>{item.shares}</td>
-              <td style={tdStyle}>${item.price.toFixed(2)}</td>
+              <td style={tdStyle}>{item.price != null ? `$${item.price.toFixed(2)}` : '—'}</td>
               <td style={tdStyle}>{item.strategy}</td>
               <td style={{ ...tdStyle, fontSize: 11 }}>
                 {item.created_at ? new Date(item.created_at).toLocaleString() : '—'}

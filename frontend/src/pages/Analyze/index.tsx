@@ -406,12 +406,12 @@ export default function AnalyzePage() {
   const msgIdRef = useRef(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // Update model defaults when provider changes
-  useEffect(() => {
-    const models = PROVIDER_MODELS[provider] ?? []
+  function changeProvider(p: string) {
+    const models = PROVIDER_MODELS[p] ?? []
+    setProvider(p)
     setDeepModel(models[1] ?? models[0] ?? '')
     setQuickModel(models[0] ?? '')
-  }, [provider])
+  }
 
   // Auto-scroll live feed
   useEffect(() => {
@@ -451,7 +451,7 @@ export default function AnalyzePage() {
     setRunning(true)
     startTimer()
 
-    const ws = new WebSocket(wsUrl('/analyze'))
+    const ws = new WebSocket(wsUrl('/ws/analyze'))
     wsRef.current = ws
 
     ws.onopen = () => {
@@ -512,7 +512,7 @@ export default function AnalyzePage() {
         } else if (msg.type === 'progress') {
           setAgentProgress(`${msg.agent} ${msg.done}/${msg.total}`)
         }
-      } catch (_) { /* ignore parse errors */ }
+      } catch { /* ignore parse errors */ }
     }
 
     ws.onerror = () => {
@@ -652,7 +652,7 @@ export default function AnalyzePage() {
           {showProviderSelect && (
             <div style={section}>
               <div style={label}>AI Provider</div>
-              <select className="input" value={provider} onChange={e => setProvider(e.target.value)}>
+              <select className="input" value={provider} onChange={e => changeProvider(e.target.value)}>
                 {['cloudflare','openrouter','nvidia','openai','anthropic','google','xai','deepseek','qwen','glm','azure','ollama'].map(p => (
                   <option key={p} value={p}>{p}</option>
                 ))}

@@ -1,8 +1,32 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import api from '@/api/client'
 import { LoadingState } from '@/components/shared/LoadingState'
+
+// ── Thematic HIL types ────────────────────────────────────────────────────────
+
+interface ThematicHilPrefs {
+  enabled: boolean
+  fidelity_trade: boolean
+  dollar_amount: number
+  sms_notify: boolean
+}
+
+interface ThematicSignal {
+  id: string
+  ticker: string
+  name?: string
+  theme?: string
+  conviction?: number
+  raw_score?: number
+  thesis?: string
+  catalyst?: string
+  target_pct?: number
+  stop_pct?: number
+  hold_days?: number
+  status: string
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -194,10 +218,10 @@ export default function HILPage() {
   const navigate = useNavigate()
 
   const [disclosureChecked, setDisclosureChecked] = useState(false)
-  const [form, setForm] = useState<HilPrefs>({ ...DEFAULT_PREFS })
+  const [formOverride, setFormOverride] = useState<HilPrefs | null>(null)
   const [formDirty, setFormDirty] = useState(false)
   const [savedMsg, setSavedMsg] = useState('')
-  const [phone, setPhone] = useState('')
+  const [phoneOverride, setPhoneOverride] = useState<string | null>(null)
   const [phoneMsg, setPhoneMsg] = useState('')
 
   // ── Queries ──────────────────────────────────────────────────────
@@ -224,15 +248,13 @@ export default function HILPage() {
     refetchInterval: 10_000,
   })
 
-  // ── Sync from API ─────────────────────────────────────────────────
-  useEffect(() => {
-    if (user?.hil_prefs) {
-      setForm({ ...DEFAULT_PREFS, ...user.hil_prefs })
-    }
-    if (user?.phone_number || user?.phone) {
-      setPhone((user.phone_number || user.phone || '') as string)
-    }
-  }, [user])
+  const form = formOverride ?? { ...DEFAULT_PREFS, ...(user?.hil_prefs ?? {}) }
+  function setForm(f: HilPrefs | ((prev: HilPrefs) => HilPrefs)) {
+    setFormOverride(typeof f === 'function' ? f(form) : f)
+    setFormDirty(true)
+  }
+  const phone = phoneOverride ?? (user?.phone_number as string | undefined) ?? (user?.phone as string | undefined) ?? ''
+  const setPhone = setPhoneOverride
 
   // ── Mutations ─────────────────────────────────────────────────────
   const disclosureMut = useMutation({
@@ -249,6 +271,7 @@ export default function HILPage() {
       api.post('/auth/me/hil-prefs', prefs).then(r => r.data),
     onSuccess: () => {
       setSavedMsg('Preferences saved.')
+      setFormOverride(null)
       setFormDirty(false)
       qc.invalidateQueries({ queryKey: ['auth-me'] })
       setTimeout(() => setSavedMsg(''), 3000)
@@ -268,17 +291,68 @@ export default function HILPage() {
     onError: () => { setPhoneMsg('Failed to send.'); setTimeout(() => setPhoneMsg(''), 4000) },
   })
 
+  // ── Thematic HIL ─────────────────────────────────────────────────
+  const [thematicHilForm, setThematicHilForm] = useState<ThematicHilPrefs | null>(null)
+  const [thematicSavedMsg, setThematicSavedMsg] = useState('')
+  const [approvingId, setApprovingId] = useState<string | null>(null)
+
+  const { data: thematicHilRaw, refetch: refetchThematicHil } = useQuery<{ hil: ThematicHilPrefs }>({
+    queryKey: ['thematic-hil-settings'],
+    queryFn: () => api.get('/thematic/auto/hil-settings').then(r => r.data),
+    staleTime: 30_000,
+  })
+
+  const { data: thematicSignalsRaw, refetch: refetchThematicSignals } = useQuery<{ signals: ThematicSignal[] }>({
+    queryKey: ['thematic-signals'],
+    queryFn: () => api.get('/thematic/auto/signals').then(r => r.data),
+    refetchInterval: 30_000,
+    enabled: !!(thematicHilForm ?? thematicHilRaw?.hil)?.enabled,
+  })
+
+  const thematicHil: ThematicHilPrefs = thematicHilForm ?? thematicHilRaw?.hil ?? {
+    enabled: false, fidelity_trade: false, dollar_amount: 500, sms_notify: true,
+  }
+  const pendingSignals = (thematicSignalsRaw?.signals ?? []).filter(s => s.status === 'pending')
+
+  const saveThematicHilMut = useMutation({
+    mutationFn: (prefs: ThematicHilPrefs) =>
+      api.post('/thematic/auto/hil-settings', prefs).then(r => r.data),
+    onSuccess: () => {
+      setThematicSavedMsg('Saved.')
+      setThematicHilForm(null)
+      qc.invalidateQueries({ queryKey: ['thematic-hil-settings'] })
+      setTimeout(() => setThematicSavedMsg(''), 3000)
+    },
+  })
+
+  const approveSignalMut = useMutation({
+    mutationFn: ({ id, dollar, fidelity }: { id: string; dollar: number; fidelity: boolean }) =>
+      api.post(`/thematic/auto/signals/${id}/approve`, {
+        dollar_amount: dollar,
+        fidelity_trade: fidelity,
+        execute_fidelity: fidelity,
+      }).then(r => r.data),
+    onSuccess: () => {
+      setApprovingId(null)
+      refetchThematicSignals()
+    },
+    onError: () => setApprovingId(null),
+  })
+
+  const skipSignalMut = useMutation({
+    mutationFn: (id: string) => api.post(`/thematic/auto/signals/${id}/skip`).then(r => r.data),
+    onSuccess: () => refetchThematicSignals(),
+  })
+
   // ── Helpers ───────────────────────────────────────────────────────
   function setField(key: keyof HilPrefs, value: unknown) {
     setForm(f => ({ ...f, [key]: value }))
-    setFormDirty(true)
   }
 
   function applyPreset(name: string) {
     const p = PRESETS[name]
     if (!p) return
     setForm(f => ({ ...f, ...p }))
-    setFormDirty(true)
   }
 
   function handleSave() {
@@ -295,10 +369,8 @@ export default function HILPage() {
   }
 
   function handleDiscard() {
-    if (user?.hil_prefs) {
-      setForm({ ...DEFAULT_PREFS, ...user.hil_prefs })
-      if (user.phone_number || user.phone) setPhone((user.phone_number || user.phone || '') as string)
-    }
+    setFormOverride(null)
+    setPhoneOverride(null)
     setFormDirty(false)
   }
 
@@ -808,7 +880,150 @@ export default function HILPage() {
             )}
           </div>
 
-          {/* ── 8. Save / Discard ── */}
+          {/* ── 8. Thematic auto-picker HIL ── */}
+          <div style={card}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={sectionTitle}>📊 Thematic auto-picker approvals</div>
+              <button style={{ ...btnSecondary, padding: '4px 12px', fontSize: 12 }}
+                onClick={() => { refetchThematicHil(); refetchThematicSignals() }}>
+                ↺ Refresh
+              </button>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 16 }}>
+              Require your approval before thematic signals enter the portfolio. Optionally route approved signals to Fidelity.
+            </div>
+
+            {/* Enable toggle */}
+            <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, cursor: 'pointer', marginBottom: 16 }}>
+              <span style={{ fontSize: 13, color: 'var(--ink)' }}>Require approval before signals execute</span>
+              <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}>
+                <input type="checkbox" checked={thematicHil.enabled}
+                  onChange={e => setThematicHilForm({ ...thematicHil, enabled: e.target.checked })}
+                  style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }} />
+                <span onClick={() => setThematicHilForm({ ...thematicHil, enabled: !thematicHil.enabled })} style={{
+                  display: 'inline-block', width: 36, height: 20, borderRadius: 10,
+                  background: thematicHil.enabled ? 'var(--accent)' : 'var(--surface-raised)',
+                  position: 'relative', cursor: 'pointer', transition: 'background .2s',
+                }}>
+                  <span style={{
+                    position: 'absolute', top: 2, left: thematicHil.enabled ? 18 : 2,
+                    width: 16, height: 16, borderRadius: 8, background: '#fff', transition: 'left .2s',
+                  }} />
+                </span>
+              </span>
+            </label>
+
+            {thematicHil.enabled && (
+              <>
+                <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', marginBottom: 14 }}>
+                  <div>
+                    <label style={labelStyle}>$ per trade</label>
+                    <input type="number" min={10} max={50000} step={50}
+                      style={{ ...inputStyle, width: 110 }}
+                      value={thematicHil.dollar_amount}
+                      onChange={e => setThematicHilForm({ ...thematicHil, dollar_amount: parseFloat(e.target.value) || 500 }) } />
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10, justifyContent: 'flex-end', paddingBottom: 2 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, color: 'var(--ink)' }}>
+                      <input type="checkbox" checked={thematicHil.sms_notify}
+                        onChange={e => setThematicHilForm({ ...thematicHil, sms_notify: e.target.checked })} />
+                      SMS notify when signals pending
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, color: '#fbbf24' }}>
+                      <input type="checkbox" checked={thematicHil.fidelity_trade}
+                        onChange={e => setThematicHilForm({ ...thematicHil, fidelity_trade: e.target.checked })} />
+                      Route approved signals to Fidelity <span style={{ fontSize: 11, color: 'var(--ink-faint)', marginLeft: 4 }}>(real money)</span>
+                    </label>
+                  </div>
+                </div>
+
+                {thematicHil.fidelity_trade && (
+                  <div style={{
+                    padding: '8px 12px', borderRadius: 7, marginBottom: 14,
+                    background: 'rgba(251,191,36,.08)', border: '1px solid rgba(251,191,36,.3)',
+                    fontSize: 12, color: '#fbbf24',
+                  }}>
+                    ⚠ Approved signals will place real limit orders in your Fidelity account. Each approval requires explicit confirmation.
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <button style={{ ...btnPrimary, padding: '7px 18px', fontSize: 12 }}
+                    disabled={saveThematicHilMut.isPending}
+                    onClick={() => saveThematicHilMut.mutate(thematicHil)}>
+                    {saveThematicHilMut.isPending ? 'Saving…' : 'Save thematic HIL settings'}
+                  </button>
+                  {thematicSavedMsg && <span style={{ fontSize: 12, color: '#34d399' }}>✓ {thematicSavedMsg}</span>}
+                </div>
+
+                {/* Pending signals queue */}
+                <div style={{ marginTop: 20 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 10 }}>
+                    Pending signals ({pendingSignals.length})
+                  </div>
+                  {pendingSignals.length === 0 ? (
+                    <div style={{ fontSize: 13, color: 'var(--ink-faint)', padding: '12px 0' }}>No signals pending approval.</div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {pendingSignals.map(sig => (
+                        <div key={sig.id} style={{
+                          border: '1px solid var(--surface-rule)', borderRadius: 8,
+                          padding: '12px 14px', background: 'var(--surface-soft)',
+                          opacity: approvingId === sig.id ? 0.5 : 1,
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
+                            <span style={{ fontWeight: 700, fontSize: 15, color: 'var(--ink)' }}>{sig.ticker}</span>
+                            {sig.theme && (
+                              <span style={{ ...badge('grey'), fontSize: 10 }}>{sig.theme}</span>
+                            )}
+                            <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>
+                              Conviction {sig.conviction ?? '—'}/10 · Buzz {Math.round(sig.raw_score ?? 0)} pts
+                            </span>
+                            {thematicHil.fidelity_trade && (
+                              <span style={{ fontSize: 10, fontWeight: 700, color: '#fbbf24' }}>FIDELITY</span>
+                            )}
+                          </div>
+                          {(sig.thesis || sig.catalyst) && (
+                            <div style={{ fontSize: 12, color: 'var(--ink-muted)', marginBottom: 6, lineHeight: 1.45 }}>
+                              {(sig.thesis || sig.catalyst || '').slice(0, 180)}
+                            </div>
+                          )}
+                          <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginBottom: 10 }}>
+                            Target +{sig.target_pct ?? 12}% · Stop -{sig.stop_pct ?? 6}% · Hold {sig.hold_days ?? 5}d
+                          </div>
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <button
+                              style={{ ...btnPrimary, padding: '5px 14px', fontSize: 12 }}
+                              disabled={!!approvingId || approveSignalMut.isPending}
+                              onClick={() => {
+                                setApprovingId(sig.id)
+                                approveSignalMut.mutate({
+                                  id: sig.id,
+                                  dollar: thematicHil.dollar_amount,
+                                  fidelity: thematicHil.fidelity_trade,
+                                })
+                              }}
+                            >
+                              Approve ${thematicHil.dollar_amount.toFixed(0)}
+                            </button>
+                            <button
+                              style={{ ...btnSecondary, padding: '5px 14px', fontSize: 12 }}
+                              disabled={skipSignalMut.isPending}
+                              onClick={() => skipSignalMut.mutate(sig.id)}
+                            >
+                              Skip
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* ── 9. Save / Discard ── */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
             <button
               style={{ ...btnPrimary, padding: '8px 32px', opacity: (!formDirty || saveMut.isPending) ? 0.6 : 1 }}

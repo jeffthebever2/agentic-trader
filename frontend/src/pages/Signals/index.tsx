@@ -90,9 +90,9 @@ function SignalCard({ c, onClick }: { c: EnrichedCandidate; onClick: () => void 
       {/* Price grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 12 }}>
         {[
-          { label: 'Entry',  value: `$${entry.toFixed(2)}`,  color: 'var(--ink)' },
-          { label: 'Target', value: `$${target.toFixed(2)}`, color: '#4ade80' },
-          { label: 'Stop',   value: `$${stop.toFixed(2)}`,   color: '#f87171' },
+          { label: 'Entry',  value: entry > 0 ? `$${entry.toFixed(2)}` : '—',  color: 'var(--ink)' },
+          { label: 'Target', value: target > 0 ? `$${target.toFixed(2)}` : '—', color: '#4ade80' },
+          { label: 'Stop',   value: stop > 0 ? `$${stop.toFixed(2)}` : '—',   color: '#f87171' },
         ].map(p => (
           <div key={p.label} style={{ background: 'var(--surface-soft)', borderRadius: 6, padding: '8px 10px', textAlign: 'center' }}>
             <div style={{ fontSize: 9, color: 'var(--ink-faint)', marginBottom: 3 }}>{p.label}</div>
@@ -228,7 +228,7 @@ export default function SignalsPage() {
         const rr = (entry > 0 && entry > stop && stop > 0)
           ? (target - entry) / (entry - stop)
           : null
-        const mlPct = Number(r.ml_probability) * 100
+        const mlPct = r.ml_probability != null ? Number(r.ml_probability) * 100 : 0
         return {
           ...r,
           _strategy: a.strategy,

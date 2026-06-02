@@ -80,7 +80,16 @@ def _save_portfolio(email: str, data: dict):
             pass
     path = _user_file(email)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    import tempfile as _tf, os as _os
+    content = json.dumps(data, indent=2, default=str)
+    fd, tmp = _tf.mkstemp(dir=path.parent, prefix=".tmp_")
+    try:
+        with _os.fdopen(fd, "w", encoding="utf-8") as f: f.write(content)
+        _os.replace(tmp, path)
+    except Exception:
+        try: _os.unlink(tmp)
+        except Exception: pass
+        raise
 
 
 def _get_price(ticker: str) -> float:

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/api/client'
 import { getPaperStatus, getPaperEquity, getPaperAnalytics, startPaperRunner, stopPaperRunner, getPaperAutostart, setPaperAutostart } from '@/api/paper'
@@ -257,22 +257,19 @@ function RunnerControls({ running }: { running: boolean }) {
   const [modelBundle, setModelBundle]         = useState('ml_models/stock_universe_candidate_20260512/model_bundle.joblib')
   const [smsNumber, setSmsNumber]             = useState('')
   const [expanded, setExpanded]               = useState(false)
-  const [autostartEnabled, setAutostartEnabled] = useState(false)
-  const [warmupMins, setWarmupMins]           = useState('30')
+  const [autostartEnabledOverride, setAutostartEnabledOverride] = useState<boolean | null>(null)
+  const [warmupMinsOverride, setWarmupMinsOverride] = useState<string | null>(null)
 
-  // Load autostart config
   const autostartQ = useQuery({
     queryKey: ['paper', 'autostart'],
     queryFn: getPaperAutostart,
     staleTime: 60_000,
   })
-  useEffect(() => {
-    const cfg = autostartQ.data as { enabled?: boolean; premarket_warmup_minutes?: number } | undefined
-    if (cfg) {
-      setAutostartEnabled(cfg.enabled ?? false)
-      setWarmupMins(String(cfg.premarket_warmup_minutes ?? 30))
-    }
-  }, [autostartQ.data])
+  const autostartCfg = autostartQ.data as { enabled?: boolean; premarket_warmup_minutes?: number } | undefined
+  const autostartEnabled = autostartEnabledOverride ?? autostartCfg?.enabled ?? false
+  const warmupMins = warmupMinsOverride ?? String(autostartCfg?.premarket_warmup_minutes ?? 30)
+  const setAutostartEnabled = setAutostartEnabledOverride
+  const setWarmupMins = setWarmupMinsOverride
 
   const autostartMut = useMutation({
     mutationFn: (enabled: boolean) => setPaperAutostart(enabled),

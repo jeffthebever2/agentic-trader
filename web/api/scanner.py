@@ -311,6 +311,118 @@ async def ws_scanner(websocket: WebSocket):
             pass
 
 
+class ScreenRequest(BaseModel):
+    tickers: List[str]
+    date: Optional[str] = None  # YYYY-MM-DD; defaults to last trading day
+    mode: str = "confirmed_pullback"
+    threshold: float = 50.0
+
+
+@router.post("/scanner/screen")
+async def scanner_screen(req: ScreenRequest):
+    """Synchronous score for a small set of tickers on a specific date.
+    Uses the same algorithm as the backtest scanner.
+    """
+    def _run_sync():
+        import datetime as dt
+        import pandas as pd
+        try:
+            import yfinance as yf
+            from backtest import precompute, score_at, build_spy_regime, build_vix_regime
+        except ImportError as e:
+            return {"error": str(e), "results": []}
+
+        if req.date:
+            try:
+                trade_date = dt.date.fromisoformat(req.date)
+            except ValueError:
+                trade_date = _last_trading_day()
+        else:
+            trade_date = _last_trading_day()
+
+        tickers = [t.strip().upper() for t in req.tickers if t.strip()][:50]
+        if not tickers:
+            return {"results": []}
+
+        lookback_start = trade_date - dt.timedelta(days=600)
+        all_tickers = list(set(tickers + ["SPY", "^VIX"]))
+        try:
+            raw = yf.download(
+                all_tickers,
+                start=lookback_start.isoformat(),
+                end=(trade_date + dt.timedelta(days=2)).isoformat(),
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+        except Exception as e:
+            return {"error": f"Download failed: {e}", "results": []}
+
+        if isinstance(raw.columns, pd.MultiIndex):
+            prices = {col: raw[col] for col in raw.columns.get_level_values(0).unique()}
+        else:
+            prices = {c: raw[[c]].rename(columns={c: tickers[0]}) for c in raw.columns}
+
+        close_all = prices.get("Close", pd.DataFrame())
+        spy_s = close_all.get("SPY", pd.Series(dtype=float))
+        vix_s = close_all.get("^VIX", pd.Series(dtype=float))
+        spy_regime = build_spy_regime(spy_s) if not spy_s.empty else {}
+        vix_regime = build_vix_regime(vix_s) if not vix_s.empty else {}
+
+        results = []
+        for ticker in tickers:
+            try:
+                df = pd.DataFrame({
+                    "Open": prices.get("Open", pd.DataFrame()).get(ticker, pd.Series()),
+                    "High": prices.get("High", pd.DataFrame()).get(ticker, pd.Series()),
+                    "Low": prices.get("Low", pd.DataFrame()).get(ticker, pd.Series()),
+                    "Close": prices.get("Close", pd.DataFrame()).get(ticker, pd.Series()),
+                    "Volume": prices.get("Volume", pd.DataFrame()).get(ticker, pd.Series()),
+                }).dropna()
+                if df.empty:
+                    results.append({"ticker": ticker, "error": "No data"})
+                    continue
+                computed = precompute(df)
+                sc = score_at(computed, trade_date, spy_regime=spy_regime, vix_regime=vix_regime, mode=req.mode)
+                if sc is not None:
+                    results.append({
+                        "ticker": ticker,
+                        "score": round(sc.score, 1),
+                        "entry": round(sc.entry, 2) if sc.entry else None,
+                        "target": round(sc.target, 2) if sc.target else None,
+                        "stop": round(sc.stop, 2) if sc.stop else None,
+                        "rr": round(sc.rr, 2) if sc.rr else None,
+                        "atr_pct": round(sc.atr_pct * 100, 2) if sc.atr_pct else None,
+                        "gate": getattr(sc, "gate_status", None),
+                        "passes": sc.score >= req.threshold,
+                    })
+                else:
+                    results.append({"ticker": ticker, "score": None, "passes": False, "note": "No signal"})
+            except Exception as e:
+                results.append({"ticker": ticker, "error": str(e)})
+        return {"date": trade_date.isoformat(), "results": results}
+
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(_executor, _run_sync)
+    except Exception as e:
+        result = {"error": str(e), "results": []}
+    return result
+
+
+@router.get("/scanner/ticker-files")
+async def list_ticker_files_compat():
+    """Compatibility alias for /scanner/tickers — returns files list."""
+    files = []
+    for p in ROOT.glob("*.txt"):
+        try:
+            lines = [l.strip() for l in p.read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")]
+            if lines and all(1 <= len(l) <= 12 and l.replace(".", "").replace("-", "").isalnum() for l in lines[:5]):
+                files.append(p.name)
+        except Exception:
+            pass
+    return {"files": sorted(files)}
+
+
 @router.get("/scanner/tickers")
 async def list_ticker_files():
     """Return available ticker list files in project root."""

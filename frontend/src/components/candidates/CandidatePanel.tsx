@@ -291,10 +291,9 @@ export function CandidatePanel({ candidate, open, onClose, strategyColor = '#94a
   const entry   = Number(candidate?.entry  ?? 0)
   const target  = Number(candidate?.target ?? 0)
   const stop    = Number(candidate?.stop   ?? 0)
-  const [live, setLive] = useState(entry)
-
-  // Reset live price when candidate changes
-  useEffect(() => { setLive(entry) }, [ticker, entry])
+  const [livePerTicker, setLivePerTicker] = useState<Record<string, number>>({})
+  const live = livePerTicker[ticker] ?? entry
+  const setLive = (v: number) => setLivePerTicker(prev => ({ ...prev, [ticker]: v }))
 
   // Escape key
   useEffect(() => {
@@ -379,7 +378,7 @@ export function CandidatePanel({ candidate, open, onClose, strategyColor = '#94a
   if (!open) return null
 
   // ── Chart SVG ──────────────────────────────────────────────────────────────
-  function ChartSVG() {
+  function renderChart() {
     const closes = chartQ.data?.close ?? []
     if (!closes.length) return <div style={{ textAlign: 'center', color: C.dim, padding: 40, fontSize: 13 }}>No chart data</div>
     const w = containerW - 40 // account for padding
@@ -677,7 +676,7 @@ export function CandidatePanel({ candidate, open, onClose, strategyColor = '#94a
                   <Stat label="Large Loss%" value={llp != null ? llp.toFixed(1) + '%' : '—'} color={llp == null ? C.dim : llp < 30 ? C.up : llp < 40 ? C.warn : C.down} />
                   <Stat label="ATR" value={atr != null ? atr.toFixed(2) : '—'} />
                   <Stat label="Tgt→Stp Prob" value={tbsp != null ? tbsp.toFixed(1) + '%' : '—'} color={tbsp == null ? C.dim : tbsp > 60 ? C.up : tbsp > 45 ? C.warn : C.down} />
-                  <Stat label="RSI" value={quoteQ.isLoading ? '…' : (q as any)?.rsi != null ? String(Math.round((q as any).rsi)) : '—'} />
+                  <Stat label="RSI" value={quoteQ.isLoading ? '…' : q?.rsi != null ? String(Math.round(q.rsi)) : '—'} />
                 </div>
 
                 {/* Edge distribution bar */}
@@ -828,7 +827,7 @@ export function CandidatePanel({ candidate, open, onClose, strategyColor = '#94a
                 {chartQ.isLoading
                   ? skeleton('100%', 280)
                   : chartQ.data
-                    ? <ChartSVG />
+                    ? renderChart()
                     : <div style={{ textAlign: 'center', color: C.dim, padding: 40 }}>Chart unavailable</div>
                 }
               </div>
@@ -856,7 +855,7 @@ export function CandidatePanel({ candidate, open, onClose, strategyColor = '#94a
                 <div style={{ fontSize: 11, fontWeight: 700, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 14 }}>Key Metrics</div>
                 {quoteQ.isLoading ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    {Array.from({ length: 8 }).map((_, _i) => skeleton('100%', 20))}
+                    {Array.from({ length: 8 }, (_, i) => <div key={i}>{skeleton('100%', 20)}</div>)}
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>

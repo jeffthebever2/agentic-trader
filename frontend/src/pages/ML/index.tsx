@@ -527,54 +527,53 @@ export default function MLPage() {
                 </div>
               )}
 
-              {/* Model History sub-section */}
-              <details style={{ marginTop: 20 }}>
-                <summary style={{
-                  cursor: 'pointer', userSelect: 'none',
-                  fontSize: 13, fontWeight: 600, color: 'var(--ink)',
-                  background: 'var(--surface-soft)', border: '1px solid var(--surface-rule)',
-                  borderRadius: 6, padding: '10px 14px', listStyle: 'none',
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                }}>
-                  <span>Model History</span>
-                  <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>▼</span>
-                </summary>
-                <div style={{ marginTop: 8 }}>
-                  {(mlHistory as unknown[] | undefined)?.length ? (
+              {/* Retrain History */}
+              {(() => {
+                const hist = (mlHistory as Array<Record<string, unknown>> | undefined) ?? []
+                if (!hist.length) return null
+                const sorted = [...hist].reverse() // newest first
+                return (
+                  <div style={{ marginTop: 20 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink)', marginBottom: 10 }}>
+                      Retrain History ({sorted.length} cycle{sorted.length !== 1 ? 's' : ''})
+                    </div>
                     <div style={{ overflowX: 'auto' }}>
                       <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
                         <thead>
                           <tr style={{ borderBottom: '1px solid var(--surface-rule)' }}>
-                            {['Version / Date', 'ROC AUC', 'Features', 'Train Rows', 'Hold Days', 'Status'].map(h => (
-                              <th key={h} style={{ padding: '8px 12px', fontWeight: 500, color: 'var(--ink-faint)', textAlign: 'left', whiteSpace: 'nowrap' }}>{h}</th>
+                            {['Date', 'WF ROC', 'Rows', 'Outcome'].map(h => (
+                              <th key={h} style={{ padding: '6px 10px', fontWeight: 500, color: 'var(--ink-faint)', textAlign: 'left', whiteSpace: 'nowrap' }}>{h}</th>
                             ))}
                           </tr>
                         </thead>
                         <tbody>
-                          {(mlHistory as Array<Record<string, unknown>>).map((m, i) => {
-                            const isCurrent = !!(m.is_current ?? i === 0)
+                          {sorted.map((m, i) => {
+                            const outcome = String(m.outcome ?? '')
+                            const deployed = outcome.startsWith('deployed') || outcome.includes('deploy')
+                            const failed = outcome.includes('failed') || outcome.includes('error') || outcome.includes('leakage')
+                            const wfRoc = m.win_roc_wf ?? m.win_roc ?? null
+                            const rocColor = wfRoc == null ? 'var(--ink-muted)' : Number(wfRoc) >= 0.51 ? '#4ade80' : Number(wfRoc) >= 0.49 ? '#facc15' : '#f87171'
+                            const outcomeColor = deployed ? '#4ade80' : failed ? '#f87171' : 'var(--ink-faint)'
+                            const outcomeLabel = deployed ? '✓ deployed' : failed ? '✗ failed' : outcome.slice(0, 24)
                             return (
-                              <tr key={i} style={{ borderBottom: '1px solid var(--surface-rule)', background: isCurrent ? 'rgba(214,58,0,0.06)' : 'transparent' }}>
-                                <td style={{ padding: '7px 12px', color: 'var(--ink)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
-                                  {m.created_at ? new Date(m.created_at as string).toLocaleString() : (m.version as string) ?? `v${i + 1}`}
-                                  {isCurrent && (
-                                    <span style={{ marginLeft: 8, fontSize: 10, fontWeight: 700, color: 'var(--accent)', background: 'rgba(214,58,0,0.12)', padding: '1px 5px', borderRadius: 3 }}>
-                                      CURRENT
-                                    </span>
+                              <tr key={i} style={{ borderBottom: '1px solid var(--surface-rule)', background: i === 0 ? 'rgba(74,222,128,0.04)' : 'transparent' }}>
+                                <td style={{ padding: '6px 10px', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap', fontSize: 11 }}>
+                                  {m.retrain_date as string ?? (m.timestamp ? new Date(m.timestamp as string).toLocaleDateString() : '—')}
+                                  {i === 0 && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: 'var(--accent)', background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: 3 }}>LATEST</span>}
+                                </td>
+                                <td style={{ padding: '6px 10px', fontFamily: 'var(--font-mono)', color: rocColor, fontWeight: 700 }}>
+                                  {wfRoc != null ? Number(wfRoc).toFixed(4) : '—'}
+                                </td>
+                                <td style={{ padding: '6px 10px', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>
+                                  {m.csv_rows != null ? Number(m.csv_rows).toLocaleString() : '—'}
+                                </td>
+                                <td style={{ padding: '6px 10px' }}>
+                                  <span style={{ color: outcomeColor, fontSize: 11 }}>{outcomeLabel}</span>
+                                  {m.notes != null && (
+                                    <div style={{ fontSize: 10, color: 'var(--ink-faint)', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>
+                                      {String(m.notes).slice(0, 80)}
+                                    </div>
                                   )}
-                                </td>
-                                <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>
-                                  {m.roc_auc != null ? Number(m.roc_auc).toFixed(4) : (m.metrics as Record<string, unknown> | undefined)?.win_probability != null ? Number(((m.metrics as Record<string, unknown>).win_probability as Record<string, unknown>)?.roc_auc).toFixed(4) : '—'}
-                                </td>
-                                <td style={{ padding: '7px 12px', color: 'var(--ink-muted)' }}>{(m.feature_count ?? (m.settings as Record<string, unknown> | undefined)?.feature_count ?? '—') as string}</td>
-                                <td style={{ padding: '7px 12px', color: 'var(--ink-muted)', fontFamily: 'var(--font-mono)' }}>
-                                  {m.train_rows != null ? Number(m.train_rows).toLocaleString() : ((m.settings as Record<string, unknown> | undefined)?.train_rows != null ? Number((m.settings as Record<string, unknown>).train_rows).toLocaleString() : '—')}
-                                </td>
-                                <td style={{ padding: '7px 12px', color: 'var(--ink-muted)' }}>{(m.hold ?? (m.settings as Record<string, unknown> | undefined)?.hold ?? '—') as string}</td>
-                                <td style={{ padding: '7px 12px' }}>
-                                  <span style={{ fontSize: 10, fontWeight: 700, color: isCurrent ? 'var(--accent)' : 'var(--ink-faint)' }}>
-                                    {isCurrent ? 'Active' : (m.status as string) ?? 'Archived'}
-                                  </span>
                                 </td>
                               </tr>
                             )
@@ -582,29 +581,9 @@ export default function MLPage() {
                         </tbody>
                       </table>
                     </div>
-                  ) : (
-                    <div style={{ padding: '16px 12px', background: 'var(--surface-soft)', borderRadius: 6 }}>
-                      {/* Single-model fallback: show current model in mini-table */}
-                      <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 12 }}>No version history available. Current model:</div>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '6px 16px', fontSize: 12 }}>
-                        {[
-                          ['Version / Date', mlData.created_at ? new Date(mlData.created_at).toLocaleString() : '—'],
-                          ['ROC AUC', mlData.metrics?.win_probability?.roc_auc?.toFixed(4) ?? '—'],
-                          ['Features', mlData.settings?.feature_count ?? '—'],
-                          ['Train Rows', mlData.settings?.train_rows?.toLocaleString() ?? '—'],
-                          ['Hold Days', mlData.settings?.hold ?? '—'],
-                          ['Status', 'Active'],
-                        ].map(([label, value]) => (
-                          <>
-                            <span key={`l-${label}`} style={{ color: 'var(--ink-faint)', fontWeight: 500 }}>{label}</span>
-                            <span key={`v-${label}`} style={{ color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{String(value)}</span>
-                          </>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </details>
+                  </div>
+                )
+              })()}
             </>
           ) : (
             <div style={{ color: 'var(--ink-faint)', fontSize: 13 }}>No ML model data available.</div>
@@ -669,12 +648,14 @@ export default function MLPage() {
               id="ml-retrain-all-btn"
               className="btn-secondary"
               disabled={training}
-              onClick={() => {
-                api.post('/ml/train/all', {}).catch(() =>
-                  api.post('/ml/retrain-all', {}).catch(() =>
-                    window.alert('Not supported by current backend')
-                  )
-                )
+              onClick={async () => {
+                if (!window.confirm('Start full retrain with all_tickers.txt? This takes 3-5 hours.')) return
+                try {
+                  const r = await api.post('/ml/retrain', { tickers: 'all_tickers.txt' })
+                  window.alert(`Retrain started (PID ${r.data?.pid}). Monitor at Logs → Server Logs → Retrain.`)
+                } catch (e: unknown) {
+                  window.alert(`Failed: ${(e as Error).message}`)
+                }
               }}
             >
               Retrain All (Auto)

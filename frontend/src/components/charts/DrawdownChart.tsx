@@ -16,12 +16,11 @@ interface DrawdownChartProps {
 }
 
 export function DrawdownChart({ equityData, startingCash, height = 120 }: DrawdownChartProps) {
-  let peak = startingCash
-  const drawdownData = equityData.map(pt => {
-    peak = Math.max(peak, pt.y)
+  const drawdownData = equityData.reduce<{ x: string | number; dd: number; peak: number }[]>((acc, pt) => {
+    const peak = Math.max(acc.length ? acc[acc.length - 1].peak : startingCash, pt.y)
     const dd = -((peak - pt.y) / startingCash * 100)
-    return { x: pt.x, dd }
-  })
+    return [...acc, { x: pt.x, dd, peak }]
+  }, [])
 
   return (
     <div style={{ width: '100%' }}>

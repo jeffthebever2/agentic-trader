@@ -3,7 +3,6 @@ import { useQuery, useQueries } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { getPaperStatus } from '@/api/paper'
 import { getMarketChart, getQuotes, getNewsSummary } from '@/api/market'
-import { getDiagnostics } from '@/api/admin'
 import { getMlStatus } from '@/api/ml'
 import { CandlestickChart } from '@/components/charts/CandlestickChart'
 import api from '@/api/client'
@@ -36,7 +35,7 @@ function loadChartSymbols(): string[] {
       const parsed = JSON.parse(raw)
       if (Array.isArray(parsed) && parsed.length > 0) return parsed.slice(0, 8)
     }
-  } catch {}
+  } catch { /* ignore */ }
   return DEFAULT_CHART_SYMBOLS
 }
 
@@ -80,6 +79,7 @@ interface TradeRow {
   ticker?: string
   strategy?: string
   date?: string
+  timestamp?: string
   exit_date?: string
   pnl?: number
   entry?: number
@@ -88,10 +88,11 @@ interface TradeRow {
   action?: string
 }
 
-interface HistoryResponse {
-  trades?: TradeRow[]
-  items?: TradeRow[]
-  rows?: TradeRow[]
+interface TradeLogPage {
+  entries?: TradeRow[]
+  total?: number
+  page?: number
+  pages?: number
 }
 
 interface WatchlistResponse {
@@ -247,7 +248,7 @@ function MarketChartPanel() {
     const capped = list.slice(0, 8)
     setSymbols(capped)
     setSymbol(capped[0] ?? 'SPY')
-    try { localStorage.setItem('dash_chart_symbols', JSON.stringify(capped)) } catch {}
+    try { localStorage.setItem('dash_chart_symbols', JSON.stringify(capped)) } catch { /* ignore */ }
   }
 
   function addSymbol() {
@@ -573,8 +574,8 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
   const [tab, setTab] = useState<FeedTab>('candidates')
 
   const historyQ = useQuery({
-    queryKey: ['history', 1],
-    queryFn: () => api.get<HistoryResponse>('/history', { params: { page: 1, page_size: 20 } }).then(r => r.data),
+    queryKey: ['logs', 'trades', 'dashboard'],
+    queryFn: () => api.get<TradeLogPage>('/logs/trades', { params: { page: 1, page_size: 20 } }).then(r => r.data),
     staleTime: 60_000,
   })
 
@@ -582,9 +583,7 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
     (a.candidates?.rows ?? []).map(r => ({ ...r, _stratLabel: a.label }))
   )
 
-  const trades: TradeRow[] = (
-    historyQ.data?.trades ?? historyQ.data?.items ?? historyQ.data?.rows ?? []
-  )
+  const trades: TradeRow[] = (historyQ.data?.entries ?? []) as TradeRow[]
 
   return (
     <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', background: 'var(--surface-soft)' }}>
@@ -643,7 +642,7 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
                     <tr key={i} style={{ borderBottom: '1px solid var(--surface-rule)' }}>
                       <td style={{ padding: '8px 12px', fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{t.ticker ?? '—'}</td>
                       <td style={{ padding: '8px 12px', color: 'var(--ink-muted)' }}>{t.strategy ?? '—'}</td>
-                      <td style={{ padding: '8px 12px', color: 'var(--ink-muted)' }}>{(t.exit_date ?? t.date ?? '').slice(0, 10) || '—'}</td>
+                      <td style={{ padding: '8px 12px', color: 'var(--ink-muted)' }}>{(t.timestamp ?? t.exit_date ?? t.date ?? '').slice(0, 10) || '—'}</td>
                       <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: pnlColor(pnl) }}>
                         {pnl >= 0 ? '+' : ''}{fmt$(pnl, 2)}
                       </td>
@@ -720,54 +719,118 @@ function QuickAnalyze() {
   )
 }
 
-interface DiagData {
-  fidelity?: { status?: string; connected?: boolean }
-  market_data?: { status?: string }
-  ml?: { status?: string; available?: boolean }
-  market_status?: { status?: string; is_open?: boolean; [key: string]: unknown }
-  [key: string]: unknown
+interface DeepHealth {
+  status?: 'healthy' | 'degraded'
+  checks?: {
+    ml_model?: { ok: boolean; detail?: string }
+    paper_trader?: { ok: boolean; detail?: string }
+    cloudflare_tunnel?: { ok: boolean; detail?: string }
+    disk?: { ok: boolean; free_gb?: number; detail?: string }
+    autofix_monitor?: { ok: boolean; detail?: string }
+    webserver?: { ok: boolean; note?: string }
+  }
+}
+
+function isMarketOpen(): boolean {
+  const now = new Date()
+  // Convert to US/Eastern
+  const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+  const day = et.getDay() // 0=Sun, 6=Sat
+  if (day === 0 || day === 6) return false
+  const h = et.getHours()
+  const m = et.getMinutes()
+  const mins = h * 60 + m
+  return mins >= 9 * 60 + 30 && mins < 16 * 60
+}
+
+interface SystemServices {
+  data?: {
+    paper_runner?: { running: boolean; pid?: number }
+    cloudflare_tunnel?: { running: boolean }
+    autofix_monitor?: { running: boolean }
+    retrain?: { running: boolean; pids?: number[] }
+    ml_model?: { ok: boolean; age_hours?: number; wf_roc?: number | null }
+    disk?: { ok: boolean; free_gb?: number }
+  }
 }
 
 function SystemStatus() {
-  const diagQ = useQuery({
-    queryKey: ['admin', 'diagnostics'],
-    queryFn: getDiagnostics,
-    staleTime: 60_000,
-    refetchInterval: 120_000,
-  })
   const mlQ = useQuery({
     queryKey: ['ml', 'status'],
     queryFn: getMlStatus,
     staleTime: 120_000,
   })
+  const deepQ = useQuery({
+    queryKey: ['health', 'deep'],
+    queryFn: () => api.get<DeepHealth>('/health/deep').then(r => r.data),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    retry: false,
+  })
+  const fidelityQ = useQuery({
+    queryKey: ['fidelity', 'status', 'chip'],
+    queryFn: () => api.get<{ connected?: boolean; status?: string }>('/fidelity/status').then(r => r.data),
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+    retry: false,
+  })
+  const servicesQ = useQuery({
+    queryKey: ['system', 'services'],
+    queryFn: () => api.get<SystemServices>('/system/services').then(r => r.data),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    retry: false,
+  })
 
-  const diag = diagQ.data as DiagData | undefined
+  const deep = deepQ.data
+  const svc = servicesQ.data?.data
 
-  function chip(label: string, ok: boolean | null) {
-    const cls = ok == null ? 'dash-chip' : ok ? 'dash-chip ok' : 'dash-chip err'
+  // null = unknown/loading (grey), true = ok (green), false = error (red)
+  // 'info' = informational state (grey) — e.g. market closed is not an error
+  function chip(label: string, ok: boolean | null | 'info', detail?: string) {
+    const cls = ok === 'info' ? 'dash-chip' : ok == null ? 'dash-chip' : ok ? 'dash-chip ok' : 'dash-chip err'
     return (
-      <div key={label} className={cls}>
+      <div key={label} className={cls} title={detail ?? label}>
         <span className="dash-chip-dot" />
         <span>{label}</span>
       </div>
     )
   }
 
-  const fidelityOk = diag?.fidelity ? (diag.fidelity.status === 'connected' || diag.fidelity.connected === true) : null
-  const marketDataOk = diag?.market_data ? diag.market_data.status !== 'error' : null
-  const mlOk = mlQ.data ? mlQ.data.bundle_exists : null
-  const marketOpen = diag?.market_status
-    ? ((diag.market_status as { is_open?: boolean }).is_open ?? diag.market_status.status === 'open')
+  const marketOpen = isMarketOpen()
+  const mlOk = deep?.checks?.ml_model?.ok ?? (mlQ.data ? mlQ.data.bundle_exists : null)
+  const fidelityOk = fidelityQ.data
+    ? (fidelityQ.data.connected === true || fidelityQ.data.status === 'connected')
     : null
+  const tunnelOk = deep?.checks?.cloudflare_tunnel?.ok ?? svc?.cloudflare_tunnel?.running ?? null
+  const diskOk = deep?.checks?.disk?.ok ?? svc?.disk?.ok ?? null
+  const diskFreeGb = deep?.checks?.disk?.free_gb ?? svc?.disk?.free_gb
+  const autofixOk = deep?.checks?.autofix_monitor?.ok ?? svc?.autofix_monitor?.running ?? null
+  const retrainRunning = svc?.retrain?.running ?? null
+  const mlRoc = svc?.ml_model?.wf_roc
+
+  const overallOk = deep?.status === 'healthy'
+  const overallColor = deep == null ? 'var(--ink-faint)' : overallOk ? '#4ade80' : '#facc15'
 
   return (
     <div style={{ padding: 16, borderBottom: '1px solid var(--surface-rule)', flexShrink: 0 }}>
-      <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)', marginBottom: 10 }}>System Status</div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div className="dash-section-label" style={{ fontSize: 10.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-faint)' }}>System Status</div>
+        {deep && (
+          <span style={{ fontSize: 10, fontWeight: 700, color: overallColor }}>
+            {overallOk ? '● HEALTHY' : '● DEGRADED'}
+          </span>
+        )}
+      </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-        {chip('Fidelity', fidelityOk)}
-        {chip('Market Data', marketDataOk)}
-        {chip('ML Model', mlOk)}
-        {chip('Market', marketOpen)}
+        {/* Market: grey when closed (not an error), green when open */}
+        {chip('Market', marketOpen ? true : 'info', marketOpen ? 'NYSE open (ET)' : 'NYSE closed (ET)')}
+        {chip('ML Model', mlOk, mlRoc != null ? `WF ROC ${mlRoc.toFixed(4)}` : deep?.checks?.ml_model?.detail)}
+        {fidelityOk !== null && chip('Fidelity', fidelityOk)}
+        {tunnelOk !== null && chip('Tunnel', tunnelOk, deep?.checks?.cloudflare_tunnel?.detail)}
+        {diskOk !== null && chip('Disk', diskOk, diskFreeGb != null ? `${diskFreeGb} GB free` : undefined)}
+        {autofixOk !== null && chip('AutoFix', autofixOk)}
+        {retrainRunning && chip('Retrain', 'info', 'Retrain running...')}
       </div>
     </div>
   )

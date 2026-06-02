@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff, Check } from 'lucide-react'
 import api from '@/api/client'
@@ -182,32 +182,29 @@ export default function SettingsPage() {
     staleTime: 30_000,
   })
 
-  // ── /api/live-verification ──
+  // ── /api/live/verification ──
   const {
     data: liveVerif,
     refetch: refetchLive,
     isFetching: liveFetching,
   } = useQuery<{ checks: VerificationCheck[] }>({
     queryKey: ['live-verification'],
-    queryFn: () => api.get('/live-verification').then(r => r.data),
+    queryFn: () => api.get('/live/verification').then(r => r.data),
     staleTime: 30_000,
   })
 
   // ════════════════════════════════════════════════════════════════
   // Section 1: Account
   // ════════════════════════════════════════════════════════════════
-  const [displayName, setDisplayName] = useState('')
+  const [displayNameOverride, setDisplayNameOverride] = useState<string | null>(null)
+  const displayName = displayNameOverride ?? me?.name ?? ''
   const [nameMsg, setNameMsg] = useState<{ text: string; ok: boolean } | null>(null)
-
-  useEffect(() => {
-    if (me?.name) setDisplayName(me.name)
-  }, [me?.name])
 
   const saveName = useMutation({
     mutationFn: (name: string) => api.post('/auth/me/name', { name }).then(r => r.data),
-    onSuccess: (data) => {
+    onSuccess: () => {
       setNameMsg({ text: '✓ Saved.', ok: true })
-      if (data?.name) setDisplayName(data.name)
+      setDisplayNameOverride(null)
       qc.invalidateQueries({ queryKey: ['auth-me'] })
     },
     onError: (e: Error) => setNameMsg({ text: e.message, ok: false }),
@@ -216,18 +213,15 @@ export default function SettingsPage() {
   // ════════════════════════════════════════════════════════════════
   // Section 2: SMS alerts
   // ════════════════════════════════════════════════════════════════
-  const [phone, setPhone] = useState('')
+  const [phoneOverride, setPhoneOverride] = useState<string | null>(null)
+  const phone = phoneOverride ?? me?.phone_number ?? me?.phone ?? ''
+  const setPhone = setPhoneOverride
   const [phoneMsg, setPhoneMsg] = useState<{ text: string; ok: boolean | null } | null>(null)
   const [verifyingPhone, setVerifyingPhone] = useState(false)
   const [savingPhone, setSavingPhone] = useState(false)
-  const [smsOptOut, setSmsOptOut] = useState(false)
-
-  useEffect(() => {
-    if (me) {
-      setPhone(me.phone_number || me.phone || '')
-      setSmsOptOut(!!me.sms_opted_out)
-    }
-  }, [me])
+  const [smsOptOutOverride, setSmsOptOutOverride] = useState<boolean | null>(null)
+  const smsOptOut = smsOptOutOverride ?? !!me?.sms_opted_out
+  const setSmsOptOut = setSmsOptOutOverride
 
   const handleVerifyPhone = async () => {
     if (!phone.trim()) { setPhoneMsg({ text: 'Enter a phone number first.', ok: false }); return }
@@ -498,20 +492,19 @@ export default function SettingsPage() {
     ['CLOUDFLARE_D1_DATABASE_ID',          'CF D1 Database ID',        'Optional D1 storage backend',               'text'],
   ]
 
-  const [tradingVals, setTradingVals] = useState<Record<string, string>>({})
+  const settingsDefaults = useMemo(() => {
+    if (!settings) return {} as Record<string, string>
+    const init: Record<string, string> = {}
+    RISK_KEYS.forEach(([k]) => { if ((settings as Record<string, unknown>)[k] != null) init[k] = String((settings as Record<string, unknown>)[k]) })
+    return init
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings]) // RISK_KEYS is a module-level constant — safe to omit
+  const [tradingOverrides, setTradingOverrides] = useState<Record<string, string>>({})
+  const tradingVals = { ...settingsDefaults, ...tradingOverrides }
   const [tradingSaving, setTradingSaving] = useState(false)
   const [tradingMsg, setTradingMsg] = useState<{ text: string; ok: boolean } | null>(null)
 
-  useEffect(() => {
-    if (settings) {
-      const init: Record<string, string> = {}
-      RISK_KEYS.forEach(([k]) => { if (settings[k] != null) init[k] = String(settings[k]) })
-      setTradingVals(init)
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings])
-
-  const setTradingVal = (k: string) => (v: string) => setTradingVals(prev => ({ ...prev, [k]: v }))
+  const setTradingVal = (k: string) => (v: string) => setTradingOverrides(prev => ({ ...prev, [k]: v }))
 
   const handleSaveTradingControls = async () => {
     const updates: Record<string, string> = {}
@@ -520,6 +513,7 @@ export default function SettingsPage() {
     try {
       await api.post('/settings', { updates })
       setTradingMsg({ text: '✓ Saved.', ok: true })
+      setTradingOverrides({})
       qc.invalidateQueries({ queryKey: ['settings'] })
     } catch (e: unknown) {
       setTradingMsg({ text: (e as Error).message, ok: false })
@@ -752,7 +746,7 @@ export default function SettingsPage() {
               placeholder="Your name"
               className="input"
               value={displayName}
-              onChange={e => setDisplayName(e.target.value)}
+              onChange={e => setDisplayNameOverride(e.target.value)}
               autoComplete="name"
               style={{ flex: 1 }}
             />

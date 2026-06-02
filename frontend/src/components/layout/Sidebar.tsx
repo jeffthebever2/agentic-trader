@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutGrid, Search, BarChart3, TrendingUp, Clock,
   Landmark, BarChart2, Lightbulb, ClipboardCheck, ShieldCheck, Settings,
-  Zap, ScrollText,
+  Zap, ScrollText, Layers,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@/hooks/useAuth'
@@ -22,8 +22,9 @@ interface NavItem {
 const IC = { size: 17, strokeWidth: 1.75 }
 
 const NAV: NavItem[] = [
-  { to: '/',         id: 'nav-dashboard', label: 'Dashboard',           icon: <LayoutGrid    {...IC} /> },
-  { to: '/signals',  id: 'nav-signals',   label: 'Signals',             icon: <Zap           {...IC} /> },
+  { to: '/',          id: 'nav-dashboard', label: 'Dashboard',           icon: <LayoutGrid    {...IC} /> },
+  { to: '/thematic',  id: 'nav-thematic', label: 'Thematic Portfolio',  icon: <Layers        {...IC} /> },
+  { to: '/signals',   id: 'nav-signals',  label: 'Signals',             icon: <Zap           {...IC} /> },
   { to: '/paper',    id: 'nav-paper',     label: 'Paper Trading',       icon: <BarChart3     {...IC} /> },
   { to: '/analyze',  id: 'nav-analyze',   label: 'Analyze',             icon: <Search        {...IC} />, adminOnly: true },
   { to: '/backtest', id: 'nav-backtest',  label: 'Research & Backtest', icon: <TrendingUp    {...IC} />, adminOnly: true },
@@ -119,7 +120,7 @@ export function Sidebar({ onOpenOnboarding, mobileOpen, onMobileClose }: Sidebar
       <div style={{ padding: '16px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', gap: 10 }}>
         <img
           className="ta-brand-mark"
-          src="/static/agentic-trader-icon.png"
+          src="/app/agentic-trader-icon.png"
           alt="Agentic Trader"
           style={{ width: 28, height: 28, flexShrink: 0 }}
           onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}

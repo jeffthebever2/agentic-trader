@@ -108,6 +108,28 @@ async def get_ml_status():
     return result
 
 
+RETRAIN_HISTORY_PATH = ROOT / "ml_models" / "retrain_history.jsonl"
+
+
+@router.get("/ml/history")
+async def get_ml_history():
+    """Return retrain history log as a list of records."""
+    if not RETRAIN_HISTORY_PATH.exists():
+        return []
+    records = []
+    try:
+        for line in RETRAIN_HISTORY_PATH.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    except Exception:
+        pass
+    return records
+
+
 @router.websocket("/ws/ml-train")
 async def ws_ml_train(websocket: WebSocket):
     """Run train_ml_models.py and stream stdout. Expects JSON: {input_file, output_dir?, hold?}"""

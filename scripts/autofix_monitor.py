@@ -214,19 +214,37 @@ class ServiceMonitor:
         if not self.can_audit():
             return
 
+        health_url: str | None = self.cfg.get("health_url")
+
         # For SIGTERM exits (exit=-15), wait briefly and check HTTP health.
         # A clean launchctl restart generates SIGTERM but the service comes
         # back healthy within seconds — no alert needed for that case.
-        health_url: str | None = self.cfg.get("health_url")
         if exit_code == "-15" and health_url:
             time.sleep(8)
             if http_ok(health_url):
                 log(f"{self.name}: PID changed via SIGTERM but HTTP health OK — clean restart, no alert")
                 return
 
+        error_text = tail_log(self.cfg["err_log"])
+
+        # Port-binding conflict: service is already restarting, nothing to fix.
+        # Wait briefly — if it comes back healthy, skip audit and alert entirely.
+        _port_conflict_markers = (
+            "address already in use", "errno 48", "errno 98",
+            "error while attempting to bind",
+        )
+        error_lower = error_text.lower()
+        if any(m in error_lower for m in _port_conflict_markers):
+            log(f"{self.name}: port-binding conflict detected — waiting 10s for recovery")
+            time.sleep(10)
+            if health_url and http_ok(health_url):
+                log(f"{self.name}: recovered after port conflict — no alert")
+                return
+            log(f"{self.name}: still down after port conflict — skipping Claude audit (not a code bug)")
+            return
+
         self.last_audit_time = time.time()
         self.audit_times.append(self.last_audit_time)
-        error_text = tail_log(self.cfg["err_log"])
 
         output, fixed = run_claude_audit(self.name, error_text)
         if fixed:

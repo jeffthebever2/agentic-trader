@@ -1246,7 +1246,7 @@ def parse_args() -> argparse.Namespace:
                              "Evidence: 0.7 ATR too tight, 58%% stop-outs (WR≈40%%). "
                              "1.0 ATR: wider stop, fewer false exits, WR≈55%%, Kelly≈17%%.")
     parser.add_argument("--skip-vix-low-vol", action=argparse.BooleanOptionalAction, default=True,
-                        help="Skip all trades when VIX < 15 (low_vol regime). Evidence: E=-0.094%/trade.")
+                        help="Skip all trades when VIX < 15 (low_vol regime). Evidence: E=-0.094pct/trade.")
     parser.add_argument("--skip-thursday", action=argparse.BooleanOptionalAction, default=True,
                         help="Skip Thursday scans (→ Friday opens). Evidence: Thu WR=50.4%% E=-0.26%%/trade "
                              "vs non-Thu WR=57.4%% E=+0.07%% (n=3974, z=-3.5, p<0.0002). "
@@ -1258,7 +1258,7 @@ def parse_args() -> argparse.Namespace:
                              "Dominant in 2021 bull market (Mon WR=46.3%% vs Tue=68.0%%).")
     parser.add_argument("--skip-extended-bounce", action=argparse.BooleanOptionalAction, default=True,
                         help="Skip trades where consec_up>=2 (entering on 2nd+ consecutive up day). "
-                             "Evidence: consec_up<=1 E=+0.530% vs consec_up>=2 E=+0.157% (VIX=normal, 1.2/0.7).")
+                             "Evidence: consec_up<=1 E=+0.530pct vs consec_up>=2 E=+0.157pct (VIX=normal, 1.2/0.7).")
     parser.add_argument("--max-hold-days", type=int, default=14,
                         help="Time-stop: exit confirmed_pullback positions after this many "
                              "calendar days (~10 trading days). Validated optimum.")
@@ -2912,7 +2912,15 @@ def fire_candidate_alerts(
             for d in sorted(state)[:-5]:
                 state.pop(d, None)
             try:
-                state_path.write_text(json.dumps(state), encoding="utf-8")
+                import tempfile as _tf2, os as _os2
+                _fd2, _tp2 = _tf2.mkstemp(dir=state_path.parent, prefix=".tmp_")
+                try:
+                    with _os2.fdopen(_fd2, "w", encoding="utf-8") as _f2:
+                        _f2.write(json.dumps(state))
+                    _os2.replace(_tp2, state_path)
+                except Exception:
+                    try: _os2.unlink(_tp2)
+                    except Exception: pass
             except Exception:
                 pass
             print(f"[sms] candidate alert sent: {len(picked)} ticker(s) -> {sms_number}", flush=True)
@@ -4367,7 +4375,15 @@ def write_summary(
         "cycle": {"bought": bought, "sold": sold, "skipped": skipped},
     }
     summary_path = account.state_path.parent / "summary.json"
-    summary_path.write_text(json.dumps(_jsonable(summary), indent=2), encoding="utf-8")
+    import tempfile as _tfs, os as _oss
+    _content_s = json.dumps(_jsonable(summary), indent=2)
+    _fds, _tps = _tfs.mkstemp(dir=summary_path.parent, prefix=".tmp_")
+    try:
+        with _oss.fdopen(_fds, "w", encoding="utf-8") as _fs: _fs.write(_content_s)
+        _oss.replace(_tps, summary_path)
+    except Exception:
+        try: _oss.unlink(_tps)
+        except Exception: pass
 
     equity_path = account.state_path.parent / "equity_curve.jsonl"
     _is_first_point = not equity_path.exists() or equity_path.stat().st_size == 0
@@ -4757,14 +4773,17 @@ def run() -> None:
                         hil_id = str(uuid.uuid4())
                         hil_file = Path("tmp/hil_state.json")
                         hil_file.parent.mkdir(exist_ok=True)
-                        hil_file.write_text(json.dumps({
-                            "id": hil_id,
-                            "ticker": candidate.ticker,
-                            "shares": shares,
-                            "price": payload['limit_price'],
-                            "status": "pending",
-                            "token": hil_token
-                        }))
+                        import tempfile as _tfh, os as _osh
+                        _hil_data = json.dumps({"id": hil_id, "ticker": candidate.ticker,
+                            "shares": shares, "price": payload['limit_price'],
+                            "status": "pending", "token": hil_token})
+                        _fdh, _tph = _tfh.mkstemp(dir=hil_file.parent, prefix=".tmp_hil_")
+                        try:
+                            with _osh.fdopen(_fdh, "w") as _fh: _fh.write(_hil_data)
+                            _osh.replace(_tph, hil_file)
+                        except Exception:
+                            try: _osh.unlink(_tph)
+                            except Exception: pass
                             
                         msg = (
                             f"🚨 <b>Trade Proposal: {candidate.ticker}</b>\n"

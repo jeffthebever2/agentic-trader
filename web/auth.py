@@ -134,18 +134,49 @@ def _extract_token(request: Request) -> Optional[str]:
     return None
 
 
+def _check_manager_key(request: Request) -> Optional[dict[str, Any]]:
+    """Check X-Manager-Key header against MANAGER_API_KEY env var.
+
+    Returns an admin user dict if the key matches, None otherwise.
+    The key is compared with hmac.compare_digest to prevent timing attacks.
+    Only active when MANAGER_API_KEY is set in .env.
+    """
+    import hmac
+    configured = os.getenv("MANAGER_API_KEY", "").strip()
+    if not configured:
+        return None
+    presented = request.headers.get("X-Manager-Key", "").strip()
+    if not presented:
+        return None
+    if not hmac.compare_digest(presented, configured):
+        log.warning("X-Manager-Key presented but did not match")
+        return None
+    # Key matched — synthesise an admin identity from env
+    email = os.getenv("CF_ACCESS_LOCAL_DEV_EMAIL", "").strip().lower()
+    if not email:
+        admins = [e.strip().lower() for e in os.getenv("CF_ACCESS_BOOTSTRAP_ADMIN", "").split(",") if e.strip()]
+        email = admins[0] if admins else "manager@local"
+    return get_or_create_user(email)
+
+
 async def get_current_user(request: Request) -> dict[str, Any]:
     """FastAPI dependency: returns the authenticated user record.
 
     Order of precedence:
-      1. Localhost + local dev auth enabled    -> dev fallback user.
-      2. Valid Cloudflare Access JWT           -> verified user.
-      3. Anything else                         -> 401.
+      1. Valid X-Manager-Key header (MANAGER_API_KEY in .env) -> admin user.
+      2. Localhost + local dev auth enabled                    -> dev fallback.
+      3. Valid Cloudflare Access JWT                           -> verified user.
+      4. Anything else                                         -> 401.
 
     The user record (dict with email, role) is stashed on
     request.state.user for downstream handlers.
     """
     global _LAST_FAIL_LOG_AT
+
+    manager_user = _check_manager_key(request)
+    if manager_user is not None:
+        request.state.user = manager_user
+        return manager_user
 
     if _is_localhost(request) and (not _required() or _local_dev_enabled()):
         user = _apply_view_as(request, get_or_create_user(_local_dev_email()))

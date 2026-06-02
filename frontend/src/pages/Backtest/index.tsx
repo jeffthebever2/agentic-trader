@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import api, { wsUrl } from '@/api/client'
 import { EquityAreaChart } from '@/components/charts/EquityAreaChart'
 import { DrawdownChart } from '@/components/charts/DrawdownChart'
@@ -144,22 +144,21 @@ function ScannerTab() {
   const startTime = useRef<number>(0)
   const timer = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const fetchFiles = useCallback(async () => {
-    try {
-      const r = await api.get('/scanner/ticker-files')
-      setTickerFiles(r.data?.files ?? ['all_tickers.txt'])
-    } catch { /* ignore */ }
-  }, [])
+  function fetchFiles() {
+    api.get('/scanner/ticker-files')
+      .then(r => setTickerFiles(r.data?.files ?? ['all_tickers.txt']))
+      .catch(() => {})
+  }
 
-  useEffect(() => { fetchFiles() }, [fetchFiles])
+  useEffect(() => { fetchFiles() }, [])
 
-  const stop = useCallback(() => {
+  function stop() {
     ws.current?.close()
     if (timer.current) clearInterval(timer.current)
     setRunning(false)
-  }, [])
+  }
 
-  const scan = useCallback(() => {
+  function scan() {
     setResults([])
     setLog('')
     setProgress(0)
@@ -170,7 +169,7 @@ function ScannerTab() {
     startTime.current = Date.now()
     timer.current = setInterval(() => setElapsed(Math.round((Date.now() - startTime.current) / 1000)), 1000)
 
-    ws.current = new WebSocket(wsUrl('/ws/scanner'))
+    ws.current = new WebSocket(wsUrl('/ws/scanner/scan'))
     ws.current.onopen = () => {
       ws.current!.send(JSON.stringify({
         ticker_file: tickerFile, score_mode: scoreMode, threshold,
@@ -203,7 +202,7 @@ function ScannerTab() {
       }
     }
     ws.current.onclose = () => { stop() }
-  }, [tickerFile, scoreMode, threshold, maxTickers, targetMult, stopMult, mlWinMin, useMlGate, stop])
+  }
 
   const exportCsv = () => {
     const rows = [
@@ -501,13 +500,13 @@ function AlgoTab() {
   const startTime = useRef<number>(0)
   const timer = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const stop = useCallback(() => {
+  function stop() {
     ws.current?.close()
     if (timer.current) clearInterval(timer.current)
     setRunning(false)
-  }, [])
+  }
 
-  const run = useCallback(() => {
+  function run() {
     setLog('')
     setStats(null)
     setEquity([])
@@ -520,7 +519,7 @@ function AlgoTab() {
     startTime.current = Date.now()
     timer.current = setInterval(() => setElapsed(Math.round((Date.now() - startTime.current) / 1000)), 1000)
 
-    ws.current = new WebSocket(wsUrl('/ws/algo-bt'))
+    ws.current = new WebSocket(wsUrl('/ws/algo-backtest'))
     ws.current.onopen = () => {
       ws.current!.send(JSON.stringify({
         tickers: tickers.split(',').map(t => t.trim()).filter(Boolean),
@@ -557,7 +556,7 @@ function AlgoTab() {
       }
     }
     ws.current.onclose = () => { stop() }
-  }, [tickers, startDate, endDate, scoreThreshold, scoreMode, scanFreq, holdPeriod, accountSize, minPrice, maxPrice, mlWinMin, mlMaxLoss, mlMinExpRet, skipCache, skipMl, stop])
+  }
 
   return (
     <div>
@@ -677,14 +676,14 @@ function AlgoTab() {
         <div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10, marginBottom: 16 }}>
             {[
-              { label: 'Total Trades', value: String(stats.total_trades) },
-              { label: 'Direction Accuracy', value: `${(stats.direction_accuracy * 100).toFixed(1)}%` },
-              { label: 'Avg Return', value: `${(stats.avg_return * 100).toFixed(2)}%` },
-              { label: 'Profit Factor', value: stats.profit_factor.toFixed(2) },
-              { label: 'Max Drawdown', value: `${(stats.max_drawdown * 100).toFixed(1)}%` },
-              { label: 'Sortino Ratio', value: stats.sortino.toFixed(2) },
-              { label: 'Account Final', value: `$${stats.account_final.toLocaleString(undefined, { maximumFractionDigits: 0 })}` },
-              { label: 'Total Return', value: `${(stats.account_return * 100).toFixed(1)}%` },
+              { label: 'Total Trades', value: String(stats.total_trades ?? '—') },
+              { label: 'Direction Accuracy', value: stats.direction_accuracy != null ? `${(stats.direction_accuracy * 100).toFixed(1)}%` : '—' },
+              { label: 'Avg Return', value: stats.avg_return != null ? `${(stats.avg_return * 100).toFixed(2)}%` : '—' },
+              { label: 'Profit Factor', value: stats.profit_factor != null ? stats.profit_factor.toFixed(2) : '—' },
+              { label: 'Max Drawdown', value: stats.max_drawdown != null ? `${(stats.max_drawdown * 100).toFixed(1)}%` : '—' },
+              { label: 'Sortino Ratio', value: stats.sortino != null ? stats.sortino.toFixed(2) : '—' },
+              { label: 'Account Final', value: stats.account_final != null ? `$${stats.account_final.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—' },
+              { label: 'Total Return', value: stats.account_return != null ? `${(stats.account_return * 100).toFixed(1)}%` : '—' },
             ].map(s => (
               <div key={s.label} style={statCard}>
                 <div style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{s.label}</div>
@@ -794,18 +793,18 @@ function LlmTab() {
 
   const models = PROVIDER_MODELS[provider] ?? []
 
-  useEffect(() => {
-    const list = PROVIDER_MODELS[provider] ?? []
-    setModel(list[0] ?? '')
-  }, [provider])
+  function changeProvider(p: string) {
+    setProvider(p)
+    setModel((PROVIDER_MODELS[p] ?? [])[0] ?? '')
+  }
 
-  const stop = useCallback(() => {
+  function stop() {
     ws.current?.close()
     if (timer.current) clearInterval(timer.current)
     setRunning(false)
-  }, [])
+  }
 
-  const run = useCallback(() => {
+  function run() {
     setDecisions([])
     setCounts({ total: 0, buy: 0, hold: 0, sell: 0 })
     setProgress(0)
@@ -847,7 +846,7 @@ function LlmTab() {
       }
     }
     ws.current.onclose = () => { stop() }
-  }, [tickers, startDate, endDate, provider, model, freq, stop])
+  }
 
   return (
     <div>
@@ -875,7 +874,7 @@ function LlmTab() {
         <div style={formRow}>
           <div style={fieldGroup}>
             <span style={label}>LLM Provider</span>
-            <select className="input" value={provider} onChange={e => setProvider(e.target.value)}>
+            <select className="input" value={provider} onChange={e => changeProvider(e.target.value)}>
               {Object.keys(PROVIDER_MODELS).map(p => <option key={p} value={p}>{p}</option>)}
             </select>
           </div>

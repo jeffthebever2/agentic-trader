@@ -1,5 +1,6 @@
 import sys
 import asyncio
+import time
 from pathlib import Path
 
 # Playwright needs ProactorEventLoop on Windows to spawn subprocesses
@@ -14,14 +15,17 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env", override=True)
 load_dotenv(ROOT / ".env.enterprise", override=False)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from web.api.analysis import router as analysis_router
 from web.api.portfolio import router as portfolio_router
+from web.api.thematic_portfolio import router as thematic_router
+from web.api.thematic_auto import router as thematic_auto_router
 from web.api.backtest import router as backtest_router
 from web.api.history import router as history_router
 from web.api.settings import router as settings_router
@@ -38,11 +42,13 @@ from web.api.twofa_routes import router as twofa_router
 from web.api.live_verification import router as live_verification_router
 from web.api.cloudflare_ai import router as cloudflare_ai_router
 from web.api.admin import router as admin_router
+from web.api.system import router as system_router
 from web.auth import get_optional_user
 
 import datetime as dt
 import json
 import logging
+import os as _os_app
 from zoneinfo import ZoneInfo
 
 _autostart_log = logging.getLogger("paper.autostart")
@@ -82,7 +88,8 @@ async def _paper_autostart_loop():
             cfg = DEFAULT_AUTOSTART_CONFIG.copy()
             if _AUTOSTART_CFG.exists():
                 cfg.update(json.loads(_AUTOSTART_CFG.read_text(encoding="utf-8-sig")))
-            if not cfg.get("enabled"):
+            # PAPER_AUTOSTART_IGNORE_WINDOW=true implies enabled (why ignore the window if not running?)
+            if not cfg.get("enabled") and not ignore_window:
                 continue
 
             if not ignore_window:
@@ -113,27 +120,70 @@ async def _paper_autostart_loop():
             _autostart_log.warning("Auto-start loop error: %s", exc)
 
 
-app = FastAPI(title="Agentic Trader Web UI", version="1.0.0")
+app = FastAPI(
+    title="Agentic Trader API",
+    version="1.0.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+)
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+# ── CORS ──────────────────────────────────────────────────────────────────────
 # The SPA is served by this same FastAPI app, so it is same-origin and needs no
 # CORS grant. A wildcard ("*") would let any external site call the API, so we
 # restrict to an explicit allow-list. Override in prod via ALLOWED_ORIGINS
 # (comma-separated). Defaults cover local development only.
-import os as _os
-_default_origins = "http://localhost:8001,http://127.0.0.1:8001"
-_allowed_origins = [o.strip() for o in _os.getenv("ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
+_default_origins = "http://localhost:8001,http://127.0.0.1:8001,tauri://localhost,https://tauri.localhost"
+_allowed_origins = [o.strip() for o in _os_app.getenv("ALLOWED_ORIGINS", _default_origins).split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-Step-Up-Token", "X-Agentic-View-As", "X-Manager-Key"],
 )
 
+# ── Rate limiting via SlowAPI ──────────────────────────────────────────────────
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+
+    _limiter = Limiter(key_func=get_remote_address, default_limits=["300/minute"])
+    app.state.limiter = _limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    from slowapi.middleware import SlowAPIMiddleware
+    app.add_middleware(SlowAPIMiddleware)
+    _RATE_LIMITING_ENABLED = True
+except ImportError:
+    _RATE_LIMITING_ENABLED = False
+    _limiter = None
+
 import os
-from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
+
+# ── Global exception handlers ─────────────────────────────────────────────────
+_api_log = logging.getLogger("api")
+
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    _api_log.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"ok": False, "error": "Internal server error", "code": 500},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"ok": False, "error": "Validation failed", "code": 422, "detail": exc.errors()},
+    )
 
 
 class AuthContextMiddleware(BaseHTTPMiddleware):
@@ -151,6 +201,8 @@ class AuthContextMiddleware(BaseHTTPMiddleware):
         "/api/approve",            # signed magic token in query string
         "/health",
         "/health/deep",
+        "/api/health",             # same endpoints under /api prefix for React client
+        "/api/health/deep",
     }
 
     async def dispatch(self, request: Request, call_next):
@@ -163,6 +215,33 @@ class AuthContextMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 app.add_middleware(AuthContextMiddleware)
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Structured access logging. Logs method, path (no query params — avoids
+    leaking API keys passed as ?key=...), status code, and response time.
+    WebSocket upgrade requests are skipped to avoid logging noise.
+    """
+
+    _log = logging.getLogger("api.access")
+    # Paths too chatty to log at INFO
+    _QUIET = {"/health", "/health/deep", "/api/health", "/api/health/deep"}
+
+    async def dispatch(self, request: Request, call_next):
+        # Skip WebSocket upgrades
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)
+
+        t0 = time.monotonic()
+        response = await call_next(request)
+        ms = round((time.monotonic() - t0) * 1000)
+        path = request.url.path
+        level = logging.DEBUG if path in self._QUIET else logging.INFO
+        self._log.log(level, "%s %s %d %dms", request.method, path, response.status_code, ms)
+        return response
+
+
+app.add_middleware(RequestLoggingMiddleware)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -214,6 +293,8 @@ app.include_router(cloudflare_ai_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(analysis_router, prefix="/api")
 app.include_router(portfolio_router, prefix="/api")
+app.include_router(thematic_router, prefix="/api")
+app.include_router(thematic_auto_router, prefix="/api")
 app.include_router(backtest_router, prefix="/api")
 app.include_router(history_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
@@ -225,8 +306,10 @@ app.include_router(webull_router, prefix="/api")
 app.include_router(fidelity_router, prefix="/api")
 app.include_router(scanner_router, prefix="/api")
 app.include_router(market_router, prefix="/api")
+app.include_router(system_router, prefix="/api")
 
 @app.get("/health")
+@app.get("/api/health")
 async def health_check():
     """Health check endpoint for monitoring."""
     try:
@@ -263,6 +346,7 @@ async def health_check():
         }
 
 @app.get("/health/deep")
+@app.get("/api/health/deep")
 async def deep_health_check():
     """Unauthenticated deep health check for autofix monitor and uptime watchers.
     Returns per-subsystem status so monitors can distinguish what is actually broken.
@@ -344,7 +428,10 @@ async def deep_health_check():
     # ── Webserver self-check ─────────────────────────────────────────────────
     checks["webserver"] = {"ok": True, "note": "responding (this endpoint)"}
 
-    overall = all(v.get("ok", False) for v in checks.values())
+    # paper_trader state freshness is operational status, not core system health.
+    # Exclude it from overall so a paused paper runner doesn't show DEGRADED.
+    core_checks = {k: v for k, v in checks.items() if k != "paper_trader"}
+    overall = all(v.get("ok", False) for v in core_checks.values())
     return {
         "status": "healthy" if overall else "degraded",
         "timestamp": now.isoformat(),
@@ -352,72 +439,87 @@ async def deep_health_check():
     }
 
 
+async def _thematic_scan_loop():
+    """Auto-trigger thematic scan every 4 hours if THEMATIC_AUTO_SCAN=true in env."""
+    import json as _json
+    from web.api.thematic_auto import _run_scan, STATUS_FILE as _SCAN_STATUS
+    _INTERVAL = 4 * 3600  # 4 hours
+    await asyncio.sleep(60)  # initial delay — let server warm up
+    while True:
+        try:
+            if os.getenv("THEMATIC_AUTO_SCAN", "false").lower() == "true":
+                status = {}
+                if _SCAN_STATUS.exists():
+                    try:
+                        status = _json.loads(_SCAN_STATUS.read_text())
+                    except Exception:
+                        pass
+                if status.get("status") != "running":
+                    asyncio.create_task(_run_scan())
+        except Exception as e:
+            logging.getLogger("thematic_scan_loop").warning("Loop error: %s", e)
+        await asyncio.sleep(_INTERVAL)
+
+
 @app.on_event("startup")
 async def _startup():
     asyncio.create_task(_paper_autostart_loop())
+    asyncio.create_task(_thematic_scan_loop())
 
 
-static_dir = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+_react_dist = Path(__file__).parent / "static" / "dist"
 
-# React/Vite build — served at /app (old static frontend remains at /)
-_react_dist = static_dir / "dist"
-if _react_dist.exists():
-    app.mount("/app/assets", StaticFiles(directory=str(_react_dist / "assets")), name="react-assets")
-
-_INDEX_CACHE: bytes | None = None
-_INDEX_MTIME: float = 0.0
-
-_REACT_INDEX_CACHE: bytes | None = None
-_REACT_INDEX_MTIME: float = 0.0
+_SPA_NO_CACHE = {
+    "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Surrogate-Control": "no-store",
+    "CDN-Cache-Control": "no-store",
+}
 
 
 @app.get("/")
 async def root():
-    global _INDEX_CACHE, _INDEX_MTIME
-    path = static_dir / "index.html"
-    mtime = path.stat().st_mtime
-    if _INDEX_CACHE is None or mtime != _INDEX_MTIME:
-        _INDEX_CACHE = path.read_bytes()
-        _INDEX_MTIME = mtime
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/app", status_code=302)
+
+
+# Mounts registered before route handlers so exact asset paths take priority.
+# /app/assets → hashed Vite bundles (js, css, fonts)
+app.mount("/app/assets", StaticFiles(directory=str(_react_dist / "assets")), name="react-assets")
+
+
+def _react_file_response(filename: str) -> Response:
+    path = _react_dist / filename
+    if not path.exists():
+        return Response(status_code=404)
+    ext = path.suffix.lower()
+    media = {"svg": "image/svg+xml", "png": "image/png", "ico": "image/x-icon"}.get(ext[1:], "application/octet-stream")
+    return Response(content=path.read_bytes(), media_type=media,
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/app/favicon.svg")
+async def _favicon(_r: Request): return _react_file_response("favicon.svg")
+
+@app.get("/app/icons.svg")
+async def _icons(_r: Request): return _react_file_response("icons.svg")
+
+@app.get("/app/agentic-trader-icon.png")
+async def _logo(_r: Request): return _react_file_response("agentic-trader-icon.png")
+
+
+def _spa_response() -> Response:
     return Response(
-        content=_INDEX_CACHE,
+        content=(_react_dist / "index.html").read_bytes(),
         media_type="text/html",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        headers={
+            "Cache-Control": "private, no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
     )
 
 
 @app.get("/app")
 @app.get("/app/{full_path:path}")
 async def react_app(full_path: str = ""):
-    """Serve the React/Vite SPA at /app. Falls back to legacy UI if dist not built."""
-    global _REACT_INDEX_CACHE, _REACT_INDEX_MTIME
-    react_index = _react_dist / "index.html"
-    if not react_index.exists():
-        # Fallback: redirect to legacy UI
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url="/")
-    mtime = react_index.stat().st_mtime
-    if _REACT_INDEX_CACHE is None or mtime != _REACT_INDEX_MTIME:
-        _REACT_INDEX_CACHE = react_index.read_bytes()
-        _REACT_INDEX_MTIME = mtime
-    return Response(
-        content=_REACT_INDEX_CACHE,
-        media_type="text/html",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
-    )
-
-
-@app.get("/{full_path:path}")
-async def catch_all(full_path: str):
-    global _INDEX_CACHE, _INDEX_MTIME
-    path = static_dir / "index.html"
-    mtime = path.stat().st_mtime
-    if _INDEX_CACHE is None or mtime != _INDEX_MTIME:
-        _INDEX_CACHE = path.read_bytes()
-        _INDEX_MTIME = mtime
-    return Response(
-        content=_INDEX_CACHE,
-        media_type="text/html",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
-    )
+    return _spa_response()

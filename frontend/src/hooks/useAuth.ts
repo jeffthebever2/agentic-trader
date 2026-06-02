@@ -24,6 +24,7 @@ export function useAuth() {
     if (meQuery.data && !realUser) setUser(meQuery.data)
     if (featuresQuery.data) setFeatures(featuresQuery.data)
     setLoading(meQuery.isLoading || featuresQuery.isLoading)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meQuery.data, meQuery.isLoading, featuresQuery.data, featuresQuery.isLoading, realUser])
 
   return { user, features, loading, isAdmin: isAdmin(), error: meQuery.error }

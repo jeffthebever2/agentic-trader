@@ -268,6 +268,107 @@ def _serialize_final_state(state: dict) -> dict:
     return result
 
 
+class SimpleAnalyzeRequest(BaseModel):
+    ticker: str
+    date: Optional[str] = None
+    mode: str = "algorithm"
+    provider: str = "cloudflare"
+    model: str = ""
+
+
+@router.post("/analyze")
+async def analyze_simple(req: SimpleAnalyzeRequest):
+    """Lightweight synchronous analysis endpoint for bulk scans (algorithm mode only).
+    For full LLM agent analysis, use the WebSocket endpoint /ws/analyze.
+    """
+    from fastapi import Request
+    def _run():
+        import datetime as dt
+        try:
+            import yfinance as yf
+            import pandas as pd
+            from backtest import precompute, score_at, build_spy_regime, build_vix_regime
+        except ImportError as e:
+            return {"decision": "Error", "summary": f"Import error: {e}"}
+
+        ticker = req.ticker.strip().upper()
+        if req.date:
+            try:
+                trade_date = dt.date.fromisoformat(req.date)
+            except ValueError:
+                trade_date = dt.date.today() - dt.timedelta(days=1)
+        else:
+            trade_date = dt.date.today() - dt.timedelta(days=1)
+
+        lookback_start = trade_date - dt.timedelta(days=600)
+        try:
+            raw = yf.download(
+                [ticker, "SPY", "^VIX"],
+                start=lookback_start.isoformat(),
+                end=(trade_date + dt.timedelta(days=2)).isoformat(),
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+        except Exception as e:
+            return {"decision": "Error", "summary": f"Download failed: {e}"}
+
+        if isinstance(raw.columns, pd.MultiIndex):
+            close_all = raw["Close"] if "Close" in raw.columns.get_level_values(0) else pd.DataFrame()
+        else:
+            close_all = raw
+
+        spy_s = close_all.get("SPY", pd.Series(dtype=float))
+        vix_s = close_all.get("^VIX", pd.Series(dtype=float))
+        spy_regime = build_spy_regime(spy_s) if not spy_s.empty else {}
+        vix_regime = build_vix_regime(vix_s) if not vix_s.empty else {}
+
+        try:
+            if isinstance(raw.columns, pd.MultiIndex):
+                df = pd.DataFrame({
+                    "Open": raw["Open"].get(ticker, pd.Series()),
+                    "High": raw["High"].get(ticker, pd.Series()),
+                    "Low": raw["Low"].get(ticker, pd.Series()),
+                    "Close": raw["Close"].get(ticker, pd.Series()),
+                    "Volume": raw["Volume"].get(ticker, pd.Series()),
+                }).dropna()
+            else:
+                df = raw.dropna()
+        except Exception as e:
+            return {"decision": "Error", "summary": f"Data prep failed: {e}"}
+
+        if df.empty:
+            return {"decision": "Hold", "summary": f"No data available for {ticker}"}
+
+        try:
+            computed = precompute(df)
+            sc = score_at(computed, trade_date, spy_regime=spy_regime, vix_regime=vix_regime, mode="confirmed_pullback")
+        except Exception as e:
+            return {"decision": "Error", "summary": str(e)}
+
+        if sc is None or sc.score < 50:
+            return {
+                "decision": "Hold",
+                "summary": f"{ticker}: Score {sc.score if sc else 0:.1f} — no entry signal on {trade_date}",
+            }
+
+        return {
+            "decision": "Buy",
+            "action": "BUY",
+            "summary": (
+                f"{ticker}: Score {sc.score:.1f} — entry ${sc.entry:.2f}, "
+                f"target ${sc.target:.2f} (+{(sc.target/sc.entry-1)*100:.1f}%), "
+                f"stop ${sc.stop:.2f}, R:R {sc.rr:.2f}"
+            ),
+        }
+
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(_executor, _run)
+    except Exception as e:
+        result = {"decision": "Error", "summary": str(e)}
+    return result
+
+
 @router.websocket("/ws/analyze")
 async def ws_analyze(websocket: WebSocket):
     await websocket.accept()

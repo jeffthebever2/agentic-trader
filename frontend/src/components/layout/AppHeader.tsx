@@ -102,7 +102,7 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
         {/* Mobile logo — only visible on narrow screens */}
         <img
           className="ta-mobile-logo"
-          src="/static/agentic-trader-icon.png"
+          src="/app/agentic-trader-icon.png"
           alt="Agentic Trader"
           style={{ display: 'none' }}
           onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}

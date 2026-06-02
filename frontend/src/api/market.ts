@@ -35,6 +35,7 @@ export interface QuoteDetail {
   avg_volume: number | null
   market_cap: number | null
   pe_ratio: number | null
+  rsi?: number | null
   short_name: string
   sector: string
   industry: string

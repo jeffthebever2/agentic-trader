@@ -14,6 +14,24 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, '../web/static/dist'),
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (id.includes('recharts') || id.includes('d3-') || id.includes('lightweight-charts') || id.includes('chart.js')) {
+            return 'vendor-charts'
+          }
+          if (id.includes('react-dom') || id.includes('react-router') || id.includes('node_modules/react/')) {
+            return 'vendor-react'
+          }
+          if (id.includes('@tanstack')) {
+            return 'vendor-query'
+          }
+          if (id.includes('zustand') || id.includes('lucide-react')) {
+            return 'vendor-ui'
+          }
+        },
+      },
+    },
   },
 
   // Dev server: proxy /api calls to FastAPI backend on port 8001
@@ -21,6 +39,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+      },
+      '/health': {
         target: 'http://localhost:8001',
         changeOrigin: true,
       },

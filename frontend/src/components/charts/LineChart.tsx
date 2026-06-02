@@ -92,7 +92,7 @@ export function LineChart({ datasets, height = 200, showLegend = false, yFormatt
     }) as unknown as Chart<'line'>
 
     return () => { chartRef.current?.destroy() }
-  }, [datasets])
+  }, [datasets, showLegend, yFormatter])
 
   return <canvas ref={canvasRef} style={{ height, width: '100%' }} />
 }

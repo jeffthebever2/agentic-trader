@@ -15,17 +15,11 @@ interface AppShellProps {
 
 export function AppShell({ children }: AppShellProps) {
   const { user, realUser, restoreAdminView } = useAuthStore()
-  const [showOnboarding, setShowOnboarding] = useState(false)
+  const [onboardingDismissed, setOnboardingDismissed] = useState(false)
+  const showOnboarding = !onboardingDismissed && !!(user && user.onboarding_completed === false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
   const prevPath = useRef(location.pathname)
-
-  // Trigger onboarding when user is loaded and hasn't completed it
-  useEffect(() => {
-    if (user && user.onboarding_completed === false) {
-      setShowOnboarding(true)
-    }
-  }, [user])
 
   // Nav curtain + progress on route change
   useEffect(() => {
@@ -55,7 +49,7 @@ export function AppShell({ children }: AppShellProps) {
       )}
 
       <Sidebar
-        onOpenOnboarding={() => setShowOnboarding(true)}
+        onOpenOnboarding={() => setOnboardingDismissed(false)}
         mobileOpen={sidebarOpen}
         onMobileClose={() => setSidebarOpen(false)}
       />
@@ -94,7 +88,7 @@ export function AppShell({ children }: AppShellProps) {
       </div>
 
       {/* Global modals */}
-      {showOnboarding && <OnboardingModal onClose={() => setShowOnboarding(false)} />}
+      {showOnboarding && <OnboardingModal onClose={() => setOnboardingDismissed(true)} />}
       <StepUpModal />
       <HilToast />
       <ToastRegion />

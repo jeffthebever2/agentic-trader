@@ -2,7 +2,7 @@
  * HIL Toast — bottom-right notification for pending Human-in-the-Loop approvals.
  * Polls /api/paper/hil/pending every 30 seconds.
  */
-import { useState, useEffect, useRef } from 'react'
+import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import api from '@/api/client'
 
@@ -35,8 +35,6 @@ const btnSecondary: React.CSSProperties = {
 export function HilToast() {
   const qc = useQueryClient()
   const [dismissed, setDismissed] = useState<string | null>(null)
-  const [visible, setVisible] = useState(false)
-  const tradeRef = useRef<HilPending | null>(null)
 
   const { data } = useQuery<{ pending: boolean; trade?: HilPending }>({
     queryKey: ['hil-pending-toast'],
@@ -45,43 +43,31 @@ export function HilToast() {
     retry: false,
   })
 
-  useEffect(() => {
-    if (data?.pending && data.trade) {
-      tradeRef.current = data.trade
-      if (dismissed === data.trade.id) {
-        setVisible(false)
-      } else {
-        setVisible(true)
-      }
-    } else {
-      tradeRef.current = null
-      setDismissed(null)
-      setVisible(false)
-    }
-  }, [data, dismissed])
-
   const resolve = useMutation({
     mutationFn: ({ id, action }: { id: string; action: 'approve' | 'reject' }) =>
       api.post('/paper/hil/resolve', { id, action }),
     onSuccess: () => {
-      setVisible(false)
       qc.invalidateQueries({ queryKey: ['hil-pending-toast'] })
       qc.invalidateQueries({ queryKey: ['hil-pending'] })
     },
   })
 
-  if (!visible || !tradeRef.current) return null
-  const t = tradeRef.current
+  // Derive visible trade directly from query data — no refs, no effects
+  const t: HilPending | null = (data?.pending && data.trade && data.trade.id !== dismissed)
+    ? data.trade
+    : null
+
+  if (!t) return null
 
   return (
-    <div style={toast} role="dialog" aria-modal={false as unknown as boolean} aria-live="polite">
+    <div style={toast} role="dialog" aria-modal="false" aria-live="polite">
       <div style={{ padding: '18px 22px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#F59E0B', flexShrink: 0, animation: 'blink 1.2s ease-in-out infinite' }} />
         <h3 style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)', margin: 0, flex: 1 }}>Trade Requires Approval</h3>
         <button
           type="button"
           aria-label="Dismiss for now"
-          onClick={() => { setDismissed(t.id); setVisible(false) }}
+          onClick={() => { setDismissed(t.id) }}
           style={{ background: 'none', border: 'none', color: 'var(--ink-faint)', fontSize: 18, lineHeight: 1, cursor: 'pointer', minWidth: 36, minHeight: 36 }}
         >×</button>
       </div>
@@ -110,7 +96,7 @@ export function HilToast() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <button style={btnSecondary} onClick={() => { setDismissed(t.id); setVisible(false) }}>Later</button>
+          <button style={btnSecondary} onClick={() => { setDismissed(t.id) }}>Later</button>
           <button style={{ ...btnSecondary }} onClick={() => resolve.mutate({ id: t.id, action: 'reject' })} disabled={resolve.isPending}>Reject</button>
           <button style={btnPrimary} onClick={() => resolve.mutate({ id: t.id, action: 'approve' })} disabled={resolve.isPending}>
             {resolve.isPending ? '…' : 'Approve Trade'}

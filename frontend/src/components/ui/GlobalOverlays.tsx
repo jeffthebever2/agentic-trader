@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 /**
  * Global keyboard-driven overlays:
  *  - PositionSizer   (⌘⇧S)
@@ -244,8 +245,8 @@ export function CommandPalette() {
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    if (cmd) { setQ(''); setIdx(0); setTimeout(() => inputRef.current?.focus(), 40) }
-  }, [cmd])
+    setTimeout(() => inputRef.current?.focus(), 40)
+  }, [])
 
   const filtered = q
     ? CMD_PAGES.filter(p =>
@@ -384,12 +385,13 @@ export function GlobalKeyboardShortcuts() {
 
 // ── Bundle export ─────────────────────────────────────────────────────────────
 export function GlobalOverlays() {
+  const { cmd } = useOverlayStore()
   return (
     <>
       <GlobalKeyboardShortcuts />
       <PositionSizer />
       <KeyboardShortcuts />
-      <CommandPalette />
+      <CommandPalette key={cmd ? 'open' : 'closed'} />
     </>
   )
 }
