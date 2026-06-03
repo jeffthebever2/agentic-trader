@@ -1152,6 +1152,11 @@ async def _ai_pick_openrouter(tickers_ranked: list[tuple[str, float]], news_blob
 # ── Scan orchestrator ─────────────────────────────────────────────────────────
 
 _scan_lock = asyncio.Lock()
+# A11/P8: shared lock for all PAPER_STATE_FILE read-modify-write operations.
+# os.replace is crash-safe but doesn't prevent concurrent RMW clobbers.
+# Both thematic_auto and thematic_portfolio import this lock to serialize
+# all paper-state mutations across endpoints and the auto-scan loop.
+_paper_state_lock = asyncio.Lock()
 
 SCORE_HISTORY_FILE = TMP / "thematic_score_history.jsonl"
 _SCORE_HISTORY_MAX = 500  # max lines before pruning
@@ -1916,6 +1921,7 @@ class ApproveBody(BaseModel):
     target_pct: float | None = None
     fidelity_trade: bool = False   # if True, also route to Fidelity live trading
     execute_fidelity: bool = False  # must be explicitly True to actually submit
+    force: bool = False             # A10: bypass score/spike gate (explicit override)
 
 
 @router.post("/thematic/auto/signals/{signal_id}/approve")
@@ -1946,19 +1952,41 @@ async def approve_signal(
     rr = target_pct / stop_pct if stop_pct > 0 else 0
     rr_warning = None
     if rr < min_rr:
-        rr_warning = f"R:R {rr:.2f} < minimum {min_rr:.1f} — target {target_pct}% vs stop {stop_pct}%"
-        # Auto-widen target to meet minimum R:R
+        if not body.force and not hil_settings.get("allow_rr_widening", False):
+            raise HTTPException(
+                status_code=400,
+                detail=f"R:R {rr:.2f} < minimum {min_rr:.1f} — tighten stop or widen target (or pass force=true)"
+            )
+        # Widening allowed — persist flag for honest reporting
+        rr_warning = f"R:R {rr:.2f} < min {min_rr:.1f} — target widened to {round(stop_pct * min_rr, 1)}% (rr_widened)"
         target_pct = round(stop_pct * min_rr, 1)
-        log.info("R:R too low for %s — widened target to %.1f%%", ticker, target_pct)
+        log.info("R:R gate: widening allowed for %s — target → %.1f%%", ticker, target_pct)
 
     # ── Score gate ────────────────────────────────────────────────────────────
+    # A10: previously only attached a warning — a 1-scan spike (score=3) trade went
+    # through anyway. Enforce: block sub-threshold signals unless force=True.
     raw_score = float(sig.get("raw_score", 0) or 0)
     score_warning = None
+    if raw_score < MIN_SIGNAL_SCORE and not body.force:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Signal score {raw_score:.0f} < threshold {MIN_SIGNAL_SCORE:.0f} — "
+                   f"wait for confirmation or pass force=true to override"
+        )
     if raw_score < MIN_SIGNAL_SCORE:
-        score_warning = f"Score {raw_score:.0f} below threshold {MIN_SIGNAL_SCORE:.0f} — low buzz, trade at own risk"
+        score_warning = f"Score {raw_score:.0f} below threshold {MIN_SIGNAL_SCORE:.0f} — force override active"
 
-    # ── Spike warning ─────────────────────────────────────────────────────────
-    spike_warning = "One-scan spike — unconfirmed trend" if sig.get("is_spike") else None
+    # ── Spike gate ────────────────────────────────────────────────────────────
+    # A10: one-scan spikes must not trade — unconfirmed trend, no follow-through.
+    # Block unless force=True.
+    spike_warning = None
+    if sig.get("is_spike"):
+        if not body.force:
+            raise HTTPException(
+                status_code=400,
+                detail="One-scan spike — unconfirmed trend. Wait for multi-scan confirmation or pass force=true"
+            )
+        spike_warning = "One-scan spike — force override active"
 
     # 1. Add to thematic portfolio
     from web.api.thematic_portfolio import _load, _save, _fetch_prices, DEFAULT_THEMES
@@ -2005,76 +2033,77 @@ async def approve_signal(
         now_iso = _dt.datetime.now().isoformat(timespec="seconds")
         today   = _dt.date.today().isoformat()
 
-        PAPER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        state: dict = {}
-        if PAPER_STATE_FILE.exists():
-            try:
-                state = json.loads(PAPER_STATE_FILE.read_text())
-            except Exception:
-                pass
-        cash    = float(state.get("cash", 10000))
-        settled = float(state.get("settled_cash", cash))
-
-        # ── Portfolio brain cap checks ────────────────────────────────────────
-        open_positions = state.get("positions", {})
-        thematic_count = sum(1 for p in open_positions.values() if p.get("_source", "").startswith("thematic"))
-        theme_count    = sum(1 for p in open_positions.values() if p.get("sector") == "thematic" and p.get("theme") == sig.get("theme"))
-
-        cap_reason = None
-        if len(open_positions) >= PORTFOLIO_MAX_POSITIONS:
-            cap_reason = f"Portfolio at max {PORTFOLIO_MAX_POSITIONS} positions"
-        elif theme_count >= PORTFOLIO_MAX_PER_THEME:
-            cap_reason = f"Theme '{sig.get('theme')}' at max {PORTFOLIO_MAX_PER_THEME} positions"
-        elif thematic_count >= PORTFOLIO_MAX_SPECULATIVE:
-            cap_reason = f"Thematic/speculative positions at max {PORTFOLIO_MAX_SPECULATIVE}"
-
-        # ── Circuit breakers ──────────────────────────────────────────────────
-        cb_ok, cb_reason = _check_portfolio_circuit_breakers(state, hil_settings, cost)
-        if not cb_ok:
-            cap_reason = cap_reason or cb_reason
-
-        # ── Real ATR for position quality ─────────────────────────────────────
+        # Fetch ATR before acquiring lock (IO-bound, no state dependency)
         loop = asyncio.get_running_loop()
         atr = await loop.run_in_executor(None, _real_atr, ticker, price)
-
-        # Alpha tier based on conviction + score
         alpha_tier = "A+" if conviction >= 9 else "A" if conviction >= 7 else "B" if conviction >= 5 else "C"
 
-        if shares > 0 and ticker not in open_positions and not cap_reason:
-            open_positions[ticker] = {
-                "ticker": ticker, "shares": shares, "entry_price": price,
-                "stop": stop, "target": target, "entry_time": now_iso,
-                "signal_date": today, "score": float(conviction) * 10,
-                "alpha_tier": alpha_tier, "atr": atr,
-                "breakeven_moved": False, "peak_price": price, "scans_held": 0,
-                "partial_sold": False, "defensive_trimmed": False, "scaled_in": False,
-                "sector": "thematic", "theme": sig.get("theme", "future_tech"),
-                "entry_date": today,
-                "funded_by_unsettled": False, "unsettled_settle_date": "",
-                "regime_at_entry": "thematic", "regime_score_at_entry": None,
-                "crash_risk_at_entry": None, "regime_confidence_at_entry": None,
-                "strategy_label": "thematic_momentum",
-                "thesis": sig.get("thesis", ""),
-                "catalyst": sig.get("catalyst", ""),
-                "hold_days": sig.get("hold_days", 5),
-                "exit_plan": f"Target {target_pct}%, stop {stop_pct}% (R:R {rr:.1f}), max {sig.get('hold_days',5)} days",
-                "entry_raw_score": float(sig.get("raw_score", 0) or 0),
-                "confirmed_scans": sig.get("scan_appearances", 1),
-                "_source": "thematic_auto",
-            }
-            state["positions"]    = open_positions
-            state["cash"]         = round(cash - cost, 4)
-            state["settled_cash"] = round(settled - cost, 4)
-            _atomic_write(PAPER_STATE_FILE, state)
-            result["paper_trade"] = {
-                "shares": shares, "price": price, "cost": cost,
-                "stop": stop, "target": target, "rr": round(rr, 2),
-                "atr": atr, "conviction_scaled": use_conviction_scale,
-                "alloc_used": alloc,
-            }
-        elif cap_reason:
-            result["paper_trade"] = None
-            result["cap_reason"]  = cap_reason
+        # A11/P8: hold lock for entire read-modify-write of paper state so
+        # concurrent approvals/auto-scans can't clobber each other.
+        async with _paper_state_lock:
+            PAPER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            state: dict = {}
+            if PAPER_STATE_FILE.exists():
+                try:
+                    state = json.loads(PAPER_STATE_FILE.read_text())
+                except Exception:
+                    pass
+            cash    = float(state.get("cash", 10000))
+            settled = float(state.get("settled_cash", cash))
+
+            # ── Portfolio brain cap checks ────────────────────────────────────
+            open_positions = state.get("positions", {})
+            thematic_count = sum(1 for p in open_positions.values() if p.get("_source", "").startswith("thematic"))
+            theme_count    = sum(1 for p in open_positions.values() if p.get("sector") == "thematic" and p.get("theme") == sig.get("theme"))
+
+            cap_reason = None
+            if len(open_positions) >= PORTFOLIO_MAX_POSITIONS:
+                cap_reason = f"Portfolio at max {PORTFOLIO_MAX_POSITIONS} positions"
+            elif theme_count >= PORTFOLIO_MAX_PER_THEME:
+                cap_reason = f"Theme '{sig.get('theme')}' at max {PORTFOLIO_MAX_PER_THEME} positions"
+            elif thematic_count >= PORTFOLIO_MAX_SPECULATIVE:
+                cap_reason = f"Thematic/speculative positions at max {PORTFOLIO_MAX_SPECULATIVE}"
+
+            # ── Circuit breakers ──────────────────────────────────────────────
+            cb_ok, cb_reason = _check_portfolio_circuit_breakers(state, hil_settings, cost)
+            if not cb_ok:
+                cap_reason = cap_reason or cb_reason
+
+            if shares > 0 and ticker not in open_positions and not cap_reason:
+                open_positions[ticker] = {
+                    "ticker": ticker, "shares": shares, "entry_price": price,
+                    "stop": stop, "target": target, "entry_time": now_iso,
+                    "signal_date": today, "score": float(conviction) * 10,
+                    "alpha_tier": alpha_tier, "atr": atr,
+                    "breakeven_moved": False, "peak_price": price, "scans_held": 0,
+                    "partial_sold": False, "defensive_trimmed": False, "scaled_in": False,
+                    "sector": "thematic", "theme": sig.get("theme", "future_tech"),
+                    "entry_date": today,
+                    "funded_by_unsettled": False, "unsettled_settle_date": "",
+                    "regime_at_entry": "thematic", "regime_score_at_entry": None,
+                    "crash_risk_at_entry": None, "regime_confidence_at_entry": None,
+                    "strategy_label": "thematic_momentum",
+                    "thesis": sig.get("thesis", ""),
+                    "catalyst": sig.get("catalyst", ""),
+                    "hold_days": sig.get("hold_days", 5),
+                    "exit_plan": f"Target {target_pct}%, stop {stop_pct}% (R:R {rr:.1f}), max {sig.get('hold_days',5)} days",
+                    "entry_raw_score": float(sig.get("raw_score", 0) or 0),
+                    "confirmed_scans": sig.get("scan_appearances", 1),
+                    "_source": "thematic_auto",
+                }
+                state["positions"]    = open_positions
+                state["cash"]         = round(cash - cost, 4)
+                state["settled_cash"] = round(settled - cost, 4)
+                _atomic_write(PAPER_STATE_FILE, state)
+                result["paper_trade"] = {
+                    "shares": shares, "price": price, "cost": cost,
+                    "stop": stop, "target": target, "rr": round(rr, 2),
+                    "atr": atr, "conviction_scaled": use_conviction_scale,
+                    "alloc_used": alloc,
+                }
+            elif cap_reason:
+                result["paper_trade"] = None
+                result["cap_reason"]  = cap_reason
 
     # Optional Fidelity live trade routing
     result["fidelity_trade"] = None

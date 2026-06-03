@@ -479,19 +479,27 @@ async def thematic_paper_trade(body: ThematicTradeIn, user: dict = Depends(get_c
     _urec = _us.get_user(user["email"]) or {}
     hil = _us.get_thematic_hil(_urec)
 
-    # R:R gate — auto-widen target rather than reject, but warn
+    # A4: R:R gate — reject sub-min-RR signals honestly instead of auto-widening the target.
+    # Auto-widening manufactured a favorable ratio the trade never had (borderline Rule-1).
     stop_pct   = body.stop_pct
     target_pct = body.target_pct
     min_rr     = float(hil.get("min_rr", 1.5))
     rr         = target_pct / stop_pct if stop_pct > 0 else 0.0
     rr_warning = None
     if rr < min_rr:
+        if not hil.get("allow_rr_widening", False):
+            raise HTTPException(
+                status_code=400,
+                detail=f"R:R {rr:.2f} < min {min_rr:.1f} — tighten stop or widen target before submitting"
+            )
+        # Widening explicitly enabled by user setting — persist flag for honest reporting
         target_pct = round(stop_pct * min_rr, 1)
-        rr_warning = f"R:R {rr:.2f} < min {min_rr:.1f} — target widened to {target_pct}%"
-        log.info("R:R gate triggered for %s: widened target to %.1f%%", ticker, target_pct)
+        rr_warning = f"R:R {rr:.2f} < min {min_rr:.1f} — target widened to {target_pct}% (rr_widened=True)"
+        log.info("R:R gate: widening allowed for %s: target → %.1f%%", ticker, target_pct)
 
     stop   = round(price * (1 - stop_pct / 100), 4)
     target = round(price * (1 + target_pct / 100), 4)
+    rr_widened = rr_warning is not None
 
     # Enrich with portfolio metadata for conviction-scaling
     port_data  = _load(user["email"])
@@ -514,35 +522,15 @@ async def thematic_paper_trade(body: ThematicTradeIn, user: dict = Depends(get_c
 
     cost = round(price * shares, 2)
 
-    # Load paper state early — needed for circuit breakers
-    PAPER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    state: dict = {}
-    if PAPER_STATE_FILE.exists():
-        try:
-            state = json.loads(PAPER_STATE_FILE.read_text())
-        except Exception:
-            pass
-
-    # Portfolio heat + daily loss circuit breakers
-    from web.api.thematic_auto import _check_portfolio_circuit_breakers
-    cb_ok, cb_reason = _check_portfolio_circuit_breakers(state, hil, cost)
-    if not cb_ok:
-        raise HTTPException(status_code=400, detail=cb_reason)
-
-    cash    = float(state.get("cash", 10000.0))
-    settled = float(state.get("settled_cash", cash))
-    if cost > settled:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Insufficient settled cash: need ${cost:.2f}, have ${settled:.2f}"
-        )
-
-    positions: dict = state.get("positions", {})
-    if ticker in positions:
-        raise HTTPException(status_code=400, detail=f"{ticker} already open in paper account")
-
-    # Real 14-day ATR
-    from web.api.thematic_auto import _real_atr
+    # P4 / A11: fetch ATR (IO-bound, no state dependency) before acquiring lock
+    from web.api.thematic_auto import (
+        _check_portfolio_circuit_breakers,
+        _real_atr,
+        _paper_state_lock,
+        PORTFOLIO_MAX_POSITIONS,
+        PORTFOLIO_MAX_PER_THEME,
+        PORTFOLIO_MAX_SPECULATIVE,
+    )
     loop = _asyncio.get_running_loop()
     atr  = await loop.run_in_executor(None, _real_atr, ticker, price)
 
@@ -550,50 +538,91 @@ async def thematic_paper_trade(body: ThematicTradeIn, user: dict = Depends(get_c
     today      = _dt.date.today().isoformat()
     alpha_tier = "A+" if conviction >= 9 else "A" if conviction >= 7 else "B" if conviction >= 5 else "C"
 
-    positions[ticker] = {
-        "ticker":        ticker,
-        "shares":        shares,
-        "entry_price":   price,
-        "stop":          stop,
-        "target":        target,
-        "entry_time":    now_iso,
-        "signal_date":   today,
-        "score":         float(conviction) * 10,
-        "ml_probability":None,
-        "expected_return":None,
-        "large_loss_probability": None,
-        "alpha_tier":    alpha_tier,
-        "atr":           atr,
-        "breakeven_moved": False,
-        "peak_price":    price,
-        "scans_held":    0,
-        "partial_sold":  False,
-        "defensive_trimmed": False,
-        "scaled_in":     False,
-        "sector":        "thematic",
-        "theme":         port_pos.get("theme", "future_tech"),
-        "strategy_label":"thematic_conviction",
-        "thesis":        port_pos.get("thesis", ""),
-        "catalyst":      port_pos.get("catalyst", ""),
-        "hold_days":     5,
-        "exit_plan":     f"Target +{target_pct}%, stop -{stop_pct}% (R:R {round(target_pct/stop_pct,2)}), max 5 days",
-        "entry_date":    today,
-        "funded_by_unsettled": False,
-        "unsettled_settle_date": "",
-        "regime_at_entry": "thematic",
-        "regime_score_at_entry": None,
-        "crash_risk_at_entry": None,
-        "regime_confidence_at_entry": None,
-        "_source": "thematic",
-        # P1: set entry_raw_score from latest scan so buzz_decay exit can fire.
-        # Without this, the entry_raw > 0 guard always fails for manually-injected positions.
-        "entry_raw_score": _get_social_score_from_history(ticker) * 10.0,  # normalize back to ~raw-score scale
-    }
+    # A11/P8: lock the entire read-modify-write to prevent concurrent clobbers.
+    # Concurrent approvals or auto-scans on different requests share the same
+    # file; without the lock, two concurrent requests both read 10 positions and
+    # both write 11, losing one entry.
+    async with _paper_state_lock:
+        PAPER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state: dict = {}
+        if PAPER_STATE_FILE.exists():
+            try:
+                state = json.loads(PAPER_STATE_FILE.read_text())
+            except Exception:
+                pass
 
-    state["positions"]    = positions
-    state["cash"]         = round(cash - cost, 4)
-    state["settled_cash"] = round(settled - cost, 4)
-    _atomic_write(PAPER_STATE_FILE, state)
+        # P4: enforce same PORTFOLIO_MAX_* caps as the auto path
+        open_positions = state.get("positions", {})
+        _theme = port_pos.get("theme", "future_tech")
+        _thematic_count = sum(1 for p in open_positions.values() if p.get("_source", "").startswith("thematic"))
+        _theme_count    = sum(1 for p in open_positions.values() if p.get("theme") == _theme and p.get("sector") == "thematic")
+        if len(open_positions) >= PORTFOLIO_MAX_POSITIONS:
+            raise HTTPException(status_code=400, detail=f"Portfolio at max {PORTFOLIO_MAX_POSITIONS} positions")
+        if _theme_count >= PORTFOLIO_MAX_PER_THEME:
+            raise HTTPException(status_code=400, detail=f"Theme '{_theme}' at max {PORTFOLIO_MAX_PER_THEME} positions")
+        if _thematic_count >= PORTFOLIO_MAX_SPECULATIVE:
+            raise HTTPException(status_code=400, detail=f"Thematic positions at max {PORTFOLIO_MAX_SPECULATIVE}")
+
+        # Portfolio heat + daily loss circuit breakers
+        cb_ok, cb_reason = _check_portfolio_circuit_breakers(state, hil, cost)
+        if not cb_ok:
+            raise HTTPException(status_code=400, detail=cb_reason)
+
+        cash    = float(state.get("cash", 10000.0))
+        settled = float(state.get("settled_cash", cash))
+        if cost > settled:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Insufficient settled cash: need ${cost:.2f}, have ${settled:.2f}"
+            )
+
+        if ticker in open_positions:
+            raise HTTPException(status_code=400, detail=f"{ticker} already open in paper account")
+
+        open_positions[ticker] = {
+            "ticker":        ticker,
+            "shares":        shares,
+            "entry_price":   price,
+            "stop":          stop,
+            "target":        target,
+            "entry_time":    now_iso,
+            "signal_date":   today,
+            "score":         float(conviction) * 10,
+            "ml_probability":None,
+            "expected_return":None,
+            "large_loss_probability": None,
+            "alpha_tier":    alpha_tier,
+            "atr":           atr,
+            "breakeven_moved": False,
+            "peak_price":    price,
+            "scans_held":    0,
+            "partial_sold":  False,
+            "defensive_trimmed": False,
+            "scaled_in":     False,
+            "sector":        "thematic",
+            "theme":         _theme,
+            "strategy_label":"thematic_conviction",
+            "thesis":        port_pos.get("thesis", ""),
+            "catalyst":      port_pos.get("catalyst", ""),
+            "hold_days":     5,
+            "exit_plan":     f"Target +{target_pct}%, stop -{stop_pct}% (R:R {round(target_pct/stop_pct,2)}), max 5 days",
+            "entry_date":    today,
+            "funded_by_unsettled": False,
+            "unsettled_settle_date": "",
+            "regime_at_entry": "thematic",
+            "regime_score_at_entry": None,
+            "crash_risk_at_entry": None,
+            "regime_confidence_at_entry": None,
+            "_source": "thematic",
+            "rr_widened": rr_widened,   # A4: True if target was widened to meet min_rr
+            # P1: set entry_raw_score from latest scan so buzz_decay exit can fire.
+            "entry_raw_score": _get_social_score_from_history(ticker) * 10.0,
+        }
+
+        state["positions"]    = open_positions
+        state["cash"]         = round(cash - cost, 4)
+        state["settled_cash"] = round(settled - cost, 4)
+        _atomic_write(PAPER_STATE_FILE, state)
 
     # Append to thematic trades log
     THEMATIC_TRADES_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -610,6 +639,7 @@ async def thematic_paper_trade(body: ThematicTradeIn, user: dict = Depends(get_c
         "ok": True, "ticker": ticker, "shares": shares,
         "entry": price, "stop": stop, "target": target,
         "cost": cost, "rr": round(target_pct / stop_pct, 2),
+        "rr_widened": rr_widened,
         "conviction": conviction, "atr": atr,
         "cash_remaining": state["cash"],
     }
