@@ -564,17 +564,23 @@ class MarketRegimeEngine:
         max_trades  = int(rules["max_trades"])
         ml_threshold = min(0.95, self.ml_base_threshold + ml_delta)
 
-        # Additional no-trade enforcement: crash_risk_score > 0.70 even if not hard-labeled crash
-        if crash_risk_score > 0.70 and not no_trade:
-            no_trade    = True
-            size_factor = 0.0
+        # MR-1: continuous taper — replace hard binary no_trade cliff with bounded ramp.
+        # Previously: crash_risk_score > 0.70 flipped the whole book off (hard cliff).
+        # Now: smooth linear taper from score=0.40 (begin penalty) to score=0.85 (force stop).
+        # Hard no_trade only fires at ≥0.85 (genuine extreme; label="crash_risk" still fires too).
+        # At [0.40, 0.85]: size_factor tapers linearly toward 0; system keeps exiting positions
+        # but progressively shrinks new entry size rather than stopping all at once.
+        _TAPER_LO = 0.40   # taper begins here
+        _TAPER_HI = 0.85   # hard no_trade threshold (raised from 0.70)
+        if crash_risk_score >= _TAPER_HI and not no_trade:
+            no_trade     = True
+            size_factor  = 0.0
             ml_threshold = 0.95
-            max_trades  = 0
-
-        # Scale size_factor down by crash risk if not already zero
-        if not no_trade and crash_risk_score > 0.40:
-            size_factor = float(size_factor * (1.0 - (crash_risk_score - 0.40) * 1.5))
-            size_factor = max(0.10, size_factor)
+            max_trades   = 0
+        elif not no_trade and crash_risk_score > _TAPER_LO:
+            # Linear ramp: at score=_TAPER_LO factor=1.0; at score=_TAPER_HI factor=0.0
+            taper = 1.0 - (crash_risk_score - _TAPER_LO) / (_TAPER_HI - _TAPER_LO)
+            size_factor = float(size_factor * max(0.0, taper))
 
         return MarketRegimeState(
             regime=regime,

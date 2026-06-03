@@ -79,6 +79,7 @@ class StockTradingEnv:
 
         # Align and store price data
         self._closes: Dict[str, np.ndarray] = {}
+        self._opens: Dict[str, np.ndarray] = {}   # RL-1: next-open fills
         self._volumes: Dict[str, np.ndarray] = {}
         self._dates: Optional[pd.DatetimeIndex] = None
 
@@ -131,8 +132,12 @@ class StockTradingEnv:
         # Scale actions to target allocation fractions
         target_fractions = action * self.max_position_size  # [0, max_position_size]
 
+        # RL-1: fill at next-bar open prices, not today's close.
+        # EOD decisions execute at the next day's open; filling at today's close
+        # gave the agent intrabar look-ahead that inflated training returns.
+        next_open_prices = self._get_opens(self._t + 1)
         portfolio_value = self._portfolio_value(prices)
-        cost = self._rebalance(prices, target_fractions, portfolio_value)
+        cost = self._rebalance(next_open_prices, target_fractions, portfolio_value)
 
         self._t += 1
         new_prices = self._get_prices(self._t)
@@ -195,10 +200,20 @@ class StockTradingEnv:
         for ticker in self.tickers:
             df = frames[ticker].loc[common_idx]
             self._closes[ticker] = df["Close"].values.astype(np.float64)
+            # RL-1: store Open for next-bar fill prices (EOD decisions fill at next open)
+            if "Open" in df.columns:
+                self._opens[ticker] = df["Open"].values.astype(np.float64)
+            else:
+                self._opens[ticker] = self._closes[ticker]  # fallback: use Close
             self._volumes[ticker] = df["Volume"].values.astype(np.float64)
 
     def _get_prices(self, t: int) -> np.ndarray:
         return np.array([self._closes[tk][t] for tk in self.tickers], dtype=np.float64)
+
+    def _get_opens(self, t: int) -> np.ndarray:
+        """RL-1: next-bar open prices for realistic EOD fill simulation."""
+        t_clamped = min(t, len(self._dates) - 1)
+        return np.array([self._opens[tk][t_clamped] for tk in self.tickers], dtype=np.float64)
 
     def _portfolio_value(self, prices: np.ndarray) -> float:
         return float(self._cash + np.dot(self._shares, prices))
