@@ -112,6 +112,7 @@ class PositionSizer:
         ml_probability: float | None = None,
         atr: float = 0.0,
         stop: float = 0.0,
+        target: float = 0.0,
         regime_factor: float = 1.0,
         now: dt.datetime | None = None,
         adv: float | None = None,
@@ -273,6 +274,15 @@ class PositionSizer:
             # size and needs walk-forward validation before going live.)
             risk_dollars *= regime_factor * streak_factor * tod_factor * daily_factor
             stop_dist = (price - stop) if stop > 0 and price > stop else max(atr, price * 0.01)
+            # PS-1: RR-aware tilt. Equal stop-distance setups are over-bet vs high-RR
+            # setups because expectancy = p×RR. Tilt risk_dollars by bounded RR factor:
+            # clip(RR/rr_ref, 0.8, 1.3). rr_ref=1.2 = screener baseline → neutral at
+            # the typical setup; higher-RR candidates earn up to +30%; low-RR down 20%.
+            if target > price and stop_dist > 0:
+                _rr = (target - price) / stop_dist
+                _rr_ref = float(getattr(args, "rr_ref", 1.2))
+                _rr_factor = min(1.3, max(0.8, _rr / _rr_ref)) if _rr_ref > 0 else 1.0
+                risk_dollars *= _rr_factor
             atr_shares = int(math.floor(risk_dollars / stop_dist)) if stop_dist > 0 else 0
 
             # Hard cap scaled by tier_factor so B-tier (0.5×) caps at cap_max×0.5 not cap_max.

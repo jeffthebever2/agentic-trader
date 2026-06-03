@@ -225,8 +225,9 @@ class CandidateRanker:
             )
 
         # ── Penalty terms (denominator) ──────────────────────────────────────
-        # ll_penalty: large_loss model ROC=0.7116 — GOOD, keep
-        ll_penalty = large_loss * self.ll_penalty_scale
+        # B6/B7: ll_penalty removed from denominator — large_loss ROC=0.73 now
+        # enters as (1 - ll_prob) in the numerator (single-counted, matches brain/engine).
+        ll_penalty = 0.0  # kept for audit log continuity; no longer in denominator
 
         # Volatility penalty: excess ATR% above threshold (rule-based, keep)
         excess_atr = max(0.0, atr_pct - self.vol_penalty_atr_threshold)
@@ -236,15 +237,17 @@ class CandidateRanker:
         # timeout_penalty REMOVED: timeout model ROC=0.4023 (anti-predictive, Cycle 25/26)
         # er_boost REMOVED: ER model R²=0.012 (noise, Cycle 25/26)
 
-        # ── Numerator: Cycle 38 — win_prob removed ───────────────────────────
-        # win_prob removed: WF HC WR=39.5% < 54.2% base at threshold=0.6 (679 OOS rows).
-        # Restore when WF ROC > 0.55 AND WF HC WR > base WR after new-geometry retrain.
-        numerator = reg_score
+        # ── Numerator: B6/B7 — promote (1 - ll_prob) into numerator ─────────
+        # win_prob removed Cycle 38: WF HC WR=39.5% anti-predictive.
+        # B6: large_loss ROC=0.73 is the only head with predictive signal.
+        # Moved from denominator (ll_penalty) to numerator factor so it's single-counted.
+        ll_numerator_factor = max(0.0, 1.0 - large_loss)
+        numerator = reg_score * ll_numerator_factor
         er_boost = 1.0   # kept for audit/logging only
         timeout_penalty = 0.0  # kept for audit/logging only
 
         # ── Denominator ─────────────────────────────────────────────────────
-        denominator = 1.0 + ll_penalty + vol_penalty
+        denominator = 1.0 + vol_penalty          # ll_penalty moved to numerator
         denominator = max(denominator, 0.01)  # never divide by zero
 
         composite = numerator / denominator
@@ -268,8 +271,9 @@ class CandidateRanker:
             "er_boost": er_boost,
             "tbs": tbs,
             "reg_score": reg_score,
+            "ll_numerator_factor": round(ll_numerator_factor, 4),  # B6: (1-ll_prob)
             "numerator": numerator,
-            "ll_penalty": ll_penalty,
+            "ll_penalty": ll_penalty,   # 0.0 — moved to numerator (audit continuity)
             "vol_penalty": vol_penalty,
             "timeout_penalty": timeout_penalty,
             "denominator": denominator,

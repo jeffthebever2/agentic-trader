@@ -4017,6 +4017,7 @@ def scan_account_once(
             ml_probability=candidate.ml_probability,
             atr=candidate.atr,
             stop=_cand_stop,
+            target=float(getattr(candidate, "target", 0.0) or 0.0),
             regime_factor=combined_size_factor,
             now=now,
             adv=adv,

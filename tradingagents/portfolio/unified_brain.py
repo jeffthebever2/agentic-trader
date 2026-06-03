@@ -335,43 +335,49 @@ class UnifiedBrain:
         feedback_tracker: Optional[Any],
         config: Dict[str, Any],
     ) -> UnifiedCandidate:
-        """Merge multiple strategy candidates for same ticker into one UnifiedCandidate."""
+        """Merge multiple strategy candidates for same ticker into one UnifiedCandidate.
+
+        UB-A1: Atomic source selection. Previously this method pulled confidence=max,
+        ll_prob=min, tbs=max, timeout=min each from a *different* source, building a
+        Frankenstein candidate that no source actually proposed. That corrupted the
+        ll_hard_cap and min_rr gates (optimistic inputs that backtest can't reproduce).
+
+        Fix: rank all source candidates with a single comparator, pick the winner,
+        take ALL ML probability fields and geometry from that one source. Context
+        signals (regime_score, reliability, liquidity) are still computed externally
+        since they depend on the shared price/regime state, not the candidate object.
+        """
         sources = [s for s, _ in candidates_with_sources]
-        all_c = [c for _, c in candidates_with_sources]
 
-        # Take best ML signals
-        confidence   = self._best_float(candidates_with_sources, "ml_probability", 0.50, "max")
-        expected_ret = self._best_float(candidates_with_sources, "expected_return", 0.00, "max")
-        ll_prob      = self._best_float(candidates_with_sources, "large_loss_probability", 0.20, "min")
-        tbs_prob     = self._best_float(candidates_with_sources, "target_before_stop_probability", confidence, "max")
-        timeout_prob = self._best_float(candidates_with_sources, "timeout_probability", 0.30, "min")
-        breakout_sc  = self._best_float(candidates_with_sources, "breakout_score", 0.0, "max")
+        # ── UB-A1: Pick single winning source ─────────────────────────────────
+        # Rank by: alpha_score (if pre-scored) > breakout_score > ml_probability > score.
+        # All fields taken atomically from the winner.
+        def _rank(sc_pair: Tuple[str, Any]) -> float:
+            _, c = sc_pair
+            alpha = float(getattr(c, "alpha_score", 0.0) or 0.0)
+            bk    = float(getattr(c, "breakout_score", 0.0) or 0.0)
+            ml    = float(getattr(c, "ml_probability", 0.0) or 0.0)
+            sc    = float(getattr(c, "score", 0.0) or 0.0)
+            return alpha * 1000 + bk * 10 + ml * 5 + sc
 
-        # Use entry/stop/target/atr from candidate with highest breakout_score
-        # (or highest score if no breakout_score)
-        best_c = max(all_c,
-            key=lambda c: (
-                float(getattr(c, "breakout_score", 0) or 0) * 100
-                + float(getattr(c, "ml_probability", 0) or 0) * 10
-                + float(getattr(c, "score", 0) or 0)
-            )
-        )
+        best_pair  = max(candidates_with_sources, key=_rank)
+        primary    = best_pair[0]
+        best_c     = best_pair[1]
+
+        # All ML signals taken from winning source — no cross-source mixing
+        confidence   = float(getattr(best_c, "ml_probability", 0.50) or 0.50)
+        expected_ret = float(getattr(best_c, "expected_return", 0.00) or 0.00)
+        ll_prob      = float(getattr(best_c, "large_loss_probability", 0.20) or 0.20)
+        tbs_prob     = float(getattr(best_c, "target_before_stop_probability", confidence) or confidence)
+        timeout_prob = float(getattr(best_c, "timeout_probability", 0.30) or 0.30)
+        breakout_sc  = float(getattr(best_c, "breakout_score", 0.0) or 0.0)
+
+        # Geometry from the same winning source
         entry  = float(getattr(best_c, "entry", 0.0) or 0.0)
         stop   = float(getattr(best_c, "stop", 0.0) or 0.0)
         target = float(getattr(best_c, "target", 0.0) or 0.0)
         atr    = float(getattr(best_c, "atr", 0.0) or 0.0)
         signal_date = str(getattr(best_c, "signal_date", ""))
-
-        # Primary source = strategy with highest alpha_score if available,
-        # else highest score
-        primary = sources[0]
-        best_alpha = -1.0
-        for s, c in candidates_with_sources:
-            a = float(getattr(c, "alpha_score", 0.0) or 0.0)
-            sc = float(getattr(c, "score", 0.0) or 0.0)
-            if a + sc > best_alpha:
-                best_alpha = a + sc
-                primary = s
 
         # Regime score
         if regime_state is not None:
@@ -500,11 +506,17 @@ class UnifiedBrain:
         bmax = float(cfg.get("breakout_max_boost", 0.50))  # UB-A9: fallback was 0.30, config is 0.50
         breakout_boost = 1.0 + (min(max(uc.breakout_score, 0.0), 100.0) / 100.0) * bmax
 
-        # Numerator: regime × breakout (win_prob removed — anti-predictive)
-        numerator = uc.regime_score * breakout_boost
+        # B6: promote (1 - large_loss_probability) into numerator (single-counted).
+        # large_loss ROC=0.73 is the only head with genuine predictive signal.
+        # Previously it was only in the denominator (ll_penalty) — now it's the
+        # numerator factor and removed from the denominator so it's not double-counted.
+        # Hard cap (ll_hard_cap) still gates before scoring; this adjusts magnitude.
+        ll_numerator_factor = max(0.0, 1.0 - uc.large_loss_probability)
 
-        # Penalties (timeout_pen removed: timeout model ROC=0.4023, anti-predictive)
-        ll_pen  = float(cfg.get("ll_penalty_scale", 1.5)) * uc.large_loss_probability
+        # Numerator: regime × breakout × (1 - ll_prob)
+        numerator = uc.regime_score * breakout_boost * ll_numerator_factor
+
+        # Penalties — ll_pen removed from denominator (now in numerator as single-counted factor)
         atr_pct = uc.atr / uc.entry if uc.entry > 0 else 0.0
         vol_threshold = float(cfg.get("vol_penalty_atr_threshold", 0.04))
         # Cycle 44: normalize excess ATR by threshold to match live AlphaEngine
@@ -515,8 +527,9 @@ class UnifiedBrain:
         liq_pen = max(0.0, 1.0 - uc.liquidity_score) * float(cfg.get("liq_penalty_scale", 0.20))
         # Correlation penalty: placeholder (computed by allocator if positions available)
         corr_pen = 0.0
+        ll_pen = 0.0  # moved to numerator — kept for audit log continuity
 
-        denominator = 1.0 + ll_pen + vol_pen + liq_pen + corr_pen
+        denominator = 1.0 + vol_pen + liq_pen + corr_pen
         raw_alpha   = numerator / denominator
 
         # Ticker reliability multiplier [0.6, 1.1]
@@ -561,8 +574,9 @@ class UnifiedBrain:
             "tbs_prob": round(uc.target_before_stop_probability, 4),
             "regime_score": round(uc.regime_score, 4),
             "breakout_boost": round(breakout_boost, 4),
+            "ll_numerator_factor": round(ll_numerator_factor, 4),  # B6: (1-ll_prob) in numerator
             "numerator": round(numerator, 5),
-            "ll_penalty": round(ll_pen, 4),
+            "ll_penalty": round(ll_pen, 4),   # 0.0 — moved to numerator (audit continuity)
             "vol_penalty": round(vol_pen, 4),
             "timeout_penalty": 0.0,  # neutralized Cycle 25
             "liq_penalty": round(liq_pen, 4),
@@ -697,7 +711,14 @@ class UnifiedBrain:
                 uc.rejection_reason = "stop_above_entry"
                 continue
 
-            risk_dollars = account_value * risk_pct * combined_factor
+            reward_dist = uc.take_profit - uc.entry
+            rr          = reward_dist / stop_dist if stop_dist > 0 else 0.0
+
+            # PS-1: RR-aware tilt on risk_dollars (same formula as position_sizing.py).
+            # clip(RR/rr_ref, 0.8, 1.3) — neutral at screener baseline R:R=1.2.
+            _rr_ref    = float(cfg.get("rr_ref", 1.2))
+            _rr_factor = min(1.3, max(0.8, rr / _rr_ref)) if (rr > 0 and _rr_ref > 0) else 1.0
+            risk_dollars = account_value * risk_pct * combined_factor * _rr_factor
             raw_shares   = int(math.floor(risk_dollars / stop_dist))
 
             # Hard position cap scaled by tier_mult so B-tier capped lower than A/A+
@@ -716,8 +737,6 @@ class UnifiedBrain:
                 continue
 
             actual_risk  = stop_dist * final_shares
-            reward_dist  = uc.take_profit - uc.entry
-            rr           = reward_dist / stop_dist if stop_dist > 0 else 0.0
 
             uc.shares       = final_shares
             uc.risk_dollars = round(actual_risk, 2)
