@@ -812,6 +812,9 @@ class ProductionSafetyMonitor:
         regime_state: Optional[Any] = None,
         output_dir: Optional[str | Path] = None,
         now: Optional[dt.datetime] = None,
+        # DL-5: grades_path for DriftDetector; validation_summary_path for WF-gap check
+        grades_path: Optional[str | Path] = None,
+        validation_summary_path: Optional[str | Path] = None,
     ) -> SafetyReport:
         """Run all safety checks and return a SafetyReport.
 
@@ -837,6 +840,46 @@ class ProductionSafetyMonitor:
         all_halt.extend(mh_halt)
         all_warn.extend(mh_warn)
         gates_active.extend(["model_" + r.split(":")[0] for r in mh_halt + mh_warn])
+
+        # ── 2b. DriftDetector (DL-5) ─────────────────────────────────────
+        # Previously check_all only read a scalar drift field — the most informative
+        # degradation signal (calibration drift, high-conf failure, paper-vs-WF gap)
+        # could never halt. Wire the full DriftDetector here.
+        if grades_path is not None:
+            try:
+                from tradingagents.portfolio.drift_detector import DriftDetector
+                from tradingagents.portfolio.prediction_grader import PredictionGrader
+                _grader = PredictionGrader(account_dir=str(grades_path))
+                _grades = _grader.load_saved()
+                if _grades:
+                    _detector = DriftDetector()
+                    _val_path = validation_summary_path or (
+                        Path(output_dir) / "validation_summary.json" if output_dir else None
+                    )
+                    _drift_path = (
+                        Path(output_dir) / "ml_drift.json" if output_dir else None
+                    )
+                    _drift_report = _detector.check(
+                        grades=_grades,
+                        validation_summary_path=_val_path,
+                        drift_log_path=_drift_path,
+                    )
+                    if _drift_report.has_drift:
+                        for alert in _drift_report.alerts:
+                            all_warn.append(f"WARN_drift: {alert}")
+                        gates_active.append("drift_detector")
+                    # RS-1 monotonicity check (GC-7)
+                    try:
+                        from tradingagents.portfolio.reliability_stats import ReliabilityStats
+                        _rs2 = ReliabilityStats()
+                        for ma in _rs2.alert_monotonicity(_grades):
+                            all_warn.append(f"WARN_monotonicity: {ma}")
+                        if any("MONOTONICITY" in w for w in all_warn):
+                            gates_active.append("monotonicity")
+                    except Exception as _me:
+                        all_warn.append(f"WARN_monotonicity_error: {_me}")
+            except Exception as _de:
+                all_warn.append(f"WARN_drift_detector_error: {_de}")
 
         # ── 3. Data health ────────────────────────────────────────────────
         data_health: Dict[str, Any] = {"checked": False}
@@ -878,6 +921,24 @@ class ProductionSafetyMonitor:
         all_halt.extend(mc_halt)
         all_warn.extend(mc_warn)
         gates_active.extend([r.split(":")[0] for r in mc_halt + mc_warn])
+
+        # ── 5b. REGIME_COLLAPSE via ReliabilityStats (DL-9) ─────────────────
+        # reliability_stats computes per-regime WR but the alerts were never fed to check_all.
+        # A regime where the model loses 65%+ of the time should at minimum warn.
+        if account is not None and grades_path is not None:
+            try:
+                from tradingagents.portfolio.reliability_stats import ReliabilityStats
+                _rs = ReliabilityStats()
+                _rt = list(getattr(account, "trades", []))
+                if _rt:
+                    _sr = _rs.compute(trades=_rt)
+                    _regime_alerts = _rs.alert_regimes(_sr)
+                    for ra in _regime_alerts:
+                        all_warn.append(f"WARN_regime_collapse: {ra}")
+                    if _regime_alerts:
+                        gates_active.append("regime_collapse")
+            except Exception as _rse:
+                all_warn.append(f"WARN_reliability_stats_error: {_rse}")
 
         # ── 6. Candidate confidence floor (Cycle 44 V-21) ─────────────────
         # Previously `candidates` was accepted but ignored. Warn (config intent)

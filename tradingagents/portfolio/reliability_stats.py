@@ -260,3 +260,31 @@ class ReliabilityStats:
                     f"vs actual_wr={report.overall.win_rate:.3f})"
                 )
         return alerts
+
+    def alert_monotonicity(self, grades: list) -> List[str]:
+        """RS-1 (GC-7): check that high-confidence trades win more than low-confidence.
+
+        A constant-0.6 predictor with zero discrimination passes calibration_error≈0
+        but the high-confidence bucket wins no better than the low-confidence bucket.
+        Alert when: high_conf.WR ≤ low_conf.WR  OR  high_conf.WR ≤ base_rate.
+        """
+        if not grades or len(grades) < 10:
+            return []
+        base_wr = sum(1 for g in grades if g.actual_win) / len(grades)
+        low_conf  = [g for g in grades if g.predicted_win_prob < 0.60]
+        high_conf = [g for g in grades if g.predicted_win_prob >= 0.70]
+        alerts = []
+        if len(high_conf) >= 5 and len(low_conf) >= 5:
+            high_wr = sum(1 for g in high_conf if g.actual_win) / len(high_conf)
+            low_wr  = sum(1 for g in low_conf  if g.actual_win) / len(low_conf)
+            if high_wr <= low_wr:
+                alerts.append(
+                    f"MONOTONICITY_FAIL: high_conf WR={high_wr:.1%} (n={len(high_conf)}) "
+                    f"≤ low_conf WR={low_wr:.1%} (n={len(low_conf)}) — model not discriminating"
+                )
+            if high_wr <= base_wr:
+                alerts.append(
+                    f"MONOTONICITY_FAIL: high_conf WR={high_wr:.1%} (n={len(high_conf)}) "
+                    f"≤ base_rate={base_wr:.1%} — high-confidence trades underperform random"
+                )
+        return alerts

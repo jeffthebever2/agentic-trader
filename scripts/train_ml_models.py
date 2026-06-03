@@ -158,7 +158,11 @@ def _calibrate_classifier(clf, x_val, y_val, method: str = "isotonic"):
         # Build calibration curve for the report
         n_bins = min(10, max(5, len(y_val) // 50))
         try:
-            frac_pos, mean_pred = calibration_curve(y_val, cal_prob, n_bins=n_bins, strategy="uniform")
+            # TM-5: "uniform" (equal-count) bucketing splits flat-probability mass arbitrarily,
+            # corrupting the monotonicity check (a constant-0.6 predictor looks "well calibrated").
+            # "quantile" bins by probability value edges — buckets have equal probability width,
+            # not equal sample count, making monotonicity checks meaningful.
+            frac_pos, mean_pred = calibration_curve(y_val, cal_prob, n_bins=n_bins, strategy="quantile")
             cal_curve = [{"mean_pred": round(float(mp), 4), "frac_pos": round(float(fp), 4)}
                          for mp, fp in zip(mean_pred, frac_pos)]
         except Exception:
@@ -249,7 +253,14 @@ def _threshold_search(test_df, win_prob, loss_prob, expected_return, hold: int,
             best_score = score
             best_threshold = thr
 
+    # TM-8: searching recommended_threshold on the test set is a latent holdout-tuning
+    # landmine — the "recommended" threshold is already fitted to the evaluation data.
+    # Label it diagnostic only; callers must NOT use this to select the production threshold.
     results["recommended_threshold"] = best_threshold
+    results["recommended_threshold_WARNING"] = (
+        "DIAGNOSTIC ONLY — computed on test set. Do not use for threshold selection. "
+        "Use walk-forward ROC / expectancy curve instead."
+    )
     return results
 
 
@@ -743,13 +754,17 @@ def train_models(args) -> dict:
         report["models"]["large_loss_probability"] = {"status": "single_class_labels"}
 
     # ── Expected return regressor
+    # TM-10: ER regressor (R²≈0.012, gate disabled via ml_expected_return_min=-99) is still
+    # trained and shipped every run, consuming compute and disk. Gate behind --train-er flag.
+    # Default: skip training (saves ~30% of training wall-time with no predictive loss).
     ret_col = f"h{args.hold}_return"
     y_ret_train = pd.to_numeric(train_df[ret_col], errors="coerce")
     y_ret_test = pd.to_numeric(test_df[ret_col], errors="coerce")
     ret_mask_train = y_ret_train.notna()
     ret_mask_test = y_ret_test.notna()
     expected_return = np.zeros(len(test_df))
-    if ret_mask_train.sum() >= args.min_rows // 2 and ret_mask_test.sum() >= 20:
+    train_er = getattr(args, "train_er", False)  # TM-10: default False
+    if train_er and ret_mask_train.sum() >= args.min_rows // 2 and ret_mask_test.sum() >= 20:
         ret_model = _make_reg(n_estimators=args.n_estimators,
                               max_depth=args.max_depth, min_samples_leaf=args.min_samples_leaf,
                               seed=args.seed)
@@ -762,6 +777,8 @@ def train_models(args) -> dict:
             "metrics": _regression_metrics(y_ret_test[ret_mask_test], expected_return[ret_mask_test]),
             "feature_importance": _feature_importance(ret_model, feature_names, limit=40),
         }
+    else:
+        report["models"]["expected_return"] = {"status": "skipped (use --train-er to enable; R²≈0.012, gate disabled)"}
 
     # ── Target/timeout classifiers
     for label, model_key, target_col in [
@@ -967,6 +984,11 @@ def parse_args():
     parser.add_argument(
         "--calibrate", action=argparse.BooleanOptionalAction, default=True,
         help="Apply isotonic/sigmoid probability calibration after training (default: on)."
+    )
+    parser.add_argument(
+        "--train-er", action="store_true", default=False,
+        help="TM-10: train the expected-return regressor (R²≈0.012, gate disabled). "
+             "Skipped by default — no predictive value and costs ~30%% of wall-time."
     )
     return parser.parse_args()
 

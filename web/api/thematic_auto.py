@@ -1488,6 +1488,21 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
 
     if modified and execute:
         state["positions"] = positions
+        # A1: append closed trades to state["trades"] so the daily-loss circuit breaker
+        # can read them. Without this, realized_today was always 0 (closed_today was never written).
+        state.setdefault("trades", [])
+        for ex in exits:
+            if ex.get("executed"):
+                state["trades"].append({
+                    "ticker": ex["ticker"],
+                    "pnl": round((ex.get("pnl_pct", 0) / 100.0) * (ex.get("proceeds", 0)), 2),
+                    "pnl_pct": ex.get("pnl_pct", 0) / 100.0,
+                    "exit_time": ex.get("ts", ""),
+                    "exit_reason": ex.get("reason", ""),
+                    "_source": "thematic",
+                })
+        # Keep trades list bounded (last 200 entries)
+        state["trades"] = state["trades"][-200:]
         _atomic_write(PAPER_STATE_FILE, state)
         # Log exits
         EXIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1872,13 +1887,15 @@ def _check_portfolio_circuit_breakers(state: dict, hil: dict, base_dollar: float
             return False, f"Portfolio heat {heat_pct:.1f}% ≥ max {max_heat:.0f}% — reduce positions first"
 
     # Daily loss limit
+    # A1: state["closed_today"] keyed on close_date was never written by anything in the codebase.
+    # Closed trades live in state["trades"] keyed by exit_time/pnl. Read from there.
     import datetime as _dtcb
     today = _dtcb.date.today().isoformat()
     start_cash = float(state.get("starting_cash", 10000))
     realized_today = sum(
         float(t.get("pnl", 0))
-        for t in state.get("closed_today", [])
-        if t.get("close_date", "") == today
+        for t in state.get("trades", [])
+        if str(t.get("exit_time", t.get("close_date", "")))[:10] == today
     )
     daily_loss_limit = float(hil.get("daily_loss_limit_pct", 3.0))
     if start_cash > 0 and realized_today < 0:

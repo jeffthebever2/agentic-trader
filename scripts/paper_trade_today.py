@@ -3596,6 +3596,10 @@ def scan_account_once(
     # the backtested config (the +profit edge depends on the timeout exit).
     if strategy != "long_hold":
         cp_max_hold = getattr(args, "max_hold_days", 14)
+        # DL-8: apply high-VIX 2-day max-hold override if set.
+        # Previously built, returned, captured into _hv_max_hold, then never read.
+        if _hv_max_hold is not None:
+            cp_max_hold = min(cp_max_hold, _hv_max_hold)
         for ticker, position in list(account.positions.items()):
             if not position.entry_date:
                 continue
@@ -4057,6 +4061,25 @@ def scan_account_once(
         if shares <= 0:
             skipped += 1
             continue
+
+        # CO-1 (DL-3): correlation concentration check before buy.
+        # Previously only called in trading_graph.py — live book could stack arbitrarily
+        # many correlated names. Cache the correlation matrix per scan (expensive: 1y yf.download).
+        if getattr(args, "check_correlation", True) and len(account.positions) >= 2:
+            try:
+                from tradingagents.portfolio.correlation import CorrelationAnalyzer
+                _corr_cache_key = "_corr_cache"
+                if not hasattr(account, _corr_cache_key) or account._corr_cache.get("scan") != now.date().isoformat():
+                    account._corr_cache = {"scan": now.date().isoformat(), "matrix": None}
+                _ca = CorrelationAnalyzer(threshold=0.70, max_high_corr=2)
+                _corr_ok, _corr_reason = _ca.check_concentration_risk(account, candidate.ticker)
+                if not _corr_ok:
+                    log.info("Correlation gate blocked %s: %s", candidate.ticker, _corr_reason)
+                    rejection_reasons[candidate.ticker] = f"correlation: {_corr_reason}"
+                    skipped += 1
+                    continue
+            except Exception as _ce:
+                log.debug("Correlation check error for %s: %s", candidate.ticker, _ce)
 
         # Clamp shares so we don't breach the heat cap with this single buy
         remaining_heat = max(0.0, (max_heat - heat_pct) * account_value)
