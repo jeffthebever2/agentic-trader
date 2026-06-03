@@ -70,13 +70,29 @@ DEFAULT_SAFETY_CONFIG: Dict[str, Any] = {
 
 # ── SafetyReport ──────────────────────────────────────────────────────────────
 
+
+# Halt reasons that require full book liquidation (not just entry block).
+# Triggers: catastrophic drawdown, regime collapse, or ROC-broken model.
+_FORCE_FLATTEN_TRIGGERS: tuple = (
+    "portfolio_drawdown:",
+    "regime_no_trade:",
+    "roc_below_floor:",
+    "model_roc_",
+)
+
+
 @dataclass
 class SafetyReport:
     """Output of ProductionSafetyMonitor.check_all()."""
     safe_to_trade: bool
     halt_reasons: List[str]              # critical → blocks all new entries
     warn_reasons: List[str]              # non-critical → log + continue
-    gates_active: List[str]              # every gate that triggered (halt + warn)
+    gates_active: List[str]             # every gate that triggered (halt + warn)
+    # PS3: FORCE_FLATTEN — True when halt is caused by catastrophic drawdown,
+    # regime collapse, or broken model ROC. Callers must close all open
+    # positions immediately; blocking new entries alone is insufficient.
+    force_flatten: bool = False
+    force_flatten_reasons: List[str] = field(default_factory=list)
     model_health: Dict[str, Any] = field(default_factory=dict)
     data_health: Dict[str, Any] = field(default_factory=dict)
     account_health: Dict[str, Any] = field(default_factory=dict)
@@ -90,6 +106,8 @@ class SafetyReport:
             "halt_reasons": self.halt_reasons,
             "warn_reasons": self.warn_reasons,
             "gates_active": self.gates_active,
+            "force_flatten": self.force_flatten,
+            "force_flatten_reasons": self.force_flatten_reasons,
             "model_health": self.model_health,
             "data_health": self.data_health,
             "account_health": self.account_health,
@@ -109,6 +127,8 @@ class SafetyReport:
     def summary_str(self) -> str:
         """One-line summary for dashboard."""
         status = "✅ SAFE" if self.safe_to_trade else "🚫 HALT"
+        if self.force_flatten:
+            status = "🔴 FORCE_FLATTEN"
         if self.halt_reasons:
             first = self.halt_reasons[0][:60]
             return f"{status} | {first}"
@@ -963,11 +983,24 @@ class ProductionSafetyMonitor:
 
         safe = len(all_halt) == 0
 
+        # PS3: detect catastrophic halt conditions that require full liquidation.
+        # Blocking new entries alone is insufficient when the book is riding the
+        # exact condition that triggered the breaker (deep drawdown, regime
+        # collapse, ROC-broken model). Callers read force_flatten and close all
+        # open positions before returning.
+        _ff_reasons = [
+            r for r in all_halt
+            if any(r.startswith(t) for t in _FORCE_FLATTEN_TRIGGERS)
+        ]
+        _force_flatten = bool(_ff_reasons)
+
         report = SafetyReport(
             safe_to_trade=safe,
             halt_reasons=all_halt,
             warn_reasons=all_warn,
             gates_active=gates_active,
+            force_flatten=_force_flatten,
+            force_flatten_reasons=_ff_reasons,
             model_health=model_health,
             data_health=data_health,
             account_health=account_health,

@@ -3385,7 +3385,24 @@ def scan_account_once(
             })
             if dashboard:
                 dashboard.event(f"SAFETY_HALT: {_reason[:80]}")
-        # Still run exit logic (sell open positions) but block all new entries
+        # PS3: FORCE_FLATTEN — catastrophic halt (drawdown/regime-collapse/ROC broken).
+        # Block entries AND immediately liquidate all open positions at current price.
+        if _safety_report.force_flatten:
+            _ff_tickers = list(account.positions.keys())
+            for _ff_ticker in _ff_tickers:
+                _ff_price = prices.get(_ff_ticker, 0.0)
+                if _ff_price > 0 and _ff_ticker in account.positions:
+                    account.sell(_ff_ticker, _ff_price, "FORCE_FLATTEN", now)
+                    account.log_event({
+                        "type": "FORCE_FLATTEN",
+                        "ticker": _ff_ticker,
+                        "price": _ff_price,
+                        "reasons": _safety_report.force_flatten_reasons,
+                        "timestamp": now.isoformat(),
+                    })
+                    if dashboard:
+                        dashboard.event(f"FORCE_FLATTEN: {_ff_ticker} @ {_ff_price:.2f}")
+        # Still run exit logic for any remaining positions; block all new entries
         _skip_all_entries = True
     else:
         _skip_all_entries = False

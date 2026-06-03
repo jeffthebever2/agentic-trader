@@ -467,6 +467,24 @@ def scan_once(
         print(f"[unified] SAFETY_HALT: {reason}")
         account.log_event({"type": "SAFETY_HALT", "reason": reason, "ts": now.isoformat()})
 
+    # PS3: FORCE_FLATTEN — catastrophic halt (drawdown/regime-collapse/ROC broken).
+    # Block entries AND immediately liquidate all open positions at current price.
+    if safety_report.force_flatten:
+        for _ff_ticker in list(account.positions.keys()):
+            _ff_price = prices.get(_ff_ticker, 0.0)
+            if _ff_price > 0 and _ff_ticker in account.positions:
+                _ff_shares = account.positions[_ff_ticker].shares
+                account.sell(_ff_ticker, _ff_price, "FORCE_FLATTEN", now)
+                account.log_event({
+                    "type": "FORCE_FLATTEN",
+                    "ticker": _ff_ticker,
+                    "price": _ff_price,
+                    "shares": _ff_shares,
+                    "reasons": safety_report.force_flatten_reasons,
+                    "ts": now.isoformat(),
+                })
+                print(f"[unified] FORCE_FLATTEN: {_ff_ticker} {_ff_shares}sh @ {_ff_price:.2f}")
+
     # ── Exits (always run, even on safety halt) ───────────────────────────
     _process_exits(account, exit_plans, prices, now, args, output_dir)
 
