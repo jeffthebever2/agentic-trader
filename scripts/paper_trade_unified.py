@@ -383,6 +383,32 @@ def _eod_flatten(
 # Entry: process unified brain output and open new positions
 # ---------------------------------------------------------------------------
 
+def _uc_to_candidate(uc: "UnifiedCandidate") -> "Candidate":
+    """Adapt UnifiedCandidate → Candidate so PaperAccount.buy() receives the right type."""
+    return Candidate(
+        ticker=uc.ticker,
+        signal_date=uc.signal_date,
+        score=uc.breakout_score,
+        entry=uc.entry,
+        target=uc.take_profit,
+        stop=uc.stop,
+        signal_close=uc.entry,
+        atr=uc.atr,
+        ml_probability=uc.confidence,
+        expected_return=uc.expected_return,
+        large_loss_probability=uc.large_loss_probability,
+        target_before_stop_probability=uc.target_before_stop_probability,
+        timeout_probability=uc.timeout_probability,
+        ml_pass=True,
+        rule_pass=True,
+        signals={},
+        ai_reason="",
+        alpha_score=uc.alpha_score,
+        alpha_tier=uc.tier,
+        breakout_score=uc.breakout_score,
+    )
+
+
 def _process_entries(
     account:     PaperAccount,
     brain_result: BrainResult,
@@ -398,6 +424,9 @@ def _process_entries(
         return
 
     for uc in brain_result.accepted:
+        if not hasattr(uc, "ticker"):
+            print(f"[unified] SKIP malformed candidate (expected UnifiedCandidate, got {type(uc).__name__}): {uc!r}")
+            continue
         ticker = uc.ticker
         if ticker in account.positions:
             continue  # already open
@@ -416,7 +445,8 @@ def _process_entries(
             f"[unified] BUY {ticker}: tier={uc.tier} alpha={uc.alpha_score:.3f} "
             f"shares={uc.shares} price={price:.2f} stop={uc.stop:.2f} tp={uc.take_profit:.2f}"
         )
-        account.buy(ticker, price, uc.shares, now)
+        cand = _uc_to_candidate(uc)
+        account.buy(cand, price, uc.shares, now)
 
         # Create exit plan
         plan = ShortHoldExitPlan.from_candidate(uc, config=config)
@@ -444,8 +474,11 @@ def scan_once(
     vix_level:         float,
     spy_regime:        str,
     regime_state:      Optional[MarketRegimeState],
-) -> None:
-    """One full scan: exits → safety check → brain → entries."""
+) -> bool:
+    """One full scan: exits → safety check → brain → entries.
+
+    Returns True if entries were halted by safety gate, False otherwise.
+    """
 
     # ── Safety monitor ────────────────────────────────────────────────────
     bundle_path = args.model_bundle
@@ -492,10 +525,10 @@ def scan_once(
     market_close = now.replace(hour=15, minute=55, second=0, microsecond=0)
     if not args.hold_overnight and now >= market_close:
         _eod_flatten(account, exit_plans, prices, now, output_dir)
-        return
+        return skip_entries
 
     if skip_entries:
-        return
+        return True
 
     # ── UnifiedBrain ──────────────────────────────────────────────────────
     brain = UnifiedBrain(config=config)
@@ -546,6 +579,7 @@ def scan_once(
 
     # Save exit plans after potential updates
     _save_exit_plans(exit_plans, output_dir / EXIT_PLANS_FILENAME)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +704,10 @@ def main() -> None:
     # ── Main loop ─────────────────────────────────────────────────────────
     interval_secs = args.scan_interval_minutes * 60
     first_run     = True
+    consecutive_halt_cycles = 0
+    _halt_alert_sent_at: Optional[dt.datetime] = None
+    _HALT_ALERT_CYCLES = 8   # ~2 hours at 15-min intervals before first alert
+    _HALT_ALERT_RESEND_HOURS = 24  # re-alert every 24h if still stuck
 
     while True:
         now = dt.datetime.now(tz=ET)
@@ -724,7 +762,7 @@ def main() -> None:
             )
 
             # ── Run scan cycle ────────────────────────────────────────────
-            scan_once(
+            _was_halted = scan_once(
                 account=account,
                 exit_plans=exit_plans,
                 args=args,
@@ -740,6 +778,35 @@ def main() -> None:
                 spy_regime=spy_regime,
                 regime_state=regime_state,
             )
+
+            # Track consecutive safety halts; alert after sustained lockout
+            if _was_halted:
+                consecutive_halt_cycles += 1
+            else:
+                consecutive_halt_cycles = 0
+                _halt_alert_sent_at = None
+
+            if consecutive_halt_cycles >= _HALT_ALERT_CYCLES:
+                _resend = (
+                    _halt_alert_sent_at is None
+                    or (now - _halt_alert_sent_at).total_seconds() >= _HALT_ALERT_RESEND_HOURS * 3600
+                )
+                if _resend:
+                    _msg = (
+                        f"[SAFETY_HALT] Unified brain locked for "
+                        f"{consecutive_halt_cycles} consecutive cycles "
+                        f"({consecutive_halt_cycles * interval_secs / 3600:.1f}h). "
+                        f"Account value ${account.cash:.0f}. Manual reset may be required."
+                    )
+                    print(f"[unified] ALERT: {_msg}")
+                    try:
+                        from scripts.paper_trade_today import fire_sms
+                        _sms_num = getattr(args, "sms_number", "") or ""
+                        if _sms_num:
+                            fire_sms(_sms_num, _msg)
+                    except Exception:
+                        pass
+                    _halt_alert_sent_at = now
 
         except KeyboardInterrupt:
             print("\n[unified] Interrupted by user.")

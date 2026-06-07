@@ -702,7 +702,11 @@ class UnifiedBrain:
             # shrink each successive entry (sqrt taper) instead of hitting a hard wall,
             # improving geometric growth by avoiding lumpy all-at-once exposure.
             heat_taper = math.sqrt(max(0.0, 1.0 - (deployed / max_heat))) if max_heat > 0 else 1.0
-            combined_factor = reg_factor * vix_factor * tier_mult * heat_taper
+            # Score-based size factor: breakout_score [0,100] → [0.5, 1.0].
+            # Audit 2026-06-07: all signals scored 100 (saturated), defeating rank ordering.
+            # Map score to size so a score-70 threshold hit gets 50% of a score-100 setup.
+            score_factor = min(1.0, max(0.5, uc.breakout_score / 100.0))
+            combined_factor = reg_factor * vix_factor * tier_mult * heat_taper * score_factor
             uc.size_factor = round(combined_factor, 4)
 
             # ATR-based risk sizing

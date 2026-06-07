@@ -421,6 +421,8 @@ class Position:
     regime_score_at_entry: float | None = None
     crash_risk_at_entry: float | None = None
     regime_confidence_at_entry: float | None = None
+    # Breakout scanner score at entry (for retrain feedback JSONL)
+    breakout_score: float = 0.0
 
     def market_value(self, price: float) -> float:
         return self.shares * price
@@ -481,6 +483,7 @@ class PaperAccount:
         journal_path = self.state_path.parent / "trades_journal.db"
         self._journal_conn = _init_journal_db(journal_path)
         self._drift_path = self.state_path.parent / "ml_drift.jsonl"
+        self._retrain_feedback_path = self.state_path.parent / "retrain_feedback.jsonl"
         self._drift_window: list[dict] = []
 
         if self.state_path.exists() and not reset:
@@ -510,6 +513,7 @@ class PaperAccount:
         self.day_trades_today = list(data.get("day_trades_today", []))
         self.day_trade_history = list(data.get("day_trade_history", []))
         self.pdt_flagged = bool(data.get("pdt_flagged", False))
+        self.peak_equity = float(data.get("peak_equity", 0.0))
 
     def save(self) -> None:
         payload = {
@@ -524,6 +528,7 @@ class PaperAccount:
             "settled_cash": round(self.settled_cash, 2),
             "unsettled_cash": round(self.unsettled_cash, 2),
             "settlement_queue": self.settlement_queue,
+            "peak_equity": round(getattr(self, "peak_equity", 0.0), 2),
             "gfv_count": self.gfv_count,
             "gfv_events": self.gfv_events[-50:],
             "gfv_restricted": self.gfv_restricted,
@@ -744,6 +749,7 @@ class PaperAccount:
             regime_score_at_entry=_pos_reg_score,
             crash_risk_at_entry=_pos_crash,
             regime_confidence_at_entry=_pos_conf,
+            breakout_score=float(getattr(candidate, "breakout_score", 0.0) or 0.0),
         )
         self.log_event(
             {
@@ -758,12 +764,13 @@ class PaperAccount:
                 "score": candidate.score,
                 "ml_probability": candidate.ml_probability,
                 "expected_return": candidate.expected_return,
-                # Cycle 44 GC-3: emit the alpha/ll/breakout fields the grader needs so
-                # by_tier / large-loss calibration are not graded on defaults.
+                # GC-1: emit all fields prediction_grader needs for by_tier/by_model_version
                 "large_loss_probability": getattr(candidate, "large_loss_probability", None),
                 "alpha_tier": getattr(candidate, "alpha_tier", None),
                 "alpha_score": getattr(candidate, "alpha_score", None),
                 "breakout_score": getattr(candidate, "breakout_score", None),
+                "model_version": getattr(candidate, "model_version", None) or getattr(self, "_model_version", "unknown"),
+                "regime_at_entry": _pos_regime,
                 "stop": candidate.stop,
                 "target": candidate.target,
                 "ai_reason": candidate.ai_reason or candidate.signals.get("ai_thesis") or candidate.signals.get("ai_reason") or "",
@@ -959,6 +966,28 @@ class PaperAccount:
             "freeriding": freeriding_triggered,
             "clv": clv_triggered,
         })
+
+        # Retrain ground-truth feedback (partial exit)
+        try:
+            _fb_record = {
+                "date": now.strftime("%Y-%m-%d"),
+                "ticker": ticker,
+                "entry": round(position.entry_price, 4),
+                "exit": round(price, 4),
+                "pnl_pct": round(pnl_pct, 4),
+                "ml_score": position.ml_probability,
+                "breakout_score": position.breakout_score,
+                "regime": position.regime_at_entry,
+                "outcome": 1 if pnl > 0 else 0,
+                "exit_reason": reason,
+                "partial": True,
+                "strategy": self.strategy,
+            }
+            with self._retrain_feedback_path.open("a", encoding="utf-8") as _rf:
+                _rf.write(json.dumps(_fb_record) + "\n")
+        except Exception:
+            pass
+
         self.save()
         return shares
 
@@ -1018,6 +1047,7 @@ class PaperAccount:
             self.unsettled_cash = min(self.cash, self.unsettled_cash + proceeds)
             self.settled_cash = max(0.0, self.cash - self.unsettled_cash)
 
+        _reason_upper = (reason or "").upper()
         trade = {
             "ticker": ticker,
             "shares": position.shares,
@@ -1039,6 +1069,10 @@ class PaperAccount:
             "gfv": gfv_triggered,
             "freeriding": freeriding_triggered,
             "clv": clv_triggered,
+            # Exit classification for prediction_grader
+            "stop_hit": "STOP" in _reason_upper,
+            "target_hit": any(k in _reason_upper for k in ("TARGET", "TAKE_PROFIT")),
+            "actual_large_loss": pnl_pct < -0.10,
             # Regime context at entry — enables per-regime win-rate analysis
             "regime_at_entry": position.regime_at_entry,
             "regime_score_at_entry": position.regime_score_at_entry,
@@ -1052,6 +1086,26 @@ class PaperAccount:
             "settled_cash": round(self.settled_cash, 2),
             "proceeds_settle_date": settle_date,
         })
+
+        # Retrain ground-truth feedback — one record per closed trade for next ML cycle
+        try:
+            _fb_record = {
+                "date": now.strftime("%Y-%m-%d"),
+                "ticker": ticker,
+                "entry": round(position.entry_price, 4),
+                "exit": round(price, 4),
+                "pnl_pct": round(pnl_pct, 4),
+                "ml_score": position.ml_probability,
+                "breakout_score": position.breakout_score,
+                "regime": position.regime_at_entry,
+                "outcome": 1 if pnl > 0 else 0,
+                "exit_reason": reason,
+                "strategy": self.strategy,
+            }
+            with self._retrain_feedback_path.open("a", encoding="utf-8") as _rf:
+                _rf.write(json.dumps(_fb_record) + "\n")
+        except Exception:
+            pass
         self.save()
 
         # SQLite journal
@@ -1241,7 +1295,7 @@ def parse_args() -> argparse.Namespace:
                         help="Max soft confirmed-pullback gate misses allowed when near-miss candidates are enabled.")
     parser.add_argument("--target-mult", type=float, default=1.2,
                         help="ATR target multiplier (default: 1.2, matches screener _ATR_TARGET)")
-    parser.add_argument("--stop-mult", type=float, default=1.0,
+    parser.add_argument("--stop-mult", type=float, default=1.5,
                         help="ATR stop multiplier. Cycle 34: raised from 0.7→1.0. "
                              "Evidence: 0.7 ATR too tight, 58%% stop-outs (WR≈40%%). "
                              "1.0 ATR: wider stop, fewer false exits, WR≈55%%, Kelly≈17%%.")
@@ -3345,6 +3399,7 @@ def scan_account_once(
     spy_regime: str = "unknown",
     vix_level: float | None = None,
     output_dir: Path | None = None,
+    price_snapshot_time: dt.datetime | None = None,
 ) -> dict[str, int]:
     bought = 0
     sold = 0
@@ -3926,6 +3981,30 @@ def scan_account_once(
             })
             continue
 
+        # ── Pre-trade quote freshness gate ────────────────────────────────────
+        _ptg_snapshot = price_snapshot_time if price_snapshot_time is not None else now
+        from tradingagents.portfolio.pretrade_gate import PreTradeGate
+        _ptg_max_age = int(getattr(args, "pretrade_max_quote_age_seconds", 3))
+        _ptg_result = PreTradeGate(max_quote_age_seconds=_ptg_max_age).check(
+            ticker=candidate.ticker,
+            price_snapshot_time=_ptg_snapshot,
+            price=price,
+            now=now,
+            quote_source="yfinance",
+            signal_price=candidate.signal_close,
+            stop=buy_candidate.stop,
+            target=buy_candidate.target,
+        )
+        if not _ptg_result.ok:
+            skipped += 1
+            account.log_event({
+                "type": "SKIP",
+                "ticker": candidate.ticker,
+                "reason": _ptg_result.reason,
+                **_ptg_result.detail,
+            })
+            continue
+
         account_value = account.total_value(prices)
 
         # ── Total heat cap: never deploy more than 80% of account ─────────────
@@ -4009,6 +4088,10 @@ def scan_account_once(
             "price": round(price, 4),
         })
 
+        # Apply alloc_weight from CandidateRanker — fixes audit DL-2
+        _alloc_w = float(_alloc_weights.get(candidate.ticker, 1.0) or 1.0)
+        _alloc_mult = max(0.5, min(2.0, _alloc_w))
+
         shares = PositionSizer().calculate_dynamic_size(
             account=account,
             price=price,
@@ -4018,7 +4101,7 @@ def scan_account_once(
             atr=candidate.atr,
             stop=_cand_stop,
             target=float(getattr(candidate, "target", 0.0) or 0.0),
-            regime_factor=combined_size_factor,
+            regime_factor=combined_size_factor * _alloc_mult,
             now=now,
             adv=adv,
             rolling_stats=rolling_stats,
@@ -4106,6 +4189,41 @@ def scan_account_once(
         if shares <= 0:
             skipped += 1
             continue
+
+        # ── Prediction ledger: record signal BEFORE outcome ───────────────────
+        try:
+            from tradingagents.portfolio.prediction_ledger import PredictionLedger
+            _ledger_dir = output_dir.parent if output_dir else Path("paper_accounts") / strategy
+            _ledger = PredictionLedger(_ledger_dir / "prediction_ledger.jsonl")
+            _ledger.log(
+                ticker=buy_candidate.ticker,
+                decision="BUY",
+                ml_probability=buy_candidate.ml_probability,
+                expected_return=float(getattr(buy_candidate, "expected_return", None) or 0.0),
+                large_loss_probability=float(getattr(buy_candidate, "large_loss_probability", None) or 0.0),
+                target_before_stop_probability=float(getattr(buy_candidate, "target_before_stop_probability", None) or 0.0),
+                timeout_probability=float(getattr(buy_candidate, "timeout_probability", None) or 0.0),
+                entry_price=price,
+                stop=float(getattr(buy_candidate, "stop", 0.0) or 0.0),
+                target=float(getattr(buy_candidate, "target", 0.0) or 0.0),
+                atr=float(getattr(buy_candidate, "atr", 0.0) or 0.0),
+                alpha_tier=str(getattr(buy_candidate, "alpha_tier", "") or ""),
+                alpha_score=float(getattr(buy_candidate, "alpha_score", None) or 0.0),
+                breakout_score=float(getattr(buy_candidate, "breakout_score", None) or 0.0),
+                regime=spy_regime,
+                model_version=str(getattr(buy_candidate, "model_version", "") or ""),
+                now=now,
+                strategy=strategy,
+                shares=shares,
+                quote_source="yfinance",
+                quote_time=_ptg_snapshot.isoformat(),
+                quote_age_seconds=_ptg_result.detail.get("quote_age_seconds"),
+                quote_price=price,
+                quote_spread_bps=_ptg_result.detail.get("spread_bps"),
+                pretrade_gate_reason=_ptg_result.reason,
+            )
+        except Exception:
+            pass
 
         try:
             account.buy(buy_candidate, price, shares, now, regime_state=_rs)
@@ -4236,6 +4354,19 @@ def scan_accounts_once(
         tickers_needed.extend(account.positions.keys())
 
     prices = latest_prices(tickers_needed, args.price_batch_size, dashboard=dashboard)
+    price_snapshot_time = dt.datetime.now()
+
+    # LPT-1: warn when open positions have no live price — exits will be skipped
+    _all_open = set()
+    for _acct in accounts.values():
+        _all_open.update(_acct.positions.keys())
+    _missing_prices = _all_open - set(prices.keys())
+    if _missing_prices:
+        _msg = f"PRICE_FEED_INCOMPLETE: no live price for {sorted(_missing_prices)} — exits skipped for these tickers"
+        if dashboard:
+            dashboard.event(_msg)
+        for _acct in accounts.values():
+            _acct.log_event({"type": "PRICE_FEED_INCOMPLETE", "missing_tickers": sorted(_missing_prices)})
 
     # Compute market breadth from already-downloaded daily data
     market_breadth: float | None = None
@@ -4335,6 +4466,7 @@ def scan_accounts_once(
             spy_regime=current_spy_regime,
             vix_level=_current_vix,
             output_dir=_strat_output_dir,
+            price_snapshot_time=price_snapshot_time,
         )
         summaries[strategy] = write_summary(
             account,
@@ -4448,10 +4580,14 @@ def strategy_statistics(
     prices: dict[str, float],
     candidates: list[Candidate],
     now: dt.datetime,
+    initial_capital: float | None = None,
 ) -> dict[str, Any]:
     trades = list(account.trades)
     final_value = account.total_value(prices)
-    day_pnl = final_value - account.starting_cash
+    # Use CLI-supplied initial_capital when available; account.starting_cash can be
+    # corrupted by state-file writes from a mid-execution crash.
+    true_start = initial_capital if initial_capital is not None else account.starting_cash
+    day_pnl = final_value - true_start
     wins = [trade for trade in trades if float(trade.get("pnl", 0.0)) > 0]
     losses = [trade for trade in trades if float(trade.get("pnl", 0.0)) <= 0]
     pnl_values = [float(trade.get("pnl", 0.0)) for trade in trades]
@@ -4462,11 +4598,11 @@ def strategy_statistics(
         "timestamp": now.isoformat(),
         "strategy": strategy,
         "strategy_label": strategy_label(strategy),
-        "starting_cash": round(account.starting_cash, 2),
+        "starting_cash": round(true_start, 2),
         "ending_cash": round(account.cash, 2),
         "final_value": round(final_value, 2),
         "day_pnl": round(day_pnl, 2),
-        "return_pct": round(day_pnl / account.starting_cash, 4) if account.starting_cash else 0.0,
+        "return_pct": round(day_pnl / true_start, 4) if true_start else 0.0,
         "realized_pnl": round(account.realized_pnl, 2),
         "open_positions": len(account.positions),
         "candidate_count": len(candidates),
@@ -4582,6 +4718,7 @@ def write_end_of_day_statistics(
     candidates_by_strategy: dict[str, list[Candidate]],
     now: dt.datetime,
     dashboard: TerminalDashboard | None = None,
+    initial_capital: float | None = None,
 ) -> dict[str, Any]:
     rows = [
         strategy_statistics(
@@ -4590,6 +4727,7 @@ def write_end_of_day_statistics(
             prices,
             candidates_by_strategy.get(strategy, []),
             now,
+            initial_capital=initial_capital,
         )
         for strategy, account in accounts.items()
     ]
@@ -4722,6 +4860,7 @@ def run() -> None:
             "ML gate disabled" if args.no_ml else f"Loading ML gate from {model_path}"
         )
         bundle = load_model_bundle(model_path, args.no_ml)
+        _model_ver = (bundle or {}).get("created_at", "unknown") if bundle else "unknown"
         new_bundle = None
         if new_model_path is not None:
             dashboard.event(f"Loading ML New challenger gate from {new_model_path}")
@@ -4948,6 +5087,8 @@ def run() -> None:
                     "state_path": str(account.state_path),
                 }
             )
+        for _acct in accounts.values():
+            _acct._model_version = _model_ver
         dashboard.event(f"Each paper account initialized with {dollars(args.starting_cash)}")
         dashboard.event(f"State/logs: {output_dir}")
         dashboard.update(
@@ -5027,6 +5168,7 @@ def run() -> None:
             candidates_by_strategy,
             dt.datetime.now(tz),
             dashboard=dashboard,
+            initial_capital=args.starting_cash,
         )
     finally:
         for account in accounts.values():

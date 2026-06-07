@@ -34,6 +34,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from tradingagents.screening.pattern_signals import detect_all_patterns, pattern_score_delta
+
 logger = logging.getLogger(__name__)
 
 # ── Breakout type labels ──────────────────────────────────────────────────────
@@ -155,7 +157,7 @@ class BreakoutScanner:
         min_adv_m: float = 5.0,
         max_atr_pct: float = 0.08,
         atr_target_mult: float = 1.5,
-        atr_stop_mult: float = 0.75,
+        atr_stop_mult: float = 1.5,
     ):
         self.threshold = threshold
         self.min_price = min_price
@@ -515,6 +517,24 @@ class BreakoutScanner:
         rr          = round((tp - entry) / max(entry - stop, 0.001), 2)
 
         passed = score >= self.threshold
+
+        # ── Chart pattern enrichment (best-effort, never blocks) ──────────────
+        pattern_info: dict = {}
+        try:
+            pattern_info = detect_all_patterns(closes, highs, lows, window=5)
+            pdelta = pattern_score_delta(pattern_info)
+            if pdelta != 0.0:
+                score = round(min(max(score + pdelta * 100, 0.0), 100.0), 1)
+                passed = score >= self.threshold
+            features["pattern_head_shoulder"] = pattern_info.get("head_shoulder", "")
+            features["pattern_double"] = pattern_info.get("double_pattern", "")
+            features["pattern_wedge"] = pattern_info.get("wedge", "")
+            features["pattern_triangle"] = pattern_info.get("triangle", "")
+            features["pattern_channel"] = pattern_info.get("channel", "")
+            features["pattern_pivot_structure"] = pattern_info.get("pivot_structure", "unknown")
+            features["pattern_score_delta"] = pdelta
+        except Exception:
+            pass
 
         return BreakoutResult(
             ticker=ticker,
