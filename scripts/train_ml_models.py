@@ -433,7 +433,10 @@ def train_models(args) -> dict:
     # Optional qlib feature columns — included only when present in the frame
     # (added by train_ml_from_stock_data.py --include-qlib-features).
     # Default OFF: absent columns produce no change to the feature set.
-    _QLIB_COLS = ["qlib_mom_252_21", "qlib_vol_ratio", "qlib_atr_z", "qlib_close_rank"]
+    _QLIB_COLS = [
+        "qlib_mom_252_21", "qlib_mom_63", "qlib_vol_ratio", "qlib_atr_z", "qlib_close_rank",
+        "qlib_cs_rank_mom_252_21", "qlib_cs_rank_mom_63", "qlib_cs_rank_vol_ratio", "qlib_cs_rank_close_rank",
+    ]
     _qlib_cols_used = [c for c in _QLIB_COLS if c in frame.columns]
     _qlib_cols_excluded = [c for c in _QLIB_COLS if c not in frame.columns]
     if _qlib_cols_used:

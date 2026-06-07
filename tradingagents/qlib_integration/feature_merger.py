@@ -8,14 +8,28 @@ trading-day lag).  This means the feature series computed from raw close prices
 is shifted forward by one day before being stored, so a model trained on date T
 has no access to T's closing price or forward returns.
 
-Feature names
--------------
+Feature names (per-ticker, time-series)
+----------------------------------------
   qlib_mom_252_21   Long-term momentum: 252d/21d ratio minus 1, skipping
                     most-recent 21 days (standard Fama-French momentum).
+                    Requires ~273 trading days history.
+  qlib_mom_63       Medium-term momentum: (close/close.shift(63)) - 1, skipping
+                    most-recent 21 days.  Requires ~85 days history.
   qlib_vol_ratio    5d realised vol / 63d realised vol.  < 1 → quiet period,
                     > 1 → vol expansion.
   qlib_atr_z        ATR(14) z-score vs 90-day trailing mean/std.
   qlib_close_rank   Where today's close ranks in the trailing 252-day range [0,1].
+
+Cross-sectional rank features (computed across all tickers at each scan_date)
+------------------------------------------------------------------------------
+  qlib_cs_rank_mom_252_21   Percentile rank of qlib_mom_252_21 within universe.
+  qlib_cs_rank_mom_63       Percentile rank of qlib_mom_63 within universe.
+  qlib_cs_rank_vol_ratio    Percentile rank of qlib_vol_ratio within universe.
+  qlib_cs_rank_close_rank   Percentile rank of qlib_close_rank within universe.
+
+Cross-sectional features are leakage-safe: they are computed after all per-ticker
+features are merged (which are already 1-day lagged), then ranked cross-sectionally
+within each scan_date bucket via groupby(scan_date).rank(pct=True).
 
 Usage
 -----
@@ -35,18 +49,35 @@ raises LeakageError if any feature at date T contains information from T or late
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 
-QLIB_FEATURE_COLS = [
+QLIB_FEATURE_COLS: List[str] = [
     "qlib_mom_252_21",
+    "qlib_mom_63",
     "qlib_vol_ratio",
     "qlib_atr_z",
     "qlib_close_rank",
 ]
+
+# Cross-sectional rank versions — computed in merge() after per-ticker features
+QLIB_CS_FEATURE_COLS: List[str] = [
+    "qlib_cs_rank_mom_252_21",
+    "qlib_cs_rank_mom_63",
+    "qlib_cs_rank_vol_ratio",
+    "qlib_cs_rank_close_rank",
+]
+
+# Map: CS col → base col it ranks
+_CS_BASE_MAP: Dict[str, str] = {
+    "qlib_cs_rank_mom_252_21": "qlib_mom_252_21",
+    "qlib_cs_rank_mom_63": "qlib_mom_63",
+    "qlib_cs_rank_vol_ratio": "qlib_vol_ratio",
+    "qlib_cs_rank_close_rank": "qlib_close_rank",
+}
 
 
 class LeakageError(RuntimeError):
@@ -73,8 +104,8 @@ def compute_qlib_features(
 
     Returns
     -------
-    pd.DataFrame indexed by date with columns: qlib_mom_252_21, qlib_vol_ratio,
-    qlib_atr_z, qlib_close_rank.  Rows with insufficient history are NaN.
+    pd.DataFrame indexed by date with columns in QLIB_FEATURE_COLS.
+    Rows with insufficient history are NaN.
     """
     if lag_days < 1:
         raise LeakageError(f"lag_days must be >= 1, got {lag_days}")
@@ -85,12 +116,16 @@ def compute_qlib_features(
 
     ret1d = c.pct_change(1)
 
-    # qlib_mom_252_21: close[t] / close[t-252] / (close[t-21] / close[t-252]) - 1
-    # = (close[t] / close[t-21]) - 1 ... only when 252 >= t.  Use the rolling
-    # ratio directly: mom = c/c.shift(252) - 1 minus c/c.shift(21) - 1.
+    # qlib_mom_252_21: Fama-French momentum — 252d return minus most-recent 21d.
+    # Requires ~273 trading days; NaN for shorter histories (handled by imputation).
     mom_long = c / c.shift(252) - 1.0
     mom_short = c / c.shift(21) - 1.0
     mom_252_21 = mom_long - mom_short
+
+    # qlib_mom_63: medium-term momentum — 63d return minus most-recent 21d.
+    # Requires only ~85 trading days; useful fallback for shorter histories.
+    mom_63_raw = c / c.shift(63) - 1.0
+    mom_63 = mom_63_raw - mom_short
 
     # qlib_vol_ratio: 5d realised vol / 63d realised vol
     vol5 = ret1d.rolling(5).std()
@@ -128,6 +163,7 @@ def compute_qlib_features(
     raw = pd.DataFrame(
         {
             "qlib_mom_252_21": mom_252_21,
+            "qlib_mom_63": mom_63,
             "qlib_vol_ratio": vol_ratio,
             "qlib_atr_z": atr_z,
             "qlib_close_rank": close_rank,
@@ -314,7 +350,6 @@ class QlibFeatureMerger:
             ticker_rows = result.loc[mask].copy()
 
             scan_dates = pd.to_datetime(ticker_rows[date_col]).dt.normalize()
-            aligned = scan_dates.map(lambda d: feats_idx.loc[d] if d in feats_idx.index else None)
 
             for col in QLIB_FEATURE_COLS:
                 values = scan_dates.map(
@@ -326,13 +361,26 @@ class QlibFeatureMerger:
 
             merged_count += 1
 
+        # Cross-sectional rank features: rank each base feature within each
+        # scan_date bucket across all tickers.  Uses already-lagged values so
+        # no additional leakage is introduced.
+        for cs_col, base_col in _CS_BASE_MAP.items():
+            if base_col in result.columns:
+                result[cs_col] = (
+                    result.groupby(date_col)[base_col]
+                    .rank(pct=True, na_option="keep")
+                )
+            else:
+                result[cs_col] = np.nan
+
         return result
 
     def summary(self, merged_df: pd.DataFrame) -> dict:
         """Return a dict describing qlib feature coverage for reporting."""
         total = len(merged_df)
         coverage: dict = {}
-        for col in QLIB_FEATURE_COLS:
+        all_cols = QLIB_FEATURE_COLS + QLIB_CS_FEATURE_COLS
+        for col in all_cols:
             if col in merged_df.columns:
                 n_valid = int(merged_df[col].notna().sum())
                 coverage[col] = {
@@ -344,7 +392,9 @@ class QlibFeatureMerger:
         return {
             "lag_days": self.lag_days,
             "features_added": QLIB_FEATURE_COLS,
+            "cs_features_added": QLIB_CS_FEATURE_COLS,
             "feature_count": len(QLIB_FEATURE_COLS),
+            "cs_feature_count": len(QLIB_CS_FEATURE_COLS),
             "total_rows": total,
             "coverage": coverage,
         }

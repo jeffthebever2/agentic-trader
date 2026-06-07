@@ -21,6 +21,7 @@ import pandas as pd
 import pytest
 
 from tradingagents.qlib_integration.feature_merger import (
+    QLIB_CS_FEATURE_COLS,
     QLIB_FEATURE_COLS,
     LeakageError,
     QlibFeatureMerger,
@@ -302,8 +303,9 @@ def test_merger_summary_reports_coverage():
     summary = merger.summary(result)
 
     assert summary["feature_count"] == len(QLIB_FEATURE_COLS)
+    assert summary["cs_feature_count"] == len(QLIB_CS_FEATURE_COLS)
     assert summary["total_rows"] == len(training_df)
-    for col in QLIB_FEATURE_COLS:
+    for col in QLIB_FEATURE_COLS + QLIB_CS_FEATURE_COLS:
         assert col in summary["coverage"]
 
 
@@ -331,6 +333,131 @@ def test_merger_does_not_modify_existing_columns():
 
 
 # ── IC / forward-return alignment ─────────────────────────────────────────────
+
+def test_qlib_mom_63_present_with_short_history():
+    """qlib_mom_63 should have non-NaN values after ~90 days; qlib_mom_252_21 still NaN."""
+    close = _make_prices(120)  # short history — not enough for 252d
+    feats = compute_qlib_features(close, lag_days=1)
+
+    assert "qlib_mom_63" in feats.columns, "qlib_mom_63 must be in QLIB_FEATURE_COLS"
+    assert "qlib_mom_252_21" in feats.columns
+
+    # After lag=1 and ~85 day warmup, mom_63 should have valid rows
+    mom63_valid = feats["qlib_mom_63"].dropna()
+    mom252_valid = feats["qlib_mom_252_21"].dropna()
+
+    assert len(mom63_valid) > 0, "qlib_mom_63 should have valid rows with 120 days of history"
+    assert len(mom252_valid) == 0, "qlib_mom_252_21 should be all NaN with only 120 days of history"
+
+
+def test_qlib_mom_63_leakage_safe():
+    """Perturbing close[T] must not change qlib_mom_63 at T."""
+    close = _make_prices(300)
+    feats = compute_qlib_features(close, lag_days=1)
+
+    valid = feats["qlib_mom_63"].dropna()
+    if len(valid) < 5:
+        pytest.skip("insufficient valid rows")
+    test_date = valid.index[5]
+
+    loc = close.index.get_loc(test_date)
+    close_perturbed = close.copy()
+    close_perturbed.iloc[loc] *= 100.0
+
+    feats_perturbed = compute_qlib_features(close_perturbed, lag_days=1)
+
+    orig = feats.loc[test_date, "qlib_mom_63"]
+    new = feats_perturbed.loc[test_date, "qlib_mom_63"]
+    if pd.isna(orig) and pd.isna(new):
+        return
+    assert math.isclose(float(orig), float(new), rel_tol=1e-6), (
+        f"LEAKAGE: qlib_mom_63 at {test_date} changed from {orig} to {new} "
+        f"when close[{test_date}] was perturbed × 100"
+    )
+
+
+def test_merger_adds_cs_rank_columns():
+    """After merge, all QLIB_CS_FEATURE_COLS must be present."""
+    df_price = _make_price_df(500)
+    price_cache = {"AAPL": df_price, "MSFT": df_price}
+
+    merger = QlibFeatureMerger(run_leakage_check=False)
+    scan_dates = df_price.index[260::20]
+    training_df = pd.DataFrame({
+        "ticker": ["AAPL"] * len(scan_dates) + ["MSFT"] * len(scan_dates),
+        "scan_date": list(scan_dates.strftime("%Y-%m-%d")) * 2,
+        "score": 50.0,
+    })
+
+    result = merger.merge(training_df, price_cache)
+
+    for col in QLIB_CS_FEATURE_COLS:
+        assert col in result.columns, f"Expected CS column {col}"
+        non_nan = result[col].dropna()
+        assert len(non_nan) > 0, f"{col} should have non-NaN values"
+        # CS rank (pct=True) must be in [0, 1]
+        assert non_nan.between(0.0, 1.0).all(), f"{col} values must be in [0, 1]"
+
+
+def test_cs_rank_single_ticker_is_1():
+    """With only one ticker per scan_date, CS rank must be 1.0 (sole member = rank 1)."""
+    df_price = _make_price_df(500)
+    price_cache = {"SOLO": df_price}
+
+    merger = QlibFeatureMerger(run_leakage_check=False)
+    scan_dates = df_price.index[270::30][:5]
+    training_df = pd.DataFrame({
+        "ticker": "SOLO",
+        "scan_date": scan_dates.strftime("%Y-%m-%d"),
+        "score": 50.0,
+    })
+
+    result = merger.merge(training_df, price_cache)
+
+    for col in QLIB_CS_FEATURE_COLS:
+        assert col in result.columns
+        base_col = col.replace("qlib_cs_rank_", "qlib_")
+        if base_col == "qlib_cs_rank_close_rank":
+            base_col = "qlib_close_rank"
+        # With pct=True and single member, rank should be 1.0 for non-NaN rows
+        for _, row in result.iterrows():
+            if pd.notna(row[col]):
+                assert math.isclose(float(row[col]), 1.0, rel_tol=1e-6), (
+                    f"{col} should be 1.0 for single ticker per date, got {row[col]}"
+                )
+
+
+def test_cs_rank_does_not_modify_base_cols():
+    """Merging CS ranks must not alter the per-ticker base qlib_* columns."""
+    df_price = _make_price_df(500)
+    price_cache = {"AAPL": df_price, "GOOG": df_price}
+
+    merger = QlibFeatureMerger(run_leakage_check=False)
+    scan_dates = df_price.index[270::20]
+    training_df = pd.DataFrame({
+        "ticker": ["AAPL"] * len(scan_dates) + ["GOOG"] * len(scan_dates),
+        "scan_date": list(scan_dates.strftime("%Y-%m-%d")) * 2,
+        "score": 50.0,
+    })
+
+    result = merger.merge(training_df, price_cache)
+
+    # Per-ticker base features should be identical for AAPL and GOOG (same price_cache)
+    aapl = result[result["ticker"] == "AAPL"].set_index("scan_date")
+    goog = result[result["ticker"] == "GOOG"].set_index("scan_date")
+    common = aapl.index.intersection(goog.index)
+
+    for col in QLIB_FEATURE_COLS:
+        if col not in result.columns:
+            continue
+        a = aapl.loc[common, col].dropna()
+        g = goog.loc[common, col].reindex(a.index).dropna()
+        both = a.index.intersection(g.index)
+        for d in both[:5]:
+            assert math.isclose(float(a[d]), float(g[d]), rel_tol=1e-6), (
+                f"Base col {col} should be same for same-price tickers at {d}"
+            )
+
 
 def test_ic_computation_uses_only_past_features():
     """IC computed on qlib features uses forward returns, but features themselves are lagged."""
