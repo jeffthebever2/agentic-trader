@@ -32,6 +32,7 @@ except Exception:
     pass
 
 import backtest
+from tradingagents.qlib_integration.feature_merger import LeakageError  # noqa: F401
 from backtest import (
     MIN_HISTORY,
     download_all,
@@ -589,6 +590,77 @@ def build_stock_dataset(args) -> Path:
 
     print(f"\nStock/date training dataset rows: {total_rows:,}")
     print(f"Dataset saved: {dataset_path.resolve()}")
+
+    # ── Optional: merge lagged qlib features ──────────────────────────────────
+    # Default OFF.  Enable with --include-qlib-features.  All qlib_* columns
+    # are 1-trading-day lagged (feature[T] uses prices through T-1 only).
+    # Production behavior is unchanged when this flag is absent.
+    if getattr(args, "include_qlib_features", False):
+        dataset_path = _merge_qlib_features(dataset_path, raw)
+
+    return dataset_path
+
+
+def _merge_qlib_features(dataset_path: Path, price_cache: dict) -> Path:
+    """Post-process the training CSV to add lagged qlib_* columns.
+
+    Safety guarantee: calls assert_no_leakage before merging any ticker's features.
+    Returns the same dataset_path (CSV is rewritten in place).
+    """
+    try:
+        from tradingagents.qlib_integration.feature_merger import (
+            QlibFeatureMerger,
+            QLIB_FEATURE_COLS,
+        )
+        import pandas as pd
+
+        print("\n[qlib] Merging lagged qlib features into training dataset...")
+
+        # Build a price_cache dict with {ticker: DataFrame[close, high, low]}
+        # raw is already keyed by ticker with full OHLCV DataFrames
+        pf_cache: dict = {}
+        for tkr, df in price_cache.items():
+            if df is None or df.empty:
+                continue
+            col_map = {c.lower(): c for c in df.columns}
+            try:
+                close_col = col_map.get("close", "Close")
+                high_col = col_map.get("high", "High")
+                low_col = col_map.get("low", "Low")
+                pf_cache[tkr] = pd.DataFrame({
+                    "close": df[close_col],
+                    "high": df[high_col],
+                    "low": df[low_col],
+                }).dropna()
+            except Exception:
+                pass
+
+        merger = QlibFeatureMerger(lag_days=1, run_leakage_check=True)
+
+        # Load the dataset in chunks to avoid OOM on large datasets
+        chunk_size = 200_000
+        out_parts = []
+        for chunk in pd.read_csv(dataset_path, chunksize=chunk_size, low_memory=False):
+            enriched = merger.merge(chunk, pf_cache)
+            out_parts.append(enriched)
+
+        full = pd.concat(out_parts, ignore_index=True)
+        full.to_csv(dataset_path, index=False)
+
+        summary = merger.summary(full)
+        print(f"[qlib] Features added: {summary['features_added']}")
+        for col, stats in summary.get("coverage", {}).items():
+            print(f"  {col:<28} coverage={stats['coverage_pct']:.1f}%  "
+                  f"mean={stats['mean']}")
+
+    except LeakageError as exc:
+        print(f"[qlib] LEAKAGE ERROR — aborting qlib feature merge: {exc}", file=sys.stderr)
+        raise
+    except ImportError as exc:
+        print(f"[qlib] WARNING: qlib feature merge skipped — {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[qlib] WARNING: qlib feature merge failed — {exc}", file=sys.stderr)
+
     return dataset_path
 
 
@@ -639,6 +711,17 @@ def parse_args():
         help="Include ETFs from the active listed-symbol filter. Default is stocks only.",
     )
     parser.add_argument("--min-history", type=int, default=220)
+    parser.add_argument(
+        "--include-qlib-features",
+        action="store_true",
+        default=False,
+        help=(
+            "Merge lagged qlib_* features (qlib_mom_252_21, qlib_vol_ratio, "
+            "qlib_atr_z, qlib_close_rank) into the training dataset. "
+            "DEFAULT OFF. All features are 1-trading-day lagged and leakage-checked "
+            "before merge. Production behavior is unchanged without this flag."
+        ),
+    )
     parser.add_argument("--write-chunk-size", type=int, default=50000)
     parser.add_argument("--score-mode", default="confirmed_pullback")
     parser.add_argument("--rule-threshold", type=float, default=100.0)
@@ -664,6 +747,44 @@ def parse_args():
     parser.add_argument("--executed-weight", type=float, default=1.0,
                         help="Sample weight for executed rows (default 1.0 for stock-universe; "
                              "use higher value only if this dataset has a tiny executed fraction)")
+    # FE-1: triple-barrier labeling mode
+    parser.add_argument(
+        "--label-mode",
+        choices=["fixed_horizon", "triple_barrier"],
+        default="fixed_horizon",
+        help="Label generation mode. 'fixed_horizon' (default) uses outcome column directly. "
+             "'triple_barrier' uses path-aware target/stop/timeout labels.",
+    )
+    # BT-2: slippage baked into training labels
+    parser.add_argument(
+        "--label-slippage-bps",
+        type=float,
+        default=0.0,
+        help="Basis points of round-trip slippage to deduct from simulated returns before "
+             "computing win/loss labels. E.g., 10 = 10bps = 0.10%%. Default 0 (no slippage adj).",
+    )
+    parser.add_argument(
+        "--cpcv", action="store_true", default=False,
+        help="Run Combinatorial Purged Cross-Validation in the downstream ML trainer.",
+    )
+    parser.add_argument("--cpcv-splits", type=int, default=5)
+    parser.add_argument("--cpcv-test-splits", type=int, default=2)
+    parser.add_argument(
+        "--compute-dsr", action="store_true", default=False,
+        help="Compute Deflated Sharpe Ratio in the downstream ML trainer.",
+    )
+    parser.add_argument("--dsr-n-trials", type=int, default=50)
+    parser.add_argument(
+        "--noise-feature-test", action="store_true", default=False,
+        help="Run the downstream noise-feature importance sanity check.",
+    )
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=["xgb", "lgbm", "catboost", "rf"],
+        default=["xgb", "rf"],
+        help="Model types to include in the downstream ML trainer ensemble.",
+    )
     return parser.parse_args()
 
 
@@ -690,6 +811,16 @@ def main():
         # calibrate=True with no CLI surface to disable.
         calibrate=getattr(args, "calibrate", True),
         executed_weight=getattr(args, "executed_weight", 1.0),  # SD-3: default 1.0 not 20.0 for stock-universe trainer
+        label_mode=getattr(args, "label_mode", "fixed_horizon"),
+        label_slippage_bps=getattr(args, "label_slippage_bps", 0.0),
+        cpcv=getattr(args, "cpcv", False),
+        cpcv_splits=getattr(args, "cpcv_splits", 5),
+        cpcv_test_splits=getattr(args, "cpcv_test_splits", 2),
+        compute_dsr=getattr(args, "compute_dsr", False),
+        dsr_n_trials=getattr(args, "dsr_n_trials", 50),
+        noise_feature_test=getattr(args, "noise_feature_test", False),
+        models=getattr(args, "models", ["xgb", "rf"]),
+        include_qlib_features=getattr(args, "include_qlib_features", False),
     )
     report = train_models(train_args)
     print("\nStock-universe ML training complete")

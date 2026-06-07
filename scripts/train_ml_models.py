@@ -430,6 +430,58 @@ def train_models(args) -> dict:
             args.output_dir = "ml_models/breakout"
         print(f"  Breakout mode: {len(numeric)} features, output → {args.output_dir}")
 
+    # Optional qlib feature columns — included only when present in the frame
+    # (added by train_ml_from_stock_data.py --include-qlib-features).
+    # Default OFF: absent columns produce no change to the feature set.
+    _QLIB_COLS = ["qlib_mom_252_21", "qlib_vol_ratio", "qlib_atr_z", "qlib_close_rank"]
+    _qlib_cols_used = [c for c in _QLIB_COLS if c in frame.columns]
+    _qlib_cols_excluded = [c for c in _QLIB_COLS if c not in frame.columns]
+    if _qlib_cols_used:
+        numeric = numeric + [c for c in _qlib_cols_used if c not in numeric]
+        print(f"  qlib features: {_qlib_cols_used} (included in numeric features)")
+    if _qlib_cols_excluded:
+        print(f"  qlib features: {_qlib_cols_excluded} not in frame — skipped "
+              f"(run with --include-qlib-features to add them)")
+
+    # FE-1: triple-barrier labeling override
+    _label_mode = getattr(args, "label_mode", "fixed_horizon")
+    if _label_mode == "triple_barrier":
+        _outcome_col = f"h{args.hold}_outcome"
+        if _outcome_col not in frame.columns:
+            _outcome_col = "h3_outcome" if "h3_outcome" in frame.columns else None
+        if _outcome_col is not None:
+            try:
+                from tradingagents.labeling.triple_barrier import compute_triple_barrier_labels
+                _timeout_mode = getattr(args, "triple_barrier_timeout", "zero")
+                _return_col = f"h{args.hold}_return" if f"h{args.hold}_return" in frame.columns else None
+                _tb_labels = compute_triple_barrier_labels(
+                    frame, outcome_col=_outcome_col, timeout_handling=_timeout_mode,
+                    passthrough_return_col=_return_col,
+                )
+                _before = len(frame)
+                if _timeout_mode == "drop":
+                    frame = frame[~_tb_labels.isna()].copy()
+                    _tb_labels = _tb_labels.dropna()
+                frame["_win_label"] = _tb_labels.fillna(0).astype(int).values
+                print(f"  Triple-barrier labels: {_timeout_mode} mode, "
+                      f"{len(frame):,} rows (was {_before:,}), "
+                      f"win rate={frame['_win_label'].mean():.1%}")
+            except Exception as _tb_err:
+                print(f"  Triple-barrier labeling failed ({_tb_err}), falling back to fixed_horizon")
+        else:
+            print(f"  Triple-barrier: outcome column not found, using fixed_horizon labels")
+
+    # BT-2: slippage deduction from labels
+    _slippage_bps = float(getattr(args, "label_slippage_bps", 0.0))
+    if _slippage_bps != 0.0:
+        _ret_col_slip = f"h{args.hold}_return"
+        if _ret_col_slip in frame.columns:
+            _slip_frac = _slippage_bps / 10000.0
+            _adj_return = pd.to_numeric(frame[_ret_col_slip], errors="coerce") - _slip_frac
+            frame["_win_label"] = (_adj_return > 0).astype(int)
+            print(f"  Slippage {_slippage_bps:.1f}bps applied to labels, "
+                  f"new win rate={frame['_win_label'].mean():.1%}")
+
     # Embargo >= forward-return horizon so boundary train rows can't leak
     # their hold-ahead label into the test year (honest bundle metrics).
     _embargo = int(np.ceil(int(args.hold) * 1.5)) + 1
@@ -550,6 +602,19 @@ def train_models(args) -> dict:
             "Remove them from ML_NUMERIC_FEATURES / ML_CATEGORICAL_FEATURES in backtest.py."
         )
 
+    # LP-2: explicit label-column exclusion check — these are targets, never features
+    _LABEL_COLS = {
+        "_win_label", "_target_label", "_timeout_label", "_breakout_win_label",
+        "_failed_breakout_label", "_big_move_label", "_large_loss_label",
+        "_missed_winner_label", "_mfe", "_mae",
+    }
+    _leaky_labels = _LABEL_COLS & set(feature_names)
+    if _leaky_labels:
+        raise SystemExit(
+            f"LABEL LEAKAGE: outcome-label columns in feature_names: {sorted(_leaky_labels)}\n"
+            "These columns are training targets and must not be fed as features."
+        )
+
     # Impute calibration set using same imputer (fit on train only)
     x_cal_imp = None
     if calibrate and len(cal_df) > 0:
@@ -647,6 +712,13 @@ def train_models(args) -> dict:
         "label_distribution": label_distribution,
         "models": {},
         "leakage_check": {"status": "clean", "leaky_features": []},
+        "qlib_features": {
+            "used": bool(_qlib_cols_used),
+            "columns": _qlib_cols_used,
+            "count": len(_qlib_cols_used),
+            "feature_count_before_qlib": int(len(feature_names)) - len(_qlib_cols_used),
+            "feature_count_after_qlib": int(len(feature_names)),
+        },
     }
 
     print(f"\n  Label distribution — train: {_ld_pos:,}+ / {_ld_neg:,}- "
@@ -898,6 +970,74 @@ def train_models(args) -> dict:
     else:
         report["walk_forward"] = {"status": "skipped", "reason": "executed_only mode or disabled"}
 
+    # ── WF-1: CPCV (optional) ─────────────────────────────────────────────────
+    if getattr(args, "cpcv", False):
+        try:
+            from tradingagents.validation.cpcv import combinatorial_purged_cv
+            from sklearn.ensemble import RandomForestClassifier as _RFC
+            def _cpcv_train(X, y):
+                return _RFC(n_estimators=50, max_depth=6, random_state=42).fit(X, y)
+            def _cpcv_test(model, X):
+                return model.predict_proba(X)[:, 1]
+            _n_splits = getattr(args, "cpcv_splits", 5)
+            _n_test_sp = getattr(args, "cpcv_test_splits", 2)
+            _cpcv_result = combinatorial_purged_cv(
+                frame[feature_names + ["_scan_dt", "_win_label"]].copy(),
+                n_splits=_n_splits, n_test_splits=_n_test_sp,
+                embargo_days=_embargo, train_fn=_cpcv_train, test_fn=_cpcv_test,
+                feature_cols=feature_names, label_col="_win_label", fast_mode=True,
+            )
+            report["cpcv"] = _cpcv_result
+            print(f"\n  CPCV: {_cpcv_result['n_paths']} paths | "
+                  f"mean_Sharpe={_cpcv_result.get('mean_sharpe', 'n/a'):.3f} "
+                  f"± {_cpcv_result.get('std_sharpe', 'n/a'):.3f}")
+        except Exception as _cpcv_err:
+            report["cpcv"] = {"error": str(_cpcv_err)}
+            print(f"  CPCV skipped: {_cpcv_err}")
+
+    # ── WF-2: Deflated Sharpe Ratio (optional) ────────────────────────────────
+    if getattr(args, "compute_dsr", False):
+        try:
+            from tradingagents.validation.deflated_sharpe import deflated_sharpe_ratio
+            _wf_roc = report.get("walk_forward", {}).get("roc_auc")
+            if _wf_roc is not None:
+                # Convert ROC to approximate Sharpe (2*ROC - 1 is a rough proxy)
+                _wf_sharpe = max(0.0, 2.0 * float(_wf_roc) - 1.0)
+                _n_trials = getattr(args, "dsr_n_trials", 50)
+                _T = report.get("walk_forward", {}).get("n_oos_rows", 252)
+                _dsr = deflated_sharpe_ratio(_wf_sharpe, n_trials=_n_trials, T=int(_T))
+                report["deflated_sharpe"] = {
+                    "wf_roc": _wf_roc, "approx_sharpe": _wf_sharpe,
+                    "n_trials": _n_trials, "T": _T, "dsr": _dsr,
+                    "likely_genuine": _dsr >= 0.5,
+                }
+                flag = "GENUINE" if _dsr >= 0.5 else "OVERFIT-RISK"
+                print(f"\n  DSR={_dsr:.4f} ({flag}) | SR≈{_wf_sharpe:.3f} | trials={_n_trials}")
+        except Exception as _dsr_err:
+            report["deflated_sharpe"] = {"error": str(_dsr_err)}
+
+    # ── FE-2: Noise feature test (optional) ───────────────────────────────────
+    if getattr(args, "noise_feature_test", False):
+        try:
+            from tradingagents.validation.noise_feature_test import noise_feature_test
+            from sklearn.ensemble import RandomForestClassifier as _RFC2
+            def _nft_train(X, y):
+                return _RFC2(n_estimators=50, max_depth=5, random_state=42).fit(X, y)
+            _X_nft = train_df[feature_names].copy()
+            _y_nft = train_df["_win_label"].astype(int)
+            _nft_result = noise_feature_test(_X_nft, _y_nft, model_fn=_nft_train, n_noise=10, seed=42)
+            report["noise_feature_test"] = _nft_result
+            _n_below = len(_nft_result.get("features_below_noise", []))
+            _n_above = len(_nft_result.get("features_above_noise", []))
+            print(f"\n  Noise test: {_n_above} above noise, {_n_below} below noise "
+                  f"(threshold={_nft_result.get('noise_threshold', 'n/a'):.6f})")
+            if _n_below > 0:
+                print(f"  ↳ Features below noise (review before next retrain): "
+                      f"{_nft_result['features_below_noise'][:5]}")
+        except Exception as _nft_err:
+            report["noise_feature_test"] = {"error": str(_nft_err)}
+            print(f"  Noise feature test skipped: {_nft_err}")
+
     # ── Feature PSI monitoring: train vs test distribution shift ──────────────
     try:
         sys.path.insert(0, str(ROOT))
@@ -931,6 +1071,14 @@ def train_models(args) -> dict:
         "model_bundle": str(model_path.resolve()),
         "training_report": str(report_path.resolve()),
     }
+    try:
+        from tradingagents.ml.training_report_schema import validate_training_report
+        _schema_warnings = validate_training_report(report, strict=False)
+        if _schema_warnings:
+            for _w in _schema_warnings:
+                print(f"  [SCHEMA WARNING] {_w}")
+    except Exception as _sv_err:
+        print(f"  [SCHEMA] validation skipped: {_sv_err}")
     report_path.write_text(json.dumps(report, indent=2, default=str))
     return report
 
@@ -989,6 +1137,55 @@ def parse_args():
         "--train-er", action="store_true", default=False,
         help="TM-10: train the expected-return regressor (R²≈0.012, gate disabled). "
              "Skipped by default — no predictive value and costs ~30%% of wall-time."
+    )
+    # FE-1: triple-barrier labeling
+    parser.add_argument(
+        "--label-mode",
+        choices=["fixed_horizon", "triple_barrier"],
+        default="fixed_horizon",
+        help="Label mode. 'fixed_horizon' uses outcome column directly. "
+             "'triple_barrier' uses path-aware target/stop/timeout labels.",
+    )
+    parser.add_argument(
+        "--triple-barrier-timeout",
+        choices=["zero", "drop", "pass_through"],
+        default="zero",
+        help="How to handle TIMED_OUT rows in triple-barrier mode. Default: zero (label=0).",
+    )
+    # BT-2: slippage in labels
+    parser.add_argument(
+        "--label-slippage-bps",
+        type=float,
+        default=0.0,
+        help="Round-trip slippage (basis points) to deduct from returns before "
+             "computing win/loss labels. E.g., 10 = 10bps = 0.10%%. Default 0.",
+    )
+    # WF-1: CPCV validation
+    parser.add_argument(
+        "--cpcv", action="store_true", default=False,
+        help="Run Combinatorial Purged Cross-Validation (CPCV) and include in report.",
+    )
+    parser.add_argument("--cpcv-splits", type=int, default=5)
+    parser.add_argument("--cpcv-test-splits", type=int, default=2)
+    # WF-2: Deflated Sharpe Ratio
+    parser.add_argument(
+        "--compute-dsr", action="store_true", default=False,
+        help="Compute Deflated Sharpe Ratio (DSR) adjusting walk-forward SR for trial count.",
+    )
+    parser.add_argument("--dsr-n-trials", type=int, default=50,
+                        help="Number of hyperparameter/model trials evaluated before this run.")
+    # FE-2: noise feature test
+    parser.add_argument(
+        "--noise-feature-test", action="store_true", default=False,
+        help="Inject Gaussian noise features and flag real features below noise threshold.",
+    )
+    # MS-1: GBDT ensemble member selection
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=["xgb", "lgbm", "catboost", "rf"],
+        default=["xgb", "rf"],
+        help="Model types to include in the soft-voting ensemble. Default: xgb rf.",
     )
     return parser.parse_args()
 

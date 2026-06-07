@@ -57,6 +57,16 @@ def _check_report_gates(report_path: Path, min_roc: float, max_brier: float, max
     except Exception as e:
         return False, f"Cannot parse training_report.json: {e}"
 
+    try:
+        from tradingagents.ml.training_report_schema import validate_training_report
+        _schema_warns = validate_training_report(report, strict=False)
+        if _schema_warns:
+            import logging as _lg
+            for _w in _schema_warns:
+                _lg.warning("[retrain_weekly] Schema warning: %s", _w)
+    except Exception:
+        pass
+
     # Prefer walk-forward ROC (2800+ OOS rows) over single-split ROC (201 rows).
     # Single-split ROC with 201 rows has SE≈0.035, making it unreliable as a gate.
     # Walk-forward ROC is more stable: SE≈0.009 over ~2000 OOS rows.
@@ -175,7 +185,33 @@ def main():
         help="Exponential temporal decay for training signal weights (default 0.02). "
              "λ=0.02: 24-month-old signals get 0.62× weight. 0=uniform (backward compat)."
     )
+    parser.add_argument(
+        "--cpcv", action="store_true", default=False,
+        help="Run Combinatorial Purged Cross-Validation in train_ml_models.py.",
+    )
+    parser.add_argument("--cpcv-splits", type=int, default=5)
+    parser.add_argument("--cpcv-test-splits", type=int, default=2)
+    parser.add_argument(
+        "--compute-dsr", action="store_true", default=False,
+        help="Compute Deflated Sharpe Ratio in train_ml_models.py.",
+    )
+    parser.add_argument("--dsr-n-trials", type=int, default=50)
+    parser.add_argument(
+        "--noise-feature-test", action="store_true", default=False,
+        help="Run train_ml_models.py noise-feature sanity check.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print commands only, don't run.")
+    parser.add_argument(
+        "--include-qlib-features",
+        action="store_true",
+        default=False,
+        help=(
+            "Pass --include-qlib-features to train_ml_models.py. Merges lagged qlib_* "
+            "features (qlib_mom_252_21, qlib_vol_ratio, qlib_atr_z, qlib_close_rank) "
+            "into the training dataset. DEFAULT OFF. Production behavior is unchanged "
+            "without this flag."
+        ),
+    )
     args = parser.parse_args()
 
     today = dt.date.today()
@@ -258,6 +294,18 @@ def main():
         # Focuses model on current market regime. λ=0.02: e^(-0.02×24)=0.62 for 24mo-old signals.
         "--run-walk-forward",                  # include walk-forward in report
     ]
+    if args.cpcv:
+        train_cmd.extend([
+            "--cpcv",
+            "--cpcv-splits", str(args.cpcv_splits),
+            "--cpcv-test-splits", str(args.cpcv_test_splits),
+        ])
+    if args.compute_dsr:
+        train_cmd.extend(["--compute-dsr", "--dsr-n-trials", str(args.dsr_n_trials)])
+    if args.noise_feature_test:
+        train_cmd.append("--noise-feature-test")
+    if getattr(args, "include_qlib_features", False):
+        train_cmd.append("--include-qlib-features")
 
     # ── 3. Leakage check ────────────────────────────────────────────────────
     leakage_cmd = [
