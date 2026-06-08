@@ -43,6 +43,7 @@ from web.api.live_verification import router as live_verification_router
 from web.api.cloudflare_ai import router as cloudflare_ai_router
 from web.api.admin import router as admin_router
 from web.api.system import router as system_router
+from web.api.portfolios import router as portfolios_router
 from web.auth import get_optional_user
 
 import datetime as dt
@@ -307,6 +308,18 @@ app.include_router(fidelity_router, prefix="/api")
 app.include_router(scanner_router, prefix="/api")
 app.include_router(market_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
+app.include_router(portfolios_router)  # routes self-declare /api/portfolios/...
+
+@app.get("/portfolios", response_class=None)
+async def portfolios_page():
+    """Portfolio competition dashboard."""
+    from fastapi.responses import FileResponse
+    _page = Path(__file__).parent / "static" / "portfolios.html"
+    if _page.exists():
+        return FileResponse(str(_page), media_type="text/html")
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse("<h1>portfolios.html not found</h1>", status_code=404)
+
 
 @app.get("/health")
 @app.get("/api/health")
@@ -439,6 +452,66 @@ async def deep_health_check():
     }
 
 
+async def _fidelity_keepalive_loop():
+    """Every 20 min, navigate to Fidelity summary for each live session to prevent cookie expiry."""
+    _log = logging.getLogger("fidelity_keepalive")
+    await asyncio.sleep(30)  # let server warm up
+    _INTERVAL = 20 * 60  # 20 minutes
+    while True:
+        try:
+            import hashlib as _hl
+            from pathlib import Path as _Path
+            from web.api.fidelity import (
+                _ensure_browser, _save_storage, _set_session_cache, SUMMARY_URL,
+            )
+            root = _Path(__file__).parent.parent
+
+            # Build digest → email map from user registry
+            digest_to_email: dict[str, str] = {}
+            try:
+                users_file = root / "tmp" / "users.json"
+                if users_file.exists():
+                    import json as _j
+                    for email in _j.loads(users_file.read_text()):
+                        e = email.strip().lower()
+                        if e:
+                            d = _hl.sha256(e.encode()).hexdigest()[:16]
+                            digest_to_email[d] = e
+            except Exception:
+                pass
+
+            for sf in root.glob(".fidelity_session_*.json"):
+                # filename: .fidelity_session_<16hex>.json
+                parts = sf.stem.rsplit("_", 1)
+                digest = parts[-1] if len(parts) == 2 else ""
+                email = digest_to_email.get(digest, digest)  # use email if known
+                try:
+                    ctx = await _ensure_browser(email)
+                    page = await ctx.new_page()
+                    try:
+                        await page.goto(SUMMARY_URL, wait_until="domcontentloaded", timeout=25_000)
+                        await asyncio.sleep(3)
+                        url = page.url.lower()
+                        connected = "login" not in url and "digital.fidelity" in url
+                        if connected:
+                            await _save_storage(email)
+                            _set_session_cache(email, True)
+                            _log.debug("Session kept alive: %s", email[:20])
+                        else:
+                            _set_session_cache(email, False)
+                            _log.info("Session expired (keepalive check): %s", email[:20])
+                    finally:
+                        try:
+                            await page.close()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    _log.warning("Keepalive error for %s: %s", email[:20], e)
+        except Exception as e:
+            logging.getLogger("fidelity_keepalive").warning("Keepalive loop error: %s", e)
+        await asyncio.sleep(_INTERVAL)
+
+
 async def _thematic_scan_loop():
     """Auto-trigger thematic scan every 4 hours if THEMATIC_AUTO_SCAN=true in env."""
     import json as _json
@@ -465,6 +538,7 @@ async def _thematic_scan_loop():
 async def _startup():
     asyncio.create_task(_paper_autostart_loop())
     asyncio.create_task(_thematic_scan_loop())
+    asyncio.create_task(_fidelity_keepalive_loop())
 
 
 _react_dist = Path(__file__).parent / "static" / "dist"

@@ -477,6 +477,10 @@ class PaperAccount:
         self.day_trade_history: list[dict] = []
         self.pdt_flagged: bool = False
 
+        # Per-portfolio parameter overrides (populated by create_portfolio_accounts).
+        # get_param(name, default) returns the override if set, else the global default.
+        self.portfolio_params: dict = {}
+
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -490,6 +494,10 @@ class PaperAccount:
             self._load()
         else:
             self.save()
+
+    def get_param(self, name: str, default):
+        """Return per-portfolio override for param, or fall back to global default."""
+        return self.portfolio_params.get(name, default)
 
     def _load(self) -> None:
         data = json.loads(self.state_path.read_text(encoding="utf-8") or "{}")
@@ -1222,6 +1230,74 @@ def create_strategy_accounts(
     return accounts
 
 
+def create_portfolio_accounts(
+    output_dir: Path,
+    starting_cash: float,
+    commission: float,
+    reset: bool,
+    webhook_url: str = "",
+    sms_number: str = "",
+    sms_on_fills: bool = False,
+) -> dict[str, "PaperAccount"]:
+    """Create one PaperAccount per registered portfolio with per-portfolio param overrides.
+
+    Returns a dict keyed by portfolio name. The account's portfolio_params dict stores
+    any non-default parameter overrides (stop_mult, target_mult, max_hold_days, etc.).
+    Persists/loads state from <output_dir>/<portfolio_name>/state.json.
+    """
+    from tradingagents.portfolios.registry import PORTFOLIO_REGISTRY
+
+    accounts: dict[str, "PaperAccount"] = {}
+    previous_dir = None if reset else latest_previous_account_dir(output_dir)
+
+    for portfolio in PORTFOLIO_REGISTRY:
+        port_dir = output_dir / portfolio.name
+        state_path = port_dir / "state.json"
+        previous_state_path = previous_dir / portfolio.name / "state.json" if previous_dir else None
+        should_carry_forward = bool(
+            previous_state_path and previous_state_path.exists() and not state_path.exists()
+        )
+        if should_carry_forward:
+            previous_state = json.loads(previous_state_path.read_text(encoding="utf-8") or "{}")
+            acct_starting_cash = float(previous_state.get("starting_cash", starting_cash))
+        else:
+            acct_starting_cash = starting_cash
+
+        acct = PaperAccount(
+            state_path=state_path,
+            event_log_path=port_dir / "events.jsonl",
+            starting_cash=acct_starting_cash,
+            commission=commission,
+            reset=reset,
+            strategy=portfolio.name,
+            webhook_url=webhook_url,
+            sms_number=sms_number,
+            sms_on_fills=sms_on_fills,
+        )
+        acct.portfolio_params = portfolio.as_param_dict()
+
+        if should_carry_forward and previous_state_path:
+            previous_state = json.loads(previous_state_path.read_text(encoding="utf-8") or "{}")
+            acct.cash = float(previous_state.get("cash", acct.cash))
+            acct.realized_pnl = float(previous_state.get("realized_pnl", acct.realized_pnl))
+            acct.positions = {
+                ticker: Position(**pos)
+                for ticker, pos in previous_state.get("positions", {}).items()
+            }
+            acct.trades = list(previous_state.get("trades", []))
+            acct.save()
+            acct.log_event({
+                "type": "CARRY_FORWARD",
+                "from": str(previous_state_path),
+                "cash": round(acct.cash, 2),
+                "positions": len(acct.positions),
+            })
+
+        accounts[portfolio.name] = acct
+
+    return accounts
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
@@ -1398,6 +1474,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-avg-volume", type=int, default=500_000, help="Skip tickers with 20-day avg volume below this. 0 = disabled.")
     parser.add_argument("--long-hold-days", type=int, default=20, help="Max hold period (calendar days) for the Long Hold strategy.")
     parser.add_argument("--timezone", default="America/New_York")
+    parser.add_argument("--legacy-strategies", action="store_true",
+                        help="Use the legacy 6-strategy accounts instead of the 15-portfolio registry.")
     return parser.parse_args()
 
 
@@ -3510,9 +3588,9 @@ def scan_account_once(
 
     regime_size_factor *= _hv_size_factor  # apply high-vol reduction (belt-and-suspenders)
 
-    partial_profit_pct = getattr(args, "partial_profit_pct", 0.5)
-    partial_profit_fraction = getattr(args, "partial_profit_fraction", 0.5)
-    trailing_atr_mult = getattr(args, "trailing_stop_atr_mult", 0.5)
+    partial_profit_pct = account.get_param("partial_profit_pct", getattr(args, "partial_profit_pct", 0.833))
+    partial_profit_fraction = account.get_param("partial_profit_fraction", getattr(args, "partial_profit_fraction", 0.5))
+    trailing_atr_mult = account.get_param("trailing_stop_atr_mult", getattr(args, "trailing_stop_atr_mult", 0.5))
     time_decay_scans = getattr(args, "time_decay_scans", 0)
     defensive_trim_buffer_pct = getattr(args, "defensive_trim_buffer_pct", 35.0)
     defensive_trim_fraction = getattr(args, "defensive_trim_fraction", 0.5)
@@ -3667,7 +3745,7 @@ def scan_account_once(
     # at ~10 trading days (14 calendar). Without this the live algo diverges from
     # the backtested config (the +profit edge depends on the timeout exit).
     if strategy != "long_hold":
-        cp_max_hold = getattr(args, "max_hold_days", 14)
+        cp_max_hold = account.get_param("max_hold_days", getattr(args, "max_hold_days", 14))
         # DL-8: apply high-VIX 2-day max-hold override if set.
         # Previously built, returned, captured into _hv_max_hold, then never read.
         if _hv_max_hold is not None:
@@ -3778,7 +3856,7 @@ def scan_account_once(
     # Combined sizing factor: drawdown × regime
     combined_size_factor = dd_size_factor * regime_size_factor
 
-    min_rr = getattr(args, "min_risk_reward", 0.8)
+    min_rr = account.get_param("min_risk_reward", getattr(args, "min_risk_reward", 0.8))
 
     # ── Re-rank candidates by composite ML score (CandidateRanker) ───────────
     from tradingagents.portfolio.candidate_ranker import CandidateRanker
@@ -3858,7 +3936,8 @@ def scan_account_once(
         _regime_max = None
         if _rs is not None and hasattr(_rs, "max_open_trades"):
             _regime_max = int(_rs.max_open_trades)
-        _eff_max = min(args.max_positions, _regime_max) if _regime_max is not None else args.max_positions
+        _port_max = account.get_param("max_positions", args.max_positions)
+        _eff_max = min(_port_max, _regime_max) if _regime_max is not None else _port_max
         if len(account.positions) >= _eff_max:
             break
         price = prices.get(candidate.ticker)
@@ -4092,11 +4171,20 @@ def scan_account_once(
         _alloc_w = float(_alloc_weights.get(candidate.ticker, 1.0) or 1.0)
         _alloc_mult = max(0.5, min(2.0, _alloc_w))
 
+        # Apply per-portfolio parameter overrides to a local args proxy so
+        # PositionSizer sees risk_per_trade_pct / position_cap_pct per account.
+        _sizing_args = args
+        _port_risk = account.portfolio_params.get("risk_per_trade_pct")
+        if _port_risk is not None:
+            import copy as _copy
+            _sizing_args = _copy.copy(args)
+            _sizing_args.risk_per_trade_pct = _port_risk
+
         shares = PositionSizer().calculate_dynamic_size(
             account=account,
             price=price,
             account_value=account_value,
-            args=args,
+            args=_sizing_args,
             ml_probability=candidate.ml_probability,
             atr=candidate.atr,
             stop=_cand_stop,
@@ -4452,10 +4540,21 @@ def scan_accounts_once(
     summaries: dict[str, Any] = {}
     for strategy, account in accounts.items():
         _strat_output_dir = output_dir.parent / strategy / output_dir.name
+        # Portfolio accounts store source_strategy in portfolio_params so they can
+        # pull candidates from a base bucket even though their name differs.
+        _src = account.portfolio_params.get("source_strategy", strategy)
+        _raw_candidates = candidates_by_strategy.get(_src, [])
+        # Apply secondary ML-threshold filter if set per portfolio
+        _ml_thresh = account.portfolio_params.get("ml_probability_threshold")
+        if _ml_thresh:
+            _raw_candidates = [
+                c for c in _raw_candidates
+                if (getattr(c, "ml_probability", None) or 0.0) >= _ml_thresh
+            ]
         cycle = scan_account_once(
             account,
             strategy,
-            candidates_by_strategy.get(strategy, []),
+            _raw_candidates,
             prices,
             args,
             now,
@@ -4471,7 +4570,7 @@ def scan_accounts_once(
         summaries[strategy] = write_summary(
             account,
             prices,
-            candidates_by_strategy.get(strategy, []),
+            _raw_candidates,
             cycle["bought"],
             cycle["sold"],
             cycle["skipped"],
@@ -4795,15 +4894,29 @@ def run() -> None:
         raise SystemExit(f"{trade_date} is not a regular weekday market day. Use --force for a smoke run.")
 
     output_dir = today_dir(Path(args.output_dir), trade_date)
-    accounts = create_strategy_accounts(
-        output_dir=output_dir,
-        starting_cash=args.starting_cash,
-        commission=args.commission,
-        reset=args.reset,
-        webhook_url=getattr(args, "webhook_url", ""),
-        sms_number=getattr(args, "sms_number", ""),
-        sms_on_fills=getattr(args, "sms_on_fills", False),
-    )
+    # Use portfolio registry (15 portfolios) when available; fall back to legacy
+    # 6-strategy accounts for backward compat if --legacy-strategies flag is set.
+    _use_legacy = getattr(args, "legacy_strategies", False)
+    if _use_legacy:
+        accounts = create_strategy_accounts(
+            output_dir=output_dir,
+            starting_cash=args.starting_cash,
+            commission=args.commission,
+            reset=args.reset,
+            webhook_url=getattr(args, "webhook_url", ""),
+            sms_number=getattr(args, "sms_number", ""),
+            sms_on_fills=getattr(args, "sms_on_fills", False),
+        )
+    else:
+        accounts = create_portfolio_accounts(
+            output_dir=output_dir,
+            starting_cash=args.starting_cash,
+            commission=args.commission,
+            reset=args.reset,
+            webhook_url=getattr(args, "webhook_url", ""),
+            sms_number=getattr(args, "sms_number", ""),
+            sms_on_fills=getattr(args, "sms_on_fills", False),
+        )
 
     # ── Ensure safety_config.json exists; apply CLI arg overrides ────────────
     from tradingagents.portfolio.production_safety import ensure_safety_config, DEFAULT_SAFETY_CONFIG

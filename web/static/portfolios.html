@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Portfolio Competition — Agentic Trader</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #21262d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --yellow: #d29922;
+    --radius: 8px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header .subtitle { color: var(--muted); font-size: 13px; }
+  header .pill { background: var(--border); border-radius: 12px; padding: 2px 10px; font-size: 12px; color: var(--muted); }
+  .refresh-btn { margin-left: auto; background: var(--accent); color: #fff; border: none; border-radius: var(--radius); padding: 6px 14px; font-size: 13px; cursor: pointer; }
+  .refresh-btn:hover { opacity: 0.85; }
+
+  .main { max-width: 1400px; margin: 0 auto; padding: 24px; }
+  .section-title { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; margin-top: 24px; }
+
+  /* Top-3 podium */
+  .podium { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 8px; }
+  .podium-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; position: relative; }
+  .podium-card.rank-1 { border-color: #ffd700; }
+  .podium-card.rank-2 { border-color: #aaa; }
+  .podium-card.rank-3 { border-color: #cd7f32; }
+  .rank-badge { position: absolute; top: 10px; right: 12px; font-size: 20px; }
+  .podium-emoji { font-size: 24px; margin-bottom: 4px; }
+  .podium-label { font-size: 15px; font-weight: 600; }
+  .podium-desc { color: var(--muted); font-size: 12px; margin-top: 2px; margin-bottom: 10px; }
+  .podium-return { font-size: 28px; font-weight: 700; }
+  .podium-return.pos { color: var(--green); }
+  .podium-return.neg { color: var(--red); }
+  .podium-stats { display: flex; gap: 16px; margin-top: 10px; }
+  .stat { }
+  .stat-val { font-weight: 600; font-size: 14px; }
+  .stat-label { font-size: 11px; color: var(--muted); }
+
+  /* Full leaderboard table */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th { background: var(--surface); color: var(--muted); font-size: 12px; font-weight: 500; text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; cursor: pointer; user-select: none; }
+  th:hover { color: var(--text); }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .rank-num { color: var(--muted); width: 30px; }
+  .portfolio-name { font-weight: 500; }
+  .portfolio-name .emoji { margin-right: 6px; }
+  .group-tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+  .group-signal  { background: rgba(88,166,255,0.15); color: #58a6ff; }
+  .group-risk    { background: rgba(248,81,73,0.15); color: #f85149; }
+  .group-hold    { background: rgba(63,185,80,0.15); color: #3fb950; }
+  .group-filter  { background: rgba(210,153,34,0.15); color: #d29922; }
+  .no-data       { color: var(--muted); font-style: italic; }
+  .return-pos    { color: var(--green); font-weight: 600; }
+  .return-neg    { color: var(--red); font-weight: 600; }
+  .return-zero   { color: var(--muted); }
+
+  /* Sparkline bars */
+  .sparkline { display: flex; align-items: flex-end; gap: 1px; height: 24px; }
+  .sparkline span { background: var(--accent); width: 3px; border-radius: 1px; min-height: 2px; }
+
+  /* Group filter tabs */
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tab { background: var(--border); border: none; border-radius: 16px; padding: 5px 14px; font-size: 13px; color: var(--muted); cursor: pointer; }
+  .tab:hover { color: var(--text); }
+  .tab.active { background: var(--accent); color: #fff; }
+
+  /* Status badges */
+  .badge-active { color: var(--green); }
+  .badge-inactive { color: var(--muted); }
+
+  /* Refresh indicator */
+  #last-updated { font-size: 12px; color: var(--muted); margin-left: 12px; }
+  .loading { color: var(--muted); padding: 40px; text-align: center; }
+  .error-msg { color: var(--red); padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <span style="font-size:24px">🏆</span>
+  <div>
+    <h1>Portfolio Competition</h1>
+    <div class="subtitle">15 strategies running in parallel — ranked by total return</div>
+  </div>
+  <span class="pill" id="portfolio-count">— portfolios</span>
+  <span id="last-updated"></span>
+  <button class="refresh-btn" onclick="loadLeaderboard()">↻ Refresh</button>
+</header>
+
+<div class="main">
+  <div id="podium-section">
+    <div class="section-title">🥇 Top 3 — Current Leaders</div>
+    <div class="podium" id="podium-cards">
+      <div class="loading">Loading...</div>
+    </div>
+  </div>
+
+  <div class="section-title">📊 Full Leaderboard</div>
+  <div class="tabs" id="group-tabs">
+    <button class="tab active" data-group="all" onclick="filterGroup('all', this)">All</button>
+    <button class="tab" data-group="signal" onclick="filterGroup('signal', this)">📡 Signal</button>
+    <button class="tab" data-group="risk" onclick="filterGroup('risk', this)">🛡️ Risk</button>
+    <button class="tab" data-group="hold" onclick="filterGroup('hold', this)">⏳ Hold</button>
+    <button class="tab" data-group="filter" onclick="filterGroup('filter', this)">🔬 Filter</button>
+  </div>
+
+  <div class="table-wrap">
+    <table id="leaderboard-table">
+      <thead>
+        <tr>
+          <th onclick="sortBy('rank')">#</th>
+          <th onclick="sortBy('label')">Portfolio</th>
+          <th onclick="sortBy('group')">Group</th>
+          <th onclick="sortBy('total_return_pct')">Total Return</th>
+          <th onclick="sortBy('win_rate')">Win Rate</th>
+          <th onclick="sortBy('trade_count')">Trades</th>
+          <th onclick="sortBy('open_positions')">Open</th>
+          <th onclick="sortBy('equity')">Equity</th>
+          <th onclick="sortBy('profit_factor')">Profit Factor</th>
+          <th onclick="sortBy('sharpe')">Sharpe</th>
+          <th onclick="sortBy('max_drawdown')">Max DD</th>
+          <th>Trend</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="table-body">
+        <tr><td colspan="13" class="loading">Loading portfolio data...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let _allPortfolios = [];
+let _activeGroup = 'all';
+let _sortCol = 'rank';
+let _sortAsc = true;
+
+async function loadLeaderboard() {
+  const badge = document.getElementById('portfolio-count');
+  badge.textContent = '…';
+  try {
+    const res = await fetch('/api/portfolios/leaderboard');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    _allPortfolios = data.portfolios || [];
+    badge.textContent = `${_allPortfolios.length} portfolios`;
+    document.getElementById('last-updated').textContent =
+      'Updated ' + new Date().toLocaleTimeString();
+    renderPodium(_allPortfolios.filter(p => p.status === 'active').slice(0, 3));
+    renderTable();
+  } catch (e) {
+    document.getElementById('table-body').innerHTML =
+      `<tr><td colspan="13" class="error-msg">Failed to load: ${e.message}</td></tr>`;
+    badge.textContent = 'error';
+  }
+}
+
+function renderPodium(top3) {
+  const medals = ['🥇', '🥈', '🥉'];
+  const rankClass = ['rank-1', 'rank-2', 'rank-3'];
+  const container = document.getElementById('podium-cards');
+  if (!top3.length) {
+    container.innerHTML = '<div style="color:var(--muted);padding:20px">No active portfolio data yet. Start the paper trader to begin the competition.</div>';
+    return;
+  }
+  container.innerHTML = top3.map((p, i) => `
+    <div class="podium-card ${rankClass[i] || ''}">
+      <div class="rank-badge">${medals[i] || ''}</div>
+      <div class="podium-emoji">${p.emoji || '📊'}</div>
+      <div class="podium-label">${p.label}</div>
+      <div class="podium-desc">${p.description.slice(0, 60)}…</div>
+      <div class="podium-return ${p.total_return_pct >= 0 ? 'pos' : 'neg'}">
+        ${p.total_return_pct >= 0 ? '+' : ''}${p.total_return_pct?.toFixed(2) ?? '—'}%
+      </div>
+      <div class="podium-stats">
+        <div class="stat">
+          <div class="stat-val">${p.win_rate != null ? (p.win_rate * 100).toFixed(1) + '%' : '—'}</div>
+          <div class="stat-label">Win Rate</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val">${p.trade_count ?? 0}</div>
+          <div class="stat-label">Trades</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val">${p.profit_factor != null ? p.profit_factor.toFixed(2) : '—'}</div>
+          <div class="stat-label">Profit Factor</div>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function filterGroup(group, btn) {
+  _activeGroup = group;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  renderTable();
+}
+
+function sortBy(col) {
+  if (_sortCol === col) _sortAsc = !_sortAsc;
+  else { _sortCol = col; _sortAsc = col === 'rank'; }
+  renderTable();
+}
+
+function renderTable() {
+  let rows = _activeGroup === 'all'
+    ? [..._allPortfolios]
+    : _allPortfolios.filter(p => p.group === _activeGroup);
+
+  rows.sort((a, b) => {
+    const av = a[_sortCol] ?? (_sortAsc ? Infinity : -Infinity);
+    const bv = b[_sortCol] ?? (_sortAsc ? Infinity : -Infinity);
+    return _sortAsc ? (av > bv ? 1 : -1) : (av < bv ? 1 : -1);
+  });
+
+  const tbody = document.getElementById('table-body');
+  tbody.innerHTML = rows.map(p => {
+    const ret = p.total_return_pct;
+    const retClass = p.status === 'no_data' ? 'return-zero' : ret > 0 ? 'return-pos' : ret < 0 ? 'return-neg' : 'return-zero';
+    const retStr = p.status === 'no_data' ? '<span class="no-data">no data</span>'
+      : `<span class="${retClass}">${ret >= 0 ? '+' : ''}${ret?.toFixed(2) ?? '—'}%</span>`;
+
+    const wr = p.win_rate != null ? (p.win_rate * 100).toFixed(1) + '%' : '—';
+    const pf = p.profit_factor != null ? p.profit_factor.toFixed(2) : '—';
+    const sh = p.sharpe != null ? p.sharpe.toFixed(2) : '—';
+    const dd = p.max_drawdown > 0 ? `<span style="color:var(--red)">${(p.max_drawdown * 100).toFixed(1)}%</span>` : '—';
+    const equity = p.equity > 0 ? '$' + p.equity.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : '—';
+    const statusIcon = p.status === 'active' ? '<span class="badge-active">●</span>' : '<span class="badge-inactive">○</span>';
+    const groupClass = 'group-' + p.group;
+
+    const curve = p.equity_curve || [];
+    const sparkline = curve.length > 1 ? buildSparkline(curve) : '<span style="color:var(--muted)">—</span>';
+
+    return `<tr>
+      <td class="rank-num">${p.rank ?? '—'}</td>
+      <td class="portfolio-name"><span class="emoji">${p.emoji || '📊'}</span>${p.label}</td>
+      <td><span class="group-tag ${groupClass}">${p.group}</span></td>
+      <td>${retStr}</td>
+      <td>${wr}</td>
+      <td>${p.trade_count ?? 0}</td>
+      <td>${p.open_positions ?? 0}</td>
+      <td>${equity}</td>
+      <td>${pf}</td>
+      <td>${sh}</td>
+      <td>${dd}</td>
+      <td>${sparkline}</td>
+      <td>${statusIcon}</td>
+    </tr>`;
+  }).join('');
+
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="13" class="loading">No portfolios in this group.</td></tr>';
+  }
+}
+
+function buildSparkline(curve) {
+  if (curve.length < 2) return '';
+  const min = Math.min(...curve);
+  const max = Math.max(...curve);
+  const range = max - min || 1;
+  const pts = curve.slice(-20);
+  return '<div class="sparkline">' +
+    pts.map(v => {
+      const h = Math.max(2, Math.round(((v - min) / range) * 22));
+      const color = v >= pts[0] ? '#3fb950' : '#f85149';
+      return `<span style="height:${h}px;background:${color}"></span>`;
+    }).join('') + '</div>';
+}
+
+// Auto-refresh every 60 seconds
+loadLeaderboard();
+setInterval(loadLeaderboard, 60000);
+</script>
+</body>
+</html>
