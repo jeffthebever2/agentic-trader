@@ -2162,6 +2162,8 @@ def _ml_prepare_frame(rows_df: pd.DataFrame, hold: int) -> tuple:
             "h3_return", "h5_return", "h5_outcome", "h10_return",
             "rejection_reasons"] + numeric + categorical
     keep = list(dict.fromkeys(c for c in keep if c in df.columns))
+    # Preserve any pre-computed enrichment columns (e.g. qlib_*) added before this call
+    keep += [c for c in df.columns if c.startswith("qlib_") and c not in keep]
     df = df[keep].dropna(subset=["_scan_dt", "_return"])
     return df, numeric, categorical
 

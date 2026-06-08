@@ -134,6 +134,9 @@ def _merge_qlib_features_into_csv(csv_path: Path, batch_size: int = 50) -> dict:
     this stage rebuilds the required price cache for the exact ticker universe
     and date span before calling QlibFeatureMerger.
     """
+    import sys
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
     import pandas as pd
     from backtest import download_all
     from tradingagents.qlib_integration.feature_merger import (
