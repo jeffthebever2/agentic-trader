@@ -388,7 +388,7 @@ class ModelHealthChecker:
                 cal_dt = dt.datetime.fromisoformat(str(cal_date)[:19])
                 cal_age = (dt.datetime.now() - cal_dt).days
                 result["calibration_age_days"] = cal_age
-                cal_stale_days = int(self.cfg.get("max_calibration_age_days", 25)) if hasattr(self, "cfg") else 25
+                cal_stale_days = 25
                 if cal_age > cal_stale_days:
                     result["warn_reasons"].append(
                         f"WARN_calibration_stale: {cal_age}d > {cal_stale_days}d since last calibration"
@@ -886,7 +886,7 @@ class ProductionSafetyMonitor:
                     )
                     if _drift_report.has_drift:
                         # PSI failures with many drifted features = halt (distribution shift)
-                        _psi_critical = _drift_report.psi_fail_count >= 5
+                        _psi_critical = (_drift_report.psi_fail_count or 0) >= 5
                         for alert in _drift_report.alerts:
                             if _psi_critical and "PSI" in alert:
                                 all_halt.append(f"psi_drift_halt: {alert}")

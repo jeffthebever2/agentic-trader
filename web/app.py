@@ -386,15 +386,26 @@ async def deep_health_check():
                 _hc = ModelHealthChecker()
                 _report_path = mp.parent / "training_report.json"
                 _drift_path = mp.parent / "drift_log.json"
+                # validation_summary_path expects {roc_auc, brier_score} at top level —
+                # training_report.json has these nested under walk_forward/models; pass None
+                # to avoid silent None reads. ROC is surfaced separately via /api/portfolios/model-health.
                 _hc_result = _hc.check(
                     bundle=_bundle,
-                    validation_summary_path=_report_path if _report_path.exists() else None,
+                    validation_summary_path=None,
                     drift_log_path=_drift_path if _drift_path.exists() else None,
                 )
+                # Supplement with WF ROC from training_report.json (correct location)
+                _wf_roc = None
+                if _report_path.exists():
+                    try:
+                        import json as _json
+                        _tr = _json.loads(_report_path.read_text())
+                        _wf_roc = (_tr.get("walk_forward") or {}).get("roc_auc")
+                    except Exception:
+                        pass
                 ml_detail.update({
                     "age_days": _hc_result.get("age_days"),
-                    "roc_auc": _hc_result.get("roc_auc"),
-                    "brier": _hc_result.get("brier"),
+                    "wf_roc": _wf_roc,
                     "n_features": _hc_result.get("n_features"),
                     "halt_reasons": _hc_result.get("halt_reasons", []),
                     "warn_reasons": _hc_result.get("warn_reasons", []),

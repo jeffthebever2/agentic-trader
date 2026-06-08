@@ -10,7 +10,8 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from web.auth import get_current_user
 
 router = APIRouter()
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
@@ -102,7 +103,7 @@ def _load_status() -> dict:
 
 
 @router.get("/ml/status")
-async def get_ml_status():
+async def get_ml_status(_user: dict = Depends(get_current_user)):
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(_executor, _load_status)
     return result
@@ -112,7 +113,7 @@ RETRAIN_HISTORY_PATH = ROOT / "ml_models" / "retrain_history.jsonl"
 
 
 @router.get("/ml/readiness")
-async def get_ml_readiness():
+async def get_ml_readiness(_user: dict = Depends(get_current_user)):
     """Run model_readiness_report.py and return structured verdict (READY / DEGRADED / NOT_READY)."""
     import datetime as dt
     cache_path = ROOT / "tmp" / "model_readiness_cache.json"
@@ -143,7 +144,7 @@ async def get_ml_readiness():
 
 
 @router.get("/ml/history")
-async def get_ml_history():
+async def get_ml_history(_user: dict = Depends(get_current_user)):
     """Return retrain history log as a list of records."""
     if not RETRAIN_HISTORY_PATH.exists():
         return []
@@ -186,6 +187,12 @@ async def ws_ml_train(websocket: WebSocket):
 
     if not input_file:
         await websocket.send_json({"type": "error", "message": "input_file required"})
+        await websocket.close()
+        return
+
+    # Reject path traversal attempts
+    if ".." in input_file or input_file.startswith("/"):
+        await websocket.send_json({"type": "error", "message": "input_file must be a relative path inside the project"})
         await websocket.close()
         return
 

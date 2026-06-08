@@ -15,7 +15,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from web.auth import get_current_user
 
 router = APIRouter()
 
@@ -71,6 +72,7 @@ async def portfolio_leaderboard(
     sort_dir: Literal["asc", "desc"] = Query(default="asc", description="Sort direction"),
     group: Optional[str] = Query(default=None, description="Filter to group: signal|risk|hold|filter"),
     limit: int = Query(default=0, ge=0, description="Max results (0 = all)"),
+    _user: dict = Depends(get_current_user),
 ):
     """Return ranked portfolio stats with optional filtering and sorting."""
     if sort_by not in _SORT_FIELDS:
@@ -94,10 +96,11 @@ async def portfolio_leaderboard(
 
     if sort_by != "rank":
         reverse = sort_dir == "desc"
-        portfolios = sorted(
-            portfolios,
-            key=lambda p: (p.get(sort_by) is None, -(p.get(sort_by) or 0) if reverse else (p.get(sort_by) or 0)),
-        )
+        def _sort_key(p: dict):
+            raw = p.get(sort_by)
+            val = float(raw) if raw is not None else 0.0
+            return (raw is None, -val if reverse else val)
+        portfolios = sorted(portfolios, key=_sort_key)
 
     if limit > 0:
         portfolios = portfolios[:limit]
@@ -106,7 +109,7 @@ async def portfolio_leaderboard(
 
 
 @router.get("/api/portfolios/leaderboard/groups")
-async def portfolio_leaderboard_groups():
+async def portfolio_leaderboard_groups(_user: dict = Depends(get_current_user)):
     """Return per-group aggregated stats: best portfolio, avg return, avg win rate."""
     base_dir = _base_dir()
     try:
@@ -119,7 +122,7 @@ async def portfolio_leaderboard_groups():
         members = [p for p in summary["portfolios"] if p["group"] == g]
         active = [p for p in members if p["status"] == "active"]
         if active:
-            best = max(active, key=lambda p: p["total_return_pct"])
+            best = max(active, key=lambda p: p["total_return_pct"] if p["total_return_pct"] is not None else float("-inf"))
             returns = [p["total_return_pct"] for p in active]
             win_rates = [p["win_rate"] for p in active if p["win_rate"] is not None]
             group_stats[g] = {
@@ -139,7 +142,7 @@ async def portfolio_leaderboard_groups():
 
 
 @router.get("/api/portfolios/model-health")
-async def portfolio_model_health():
+async def portfolio_model_health(_user: dict = Depends(get_current_user)):
     """Return deployed ML model health: WF ROC, Brier, staleness, Qlib flag."""
     from pathlib import Path as _Path
     import datetime as dt
@@ -225,7 +228,7 @@ async def portfolio_model_health():
 
 
 @router.get("/api/portfolios/groups")
-async def portfolio_groups():
+async def portfolio_groups(_user: dict = Depends(get_current_user)):
     """Return portfolio definitions organized by group."""
     from tradingagents.portfolios.registry import PORTFOLIO_REGISTRY
 
@@ -244,7 +247,7 @@ async def portfolio_groups():
 
 
 @router.get("/api/portfolios/{name}/config")
-async def portfolio_config(name: str):
+async def portfolio_config(name: str, _user: dict = Depends(get_current_user)):
     """Return the full configuration for a portfolio (stop/target/sizing/filters)."""
     from tradingagents.portfolios.registry import get_portfolio
     from dataclasses import asdict
@@ -262,7 +265,7 @@ async def portfolio_config(name: str):
 
 
 @router.get("/api/portfolios/{name}")
-async def portfolio_detail(name: str):
+async def portfolio_detail(name: str, _user: dict = Depends(get_current_user)):
     """Return full stats + config for a single portfolio."""
     from tradingagents.portfolios.comparison import compute_portfolio_stats
     from tradingagents.portfolios.registry import get_portfolio
