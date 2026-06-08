@@ -18,6 +18,10 @@ from pydantic import BaseModel
 from web.auth import require_admin
 
 router = APIRouter()
+
+# Concurrency guard — prevent DoS via multiple simultaneous expensive backtests
+_MAX_CONCURRENT_BACKTESTS = 2
+_active_backtests = 0
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 
@@ -167,6 +171,7 @@ async def screen_tickers(req: ScreenRequest, admin: dict = Depends(require_admin
 @router.websocket("/ws/backtest")
 async def ws_backtest(websocket: WebSocket):
     """Run LLM-powered backtest: analysis for each ticker/date combo."""
+    global _active_backtests
     await websocket.accept()
     # ── Admin auth gate (Cloudflare Access JWT verified) ──
     from web.auth import ws_require_admin
@@ -174,6 +179,12 @@ async def ws_backtest(websocket: WebSocket):
     if _ws_user is None:
         return
 
+    if _active_backtests >= _MAX_CONCURRENT_BACKTESTS:
+        await websocket.send_json({"type": "error", "message": f"Server busy: {_active_backtests} backtest(s) already running. Try again in a moment."})
+        await websocket.close()
+        return
+
+    _active_backtests += 1
     queue: asyncio.Queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()
 
@@ -181,6 +192,7 @@ async def ws_backtest(websocket: WebSocket):
         config_data = await websocket.receive_json()
         req = BacktestRequest(**config_data)
     except Exception as e:
+        _active_backtests -= 1
         await websocket.send_json({"type": "error", "message": str(e)})
         await websocket.close()
         return
@@ -270,9 +282,10 @@ async def ws_backtest(websocket: WebSocket):
                 main_loop,
             )
         except Exception as e:
-            import traceback
+            import traceback, logging
+            logging.getLogger("backtest.ws").error("Backtest run error: %s", traceback.format_exc())
             asyncio.run_coroutine_threadsafe(
-                queue.put({"type": "error", "message": str(e), "traceback": traceback.format_exc()}),
+                queue.put({"type": "error", "message": "Backtest failed — check server logs"}),
                 main_loop,
             )
         finally:
@@ -292,6 +305,7 @@ async def ws_backtest(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
+        _active_backtests -= 1
         try:
             await future
         except Exception:
@@ -324,6 +338,7 @@ class AlgoBacktestRequest(BaseModel):
 @router.websocket("/ws/algo-backtest")
 async def ws_algo_backtest(websocket: WebSocket):
     """Run the technical backtest engine (backtest.py) via WebSocket with live stdout streaming."""
+    global _active_backtests
     await websocket.accept()
     # ── Admin auth gate (Cloudflare Access JWT verified) ──
     from web.auth import ws_require_admin
@@ -331,6 +346,12 @@ async def ws_algo_backtest(websocket: WebSocket):
     if _ws_user is None:
         return
 
+    if _active_backtests >= _MAX_CONCURRENT_BACKTESTS:
+        await websocket.send_json({"type": "error", "message": f"Server busy: {_active_backtests} backtest(s) already running. Try again in a moment."})
+        await websocket.close()
+        return
+
+    _active_backtests += 1
     queue: asyncio.Queue = asyncio.Queue()
     main_loop = asyncio.get_running_loop()
 
@@ -497,6 +518,7 @@ async def ws_algo_backtest(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     finally:
+        _active_backtests -= 1
         try:
             await future
         except Exception:

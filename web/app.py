@@ -569,11 +569,23 @@ async def _thematic_scan_loop():
         await asyncio.sleep(_INTERVAL)
 
 
+_background_tasks: list[asyncio.Task] = []
+
+
 @app.on_event("startup")
 async def _startup():
-    asyncio.create_task(_paper_autostart_loop())
-    asyncio.create_task(_thematic_scan_loop())
-    asyncio.create_task(_fidelity_keepalive_loop())
+    _background_tasks.append(asyncio.create_task(_paper_autostart_loop()))
+    _background_tasks.append(asyncio.create_task(_thematic_scan_loop()))
+    _background_tasks.append(asyncio.create_task(_fidelity_keepalive_loop()))
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    for t in _background_tasks:
+        if not t.done():
+            t.cancel()
+    if _background_tasks:
+        await asyncio.gather(*_background_tasks, return_exceptions=True)
 
 
 _react_dist = Path(__file__).parent / "static" / "dist"

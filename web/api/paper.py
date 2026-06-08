@@ -795,8 +795,8 @@ def _read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        import logging; logging.error(f"Log load error: {exc}")
-        return {"error": "An internal error occurred.", "path": str(path)}
+        import logging; logging.getLogger("paper.state").error("State file read error for %s: %s", path.name, exc)
+        return {"error": "An internal error occurred."}
 
 
 def _tail_text(path: Path, limit: int = 80) -> list[str]:

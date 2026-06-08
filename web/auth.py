@@ -72,11 +72,12 @@ def _local_dev_email() -> str:
     email = os.getenv("CF_ACCESS_LOCAL_DEV_EMAIL", "").strip().lower()
     if email:
         return email
+    _bootstrap_raw = os.getenv("CF_ACCESS_BOOTSTRAP_ADMIN", "").strip()
     bootstrap = [
         e.strip().lower()
-        for e in os.getenv("CF_ACCESS_BOOTSTRAP_ADMIN", "").split(",")
+        for e in _bootstrap_raw.split(",")
         if e.strip()
-    ]
+    ] if _bootstrap_raw else []
     return bootstrap[0] if bootstrap else "dev@local"
 
 
