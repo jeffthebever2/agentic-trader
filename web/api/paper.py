@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
-from web.auth import require_admin
+from web.auth import require_admin, get_current_user
 
 ROOT = Path(__file__).parent.parent.parent
 DEFAULT_OUTPUT_BASE = ROOT / "tmp" / "paper_trading_today"
@@ -264,7 +264,7 @@ class SmsTestRequest(BaseModel):
 
 
 @router.get("/paper/sms/status")
-async def sms_status():
+async def sms_status(_user: dict = Depends(get_current_user)):
     load_dotenv(ROOT / ".env", override=True)
     try:
         import playwright  # noqa: F401
@@ -321,7 +321,7 @@ async def paper_email_test(req: EmailTestRequest, admin: dict = Depends(require_
 HIL_STATE_FILE = ROOT / "tmp" / "hil_state.json"
 
 @router.get("/paper/hil/pending")
-async def get_hil_pending():
+async def get_hil_pending(_user: dict = Depends(get_current_user)):
     if HIL_STATE_FILE.exists():
         try:
             state = json.loads(HIL_STATE_FILE.read_text())
@@ -1017,7 +1017,7 @@ def _collect_qlib_account() -> dict[str, Any]:
 
 
 @router.get("/paper/status")
-async def paper_status(force: bool = False):
+async def paper_status(force: bool = False, _user: dict = Depends(get_current_user)):
     global _status_cache, _status_cache_ts
     import time
     now = time.monotonic()
@@ -1259,7 +1259,7 @@ async def start_paper_runner(body: PaperStartRequest, admin: dict = Depends(requ
 
 
 @router.get("/paper/autostart")
-async def get_autostart():
+async def get_autostart(_user: dict = Depends(get_current_user)):
     if AUTOSTART_CONFIG_PATH.exists():
         try:
             saved = json.loads(AUTOSTART_CONFIG_PATH.read_text(encoding="utf-8-sig"))
@@ -1286,7 +1286,7 @@ async def set_autostart(body: dict, admin: dict = Depends(require_admin)):
 
 
 @router.get("/paper/analytics")
-async def paper_analytics():
+async def paper_analytics(_user: dict = Depends(get_current_user)):
     import math
     data_dir = _latest_data_dir()
     result = {}
@@ -1361,7 +1361,7 @@ async def paper_analytics():
 
 
 @router.get("/paper/equity")
-async def paper_equity():
+async def paper_equity(_user: dict = Depends(get_current_user)):
     data_dir = _latest_data_dir()
     result = {}
     for strategy in STRATEGIES:
@@ -1378,7 +1378,7 @@ async def paper_equity():
 
 
 @router.get("/paper/system-health")
-async def paper_system_health():
+async def paper_system_health(_user: dict = Depends(get_current_user)):
     import sqlite3 as _sqlite3
     data_dir = _latest_data_dir()
     health: dict = {"data_dir": str(data_dir), "strategies": {}}
@@ -1456,7 +1456,7 @@ async def paper_system_health():
 
 
 @router.get("/paper/backtest-index")
-async def backtest_index():
+async def backtest_index(_user: dict = Depends(get_current_user)):
     import sqlite3 as _sqlite3
     db_path = ROOT / "backtest_index.db"
     if not db_path.exists():
@@ -1472,7 +1472,7 @@ async def backtest_index():
 
 
 @router.get("/paper/candidates-history")
-async def candidates_history(days: int = 7, limit: int = 500):
+async def candidates_history(days: int = 7, limit: int = 500, _user: dict = Depends(get_current_user)):
     """Return candidates logged across past N days from persistent history files."""
     base = _last_output_base
     rows: list[dict] = []
@@ -1514,7 +1514,7 @@ async def candidates_history(days: int = 7, limit: int = 500):
 
 
 @router.get("/paper/quotes")
-async def paper_quotes(tickers: str = ""):
+async def paper_quotes(tickers: str = "", _user: dict = Depends(get_current_user)):
     """Return latest price + day change for a comma-separated list of tickers."""
     import yfinance as yf
     if not tickers:

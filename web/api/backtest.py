@@ -64,7 +64,7 @@ class ScreenRequest(BaseModel):
 
 
 @router.get("/backtest/results")
-async def list_backtest_results():
+async def list_backtest_results(_user: dict = Depends(require_admin)):
     """List existing backtest result JSON files from project root (metadata only, no full read)."""
     results = []
     MAX_READ_BYTES = 512 * 1024  # Only read first 512 KB for summary
@@ -100,7 +100,7 @@ async def list_backtest_results():
 
 
 @router.get("/backtest/results/{filename}")
-async def get_backtest_result(filename: str):
+async def get_backtest_result(filename: str, _user: dict = Depends(require_admin)):
     """Load a specific backtest result file (capped at 50 MB)."""
     import re
     if not re.match(r"^backtest_results_[0-9A-Za-z_-]+\.json$", filename):
@@ -377,6 +377,7 @@ async def ws_algo_backtest(websocket: WebSocket):
         config_data = await websocket.receive_json()
         req = AlgoBacktestRequest(**config_data)
     except Exception as e:
+        _active_backtests -= 1
         await websocket.send_json({"type": "error", "message": str(e)})
         await websocket.close()
         return
