@@ -250,8 +250,9 @@ def _run_scan(cfg: dict, queue: asyncio.Queue, main_loop: asyncio.AbstractEventL
         })
 
     except Exception as e:
-        import traceback
-        emit({"type": "error", "message": str(e), "traceback": traceback.format_exc()})
+        import traceback, logging
+        logging.getLogger("scanner.ws").error("Scanner run error: %s", traceback.format_exc())
+        emit({"type": "error", "message": "Scan failed — check server logs"})
     finally:
         _emit(queue, main_loop, None)
 

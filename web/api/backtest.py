@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from web.auth import require_admin
 
@@ -36,6 +36,24 @@ class BacktestRequest(BaseModel):
     max_debate_rounds: int = 1
     frequency: str = "weekly"
     initial_capital: float = 100000.0
+
+    @field_validator("tickers")
+    @classmethod
+    def validate_tickers(cls, v: list) -> list:
+        if not v:
+            raise ValueError("tickers must not be empty")
+        if len(v) > 50:
+            raise ValueError("too many tickers — maximum 50 per backtest run")
+        return [t.strip().upper() for t in v if t.strip()]
+
+    @field_validator("analysts")
+    @classmethod
+    def validate_analysts(cls, v: list) -> list:
+        allowed = {"market", "social", "news", "fundamentals"}
+        invalid = [a for a in v if a not in allowed]
+        if invalid:
+            raise ValueError(f"unknown analysts: {invalid}. Allowed: {sorted(allowed)}")
+        return v
 
 
 class ScreenRequest(BaseModel):
