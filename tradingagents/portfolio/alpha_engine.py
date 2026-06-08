@@ -65,6 +65,52 @@ TIER_SIZE_MULT: Dict[str, float] = {
 }
 
 
+# ── Execution-adjusted probability ────────────────────────────────────────────
+
+def compute_exec_adjusted_prob(
+    raw_prob: float,
+    quote_age_seconds: float = 0.0,
+    spread_bps: float = 0.0,
+    max_quote_age_seconds: float = 300.0,
+    max_spread_bps: float = 75.0,
+) -> float:
+    """Adjust raw ML probability downward for quote staleness and spread width.
+
+    exec_prob = raw_prob × quote_freshness_factor × spread_factor
+
+    Both factors are 1.0 when data is ideal (fresh, tight spread) and
+    decay linearly to 0.5 at the gate limits.
+
+    Parameters
+    ----------
+    raw_prob : float  — raw ML win probability [0, 1]
+    quote_age_seconds : float  — age of price snapshot in seconds
+    spread_bps : float  — bid-ask spread in basis points
+    max_quote_age_seconds : float  — gate limit (default 300 = 5 min)
+    max_spread_bps : float  — gate limit (default 75 bps)
+
+    Returns adjusted probability in [0, 1].  If both limits are exceeded,
+    the minimum of 0.50 × raw_prob is returned.
+    """
+    raw_prob = max(0.0, min(1.0, raw_prob))
+
+    # Quote freshness factor: 1.0 when age=0, 0.5 when age=max
+    if max_quote_age_seconds > 0 and quote_age_seconds > 0:
+        age_fraction = min(quote_age_seconds / max_quote_age_seconds, 1.0)
+        freshness_factor = 1.0 - 0.5 * age_fraction
+    else:
+        freshness_factor = 1.0
+
+    # Spread factor: 1.0 when spread=0, 0.5 when spread=max
+    if max_spread_bps > 0 and spread_bps > 0:
+        spread_fraction = min(spread_bps / max_spread_bps, 1.0)
+        spread_factor = 1.0 - 0.5 * spread_fraction
+    else:
+        spread_factor = 1.0
+
+    return round(raw_prob * freshness_factor * spread_factor, 6)
+
+
 # ── AlphaResult ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -99,6 +145,8 @@ class AlphaResult:
     numerator: float
     denominator: float
     audit: Dict[str, float] = field(default_factory=dict)
+    # Execution-adjusted probability (raw_prob × freshness_factor × spread_factor)
+    exec_adjusted_probability: float = 0.0
 
     def to_audit_dict(self) -> Dict[str, Any]:
         return {
@@ -206,6 +254,8 @@ class AlphaEngine:
         is_correlated: bool = False,
         adv: Optional[float] = None,
         min_adv_dollars: float = 0.0,
+        quote_age_seconds: float = 0.0,
+        spread_bps: float = 0.0,
     ) -> AlphaResult:
         """Compute alpha_score and tier for one candidate.
 
@@ -339,7 +389,13 @@ class AlphaEngine:
 
         # Numerator: Cycle 38 — win_prob removed (WF HC WR=39.5% anti-predictive on 679 OOS rows).
         # Restore when WF ROC > 0.55 AND WF HC WR > base WR after new-geometry retrain.
-        numerator = reg_score * breakout_boost
+        # tbs_prob (target-before-stop probability, RM-3): not included in numerator.
+        # tbs_prob is the ML model's _target_label probability. Until a dedicated walk-forward
+        # ROC check confirms tbs_prob ROC > 0.50, adding it would risk anti-predictive noise.
+        # ENABLE: set tbs_weight > 0.0 only after confirming WF ROC > 0.50 on holdout.
+        tbs_weight = float(getattr(self, "tbs_weight", 0.0))
+        tbs_contribution = tbs * tbs_weight if tbs_weight > 0.0 else 0.0
+        numerator = reg_score * breakout_boost + tbs_contribution
 
         # Denominator (timeout_penalty removed — model ROC=0.4023, anti-predictive)
         denominator = max(
@@ -362,6 +418,13 @@ class AlphaEngine:
 
         alpha_score = raw_alpha * rel_mult * feedback_mult
 
+        # ── Execution-adjusted probability ──────────────────────────────────
+        exec_prob = compute_exec_adjusted_prob(
+            raw_prob=win_prob,
+            quote_age_seconds=quote_age_seconds,
+            spread_bps=spread_bps,
+        )
+
         # ── Assign tier ─────────────────────────────────────────────────────
         tier = self._assign_tier(alpha_score, win_prob, reg_score, breakout_score)
         size_mult = TIER_SIZE_MULT.get(tier, 0.0)
@@ -371,6 +434,7 @@ class AlphaEngine:
             alpha_score=round(alpha_score, 5),
             tier=tier,
             size_mult=size_mult,
+            exec_adjusted_probability=round(exec_prob, 6),
             rejected=(tier in ("C", "NO_TRADE")),
             rejection_reason="" if tier not in ("C", "NO_TRADE") else f"tier={tier}",
             win_prob=win_prob,

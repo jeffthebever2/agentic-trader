@@ -19,12 +19,28 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+import time as _time
+
 log = logging.getLogger("fidelity")
 
 # Per-(user, ticker) idempotency lock — prevents duplicate simultaneous orders
 _ORDER_LOCKS: dict[str, asyncio.Lock] = {}
 _ORDER_LOCKS_META: dict[str, float] = {}  # key → last-acquire timestamp
 _ORDER_LOCK_TTL = 120.0  # seconds before lock is considered stale
+
+# Connection status cache: email → (timestamp, is_connected)
+# Prevents every /fidelity/status call from launching a 20-30s Playwright navigation.
+_SESSION_CACHE: dict[str, tuple[float, bool]] = {}
+_SESSION_CACHE_TTL = 300.0  # 5 minutes — recheck after this
+
+def _set_session_cache(email: str, connected: bool) -> None:
+    _SESSION_CACHE[_user_key(email)] = (_time.time(), connected)
+
+def _get_session_cache(email: str) -> bool | None:
+    entry = _SESSION_CACHE.get(_user_key(email))
+    if entry and (_time.time() - entry[0]) < _SESSION_CACHE_TTL:
+        return entry[1]
+    return None  # cache miss or expired
 
 
 def _get_order_lock(key: str) -> asyncio.Lock:
@@ -59,15 +75,17 @@ _ORDER_ERROR_PATTERNS = [
 def _verify_fidelity_order_page(page_text: str) -> tuple[bool, str]:
     """
     Return (confirmed, reason) from Fidelity post-submit page text.
-    confirmed=True means the page shows order acceptance.
+    confirmed=True means the page shows order acceptance with no error signals.
+    Error patterns are checked FIRST — a page with both confirm and error text
+    (e.g. 'order #12345 cannot be processed due to an error') is treated as rejected.
     """
     lower = page_text.lower()
-    for pat in _ORDER_CONFIRM_PATTERNS:
-        if pat in lower:
-            return True, f"confirmed: '{pat}' found in page"
     for pat in _ORDER_ERROR_PATTERNS:
         if pat in lower:
             return False, f"order rejected by Fidelity: '{pat}' found in page"
+    for pat in _ORDER_CONFIRM_PATTERNS:
+        if pat in lower:
+            return True, f"confirmed: '{pat}' found in page"
     return False, "order confirmation NOT found in page — status unknown"
 
 ROOT = Path(__file__).parent.parent.parent
@@ -231,23 +249,38 @@ async def _save_context_storage(context, path: Path):
 
 
 async def _is_logged_in(email: str) -> bool:
+    # Return cached state if fresh — avoids 20-30s Playwright navigation on every status poll
+    cached = _get_session_cache(email)
+    if cached is not None:
+        return cached
+
     key = _user_key(email)
     if _PW_CONTEXTS.get(key) is None:
         if not _fidelity_state_path(key).exists():
+            _set_session_cache(email, False)
             return False
         try:
             await _ensure_browser(key)
         except Exception:
+            _set_session_cache(email, False)
             return False
     try:
         ctx = await _ensure_browser(key)
         page = await ctx.new_page()
-        await page.goto(PORTFOLIO_URL, wait_until="domcontentloaded", timeout=20_000)
-        await asyncio.sleep(2)
-        url = page.url
-        await page.close()
-        return "login" not in url.lower() and "digital.fidelity" in url
+        try:
+            await page.goto(PORTFOLIO_URL, wait_until="domcontentloaded", timeout=20_000)
+            await asyncio.sleep(2)
+            url = page.url
+            result = "login" not in url.lower() and "digital.fidelity" in url
+            _set_session_cache(email, result)
+            return result
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
     except Exception:
+        _set_session_cache(email, False)
         return False
 
 
@@ -292,7 +325,12 @@ async def _detect_page_state(page) -> str:
     url = page.url.lower()
     html = (await page.content()).lower()
 
-    if "portfolio" in url or "accounts" in url:
+    # Authenticated: must be on digital.fidelity.com on an authenticated path.
+    # Restricting to digital.fidelity.com prevents www.fidelity.com homepage
+    # (reachable after bad credentials) from being misclassified as authenticated.
+    if "digital.fidelity.com" in url and any(
+        k in url for k in ("portfolio", "accounts", "summary", "balances", "positions", "dashboard", "ftgw/digital/pntgate")
+    ):
         return "authenticated"
     if any(k in url for k in ("twofactor", "mfa", "verify", "otp", "2fa")):
         return "need_totp"
@@ -300,13 +338,8 @@ async def _detect_page_state(page) -> str:
         return "need_totp"
     if "login" in url or "username" in html or "sign in" in html:
         return "login_page"
-    if any(k in html for k in ("incorrect", "invalid", "failed", "error")):
+    if any(k in html for k in ("incorrect", "invalid", "failed", "error", "wrong")):
         return "login_error"
-    # Landed somewhere else — could be home/dashboard
-    from urllib.parse import urlparse
-    hostname = urlparse(url).hostname or ""
-    if (hostname == "fidelity.com" or hostname.endswith(".fidelity.com")) and "login" not in url:
-        return "authenticated"
     return "unknown"
 
 
@@ -348,150 +381,157 @@ async def ws_fidelity_auth(websocket: WebSocket):
         ctx = await _ensure_browser(user_email)
         page = await ctx.new_page()
 
-        await send({"step": "logging_in", "message": "Navigating to Fidelity login…"})
-        await page.goto(LOGIN_URL, wait_until="commit", timeout=60_000)
-        await asyncio.sleep(4)
+        # Inner try/finally ensures page is always closed, even on client disconnect
+        try:
+            await send({"step": "logging_in", "message": "Navigating to Fidelity login…"})
+            await page.goto(LOGIN_URL, wait_until="commit", timeout=60_000)
+            await asyncio.sleep(4)
 
-        # --- Username ---
-        await send({"step": "logging_in", "message": "Entering username…"})
-        filled_user = await _try_fill(page, [
-            "#dom-username-input",
-            "input[name='userId']",
-            "input[id*='username' i]",
-            "input[placeholder*='username' i]",
-            "input[type='text']",
-        ], username, timeout=8000)
-
-        if not filled_user:
-            await send({"step": "error", "message": "Could not find username field. Fidelity may have changed their login page."})
-            await page.close()
-            return
-
-        # Click Next / Continue if needed (some flows split username + password)
-        next_clicked = await _try_click(page, [
-            "button[data-testid='nextBtn']",
-            "button[id*='next' i]",
-            "#dom-username-go-button",
-            "button[type='submit']",
-        ], timeout=3000)
-        if next_clicked:
-            await asyncio.sleep(1.5)
-
-        # --- Password ---
-        await send({"step": "logging_in", "message": "Entering password…"})
-        filled_pw = await _try_fill(page, [
-            "#dom-pswd-input",
-            "input[name='password']",
-            "input[type='password']",
-            "input[id*='password' i]",
-        ], password, timeout=8000)
-
-        if not filled_pw:
-            await send({"step": "error", "message": "Could not find password field."})
-            await page.close()
-            return
-
-        await _try_click(page, [
-            "#dom-login-button",
-            "button[data-testid='loginBtn']",
-            "button[type='submit']",
-            "#fs-login-button",
-        ], timeout=5000)
-
-        await asyncio.sleep(3)
-        state = await _detect_page_state(page)
-
-        # --- TOTP / 2FA ---
-        if state == "need_totp":
-            await send({
-                "step": "need_totp",
-                "message": "Two-factor authentication required.",
-                "prompt": "Enter the 6-digit code from your authenticator app or SMS",
-            })
-
-            # Wait for TOTP code from client (up to 3 minutes)
-            try:
-                totp_msg = await asyncio.wait_for(websocket.receive_json(), timeout=180)
-            except asyncio.TimeoutError:
-                await send({"step": "error", "message": "Timed out waiting for verification code (3 min limit)"})
-                await page.close()
-                return
-
-            code = str(totp_msg.get("totp", "")).strip()
-            if not code:
-                await send({"step": "error", "message": "No verification code provided"})
-                await page.close()
-                return
-
-            await send({"step": "logging_in", "message": "Submitting verification code…"})
-
-            filled_otp = await _try_fill(page, [
-                "input[name='OTP']",
-                "input[id*='otp' i]",
-                "input[id*='totp' i]",
-                "input[placeholder*='code' i]",
-                "input[type='number']",
-                "input[maxlength='6']",
-                "input[maxlength='8']",
+            # --- Username ---
+            await send({"step": "logging_in", "message": "Entering username…"})
+            filled_user = await _try_fill(page, [
+                "#dom-username-input",
+                "input[name='userId']",
+                "input[id*='username' i]",
+                "input[placeholder*='username' i]",
                 "input[type='text']",
-            ], code, timeout=8000)
+            ], username, timeout=8000)
 
-            if not filled_otp:
-                await send({"step": "error", "message": "Could not find verification code input field."})
-                await page.close()
+            if not filled_user:
+                await send({"step": "error", "message": "Could not find username field. Fidelity may have changed their login page."})
                 return
 
-            # Click submit / continue
-            await _try_click(page, [
+            # Click Next / Continue if needed (some flows split username + password)
+            next_clicked = await _try_click(page, [
+                "button[data-testid='nextBtn']",
+                "button[id*='next' i]",
+                "#dom-username-go-button",
                 "button[type='submit']",
-                "button[data-testid='submitBtn']",
-                "button[id*='continue' i]",
-                "button[id*='submit' i]",
-                "button[id*='verify' i]",
+            ], timeout=3000)
+            if next_clicked:
+                await asyncio.sleep(1.5)
+
+            # --- Password ---
+            await send({"step": "logging_in", "message": "Entering password…"})
+            filled_pw = await _try_fill(page, [
+                "#dom-pswd-input",
+                "input[name='password']",
+                "input[type='password']",
+                "input[id*='password' i]",
+            ], password, timeout=8000)
+
+            if not filled_pw:
+                await send({"step": "error", "message": "Could not find password field."})
+                return
+
+            await _try_click(page, [
+                "#dom-login-button",
+                "button[data-testid='loginBtn']",
+                "button[type='submit']",
+                "#fs-login-button",
             ], timeout=5000)
 
             await asyncio.sleep(3)
             state = await _detect_page_state(page)
 
-        # --- Handle "remember device" prompt ---
-        if state not in ("authenticated",):
-            remember_clicked = await _try_click(page, [
-                "button[data-testid='rememberDeviceBtn']",
-                "button[id*='remember' i]",
-                "button[id*='trust' i]",
-            ], timeout=2000)
-            if remember_clicked:
+            # --- TOTP / 2FA ---
+            if state == "need_totp":
+                await send({
+                    "step": "need_totp",
+                    "message": "Two-factor authentication required.",
+                    "prompt": "Enter the 6-digit code from your authenticator app or SMS",
+                })
+
+                # Wait for TOTP code from client (up to 3 minutes)
+                try:
+                    totp_msg = await asyncio.wait_for(websocket.receive_json(), timeout=180)
+                except asyncio.TimeoutError:
+                    await send({"step": "error", "message": "Timed out waiting for verification code (3 min limit)"})
+                    return
+
+                code = str(totp_msg.get("totp", "")).strip()
+                if not code:
+                    await send({"step": "error", "message": "No verification code provided"})
+                    return
+
+                await send({"step": "logging_in", "message": "Submitting verification code…"})
+
+                filled_otp = await _try_fill(page, [
+                    "input[name='OTP']",
+                    "input[id*='otp' i]",
+                    "input[id*='totp' i]",
+                    "input[placeholder*='code' i]",
+                    "input[type='number']",
+                    "input[maxlength='6']",
+                    "input[maxlength='8']",
+                    "input[type='text']",
+                ], code, timeout=8000)
+
+                if not filled_otp:
+                    await send({"step": "error", "message": "Could not find verification code input field."})
+                    return
+
+                # Click submit / continue
+                await _try_click(page, [
+                    "button[type='submit']",
+                    "button[data-testid='submitBtn']",
+                    "button[id*='continue' i]",
+                    "button[id*='submit' i]",
+                    "button[id*='verify' i]",
+                ], timeout=5000)
+
+                await asyncio.sleep(3)
+                state = await _detect_page_state(page)
+
+                # Wrong TOTP: Fidelity stays on MFA page or shows error — never authenticated.
+                if state == "need_totp":
+                    html_snippet = await page.locator("body").inner_text()
+                    err_lines = [l.strip() for l in html_snippet.splitlines() if any(k in l.lower() for k in ("incorrect", "invalid", "failed", "error", "wrong", "expired"))]
+                    await send({"step": "error", "message": "Verification code rejected: " + (err_lines[0] if err_lines else "incorrect or expired code")})
+                    return
+
+            # --- Handle "remember device" prompt ---
+            if state not in ("authenticated",):
+                remember_clicked = await _try_click(page, [
+                    "button[data-testid='rememberDeviceBtn']",
+                    "button[id*='remember' i]",
+                    "button[id*='trust' i]",
+                ], timeout=2000)
+                if remember_clicked:
+                    await asyncio.sleep(2)
+                    state = await _detect_page_state(page)
+
+            if state == "login_error":
+                html_snippet = await page.locator("body").inner_text()
+                err_lines = [l.strip() for l in html_snippet.splitlines() if any(k in l.lower() for k in ("incorrect","invalid","failed","error","wrong"))]
+                await send({"step": "error", "message": "Login failed: " + (err_lines[0] if err_lines else "incorrect credentials")})
+                return
+
+            if state != "authenticated":
+                # Try navigating to portfolio directly
+                await page.goto(PORTFOLIO_URL, wait_until="domcontentloaded", timeout=20_000)
                 await asyncio.sleep(2)
                 state = await _detect_page_state(page)
 
-        if state == "login_error":
-            html_snippet = await page.locator("body").inner_text()
-            err_lines = [l.strip() for l in html_snippet.splitlines() if any(k in l.lower() for k in ("incorrect","invalid","failed","error","wrong"))]
-            await send({"step": "error", "message": "Login failed: " + (err_lines[0] if err_lines else "incorrect credentials")})
-            await page.close()
-            return
+            if state != "authenticated":
+                await send({"step": "error", "message": f"Login did not complete. Current URL: {page.url}"})
+                return
 
-        if state != "authenticated":
-            # Try navigating to portfolio directly
-            await page.goto(PORTFOLIO_URL, wait_until="domcontentloaded", timeout=20_000)
-            await asyncio.sleep(2)
-            state = await _detect_page_state(page)
+            await _save_storage(user_email)
+            _set_session_cache(user_email, True)
+            await send({"step": "authenticated", "message": "Connected to Fidelity successfully"})
 
-        if state != "authenticated":
-            await send({"step": "error", "message": f"Login did not complete. Current URL: {page.url}"})
-            await page.close()
-            return
-
-        await _save_storage(user_email)
-        await page.close()
-
-        await send({"step": "authenticated", "message": "Connected to Fidelity successfully"})
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
 
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        import traceback
-        await send({"step": "error", "message": str(e), "traceback": traceback.format_exc()})
+        log.exception("ws_fidelity_auth unhandled error")
+        await send({"step": "error", "message": str(e)})
 
 
 # ── REST endpoints (require active session) ────────────────────
@@ -513,6 +553,7 @@ async def fidelity_status(user: dict = Depends(require_admin)):
 
 @router.post("/fidelity/logout")
 async def fidelity_logout(admin: dict = Depends(require_admin)):
+    _set_session_cache(admin["email"], False)
     await _close_session(admin["email"])
     return {"success": True}
 
@@ -741,6 +782,13 @@ class FidelityTradeRequest(BaseModel):
     time_in_force: str  = Field("Day")   # passed for UI display; Fidelity default = Day
     account:      Optional[str] = None
     execute:      bool  = False
+    quote_time:   Optional[str] = None
+    quote_source: Optional[str] = None
+    backup_sources: list[str] = Field(default_factory=list)
+    consensus_ok: Optional[bool] = None
+    bid:          Optional[float] = None
+    ask:          Optional[float] = None
+    market_open: Optional[bool] = None
 
     @classmethod
     def __get_validators__(cls):
@@ -906,15 +954,26 @@ async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(requi
 
             preview_text = await page.evaluate("() => document.body.innerText")
 
+            # Block on any non-confirmed preview — prevents placing against error/unknown page
+            preview_ok, preview_msg = _verify_fidelity_order_page(preview_text)
+            if not preview_ok:
+                raise HTTPException(status_code=400, detail=f"Preview not confirmed: {preview_msg}\n\nPage excerpt:\n{preview_text[:400]}")
+
             order_status = "previewed"
             if body.execute:
                 try:
                     place_btn = page.locator('button:has-text("Place Order")').first
                     await place_btn.wait_for(state="visible", timeout=8000)
                     await place_btn.click()
-                    await asyncio.sleep(6)
+                    # Poll up to 15 s for confirmation or rejection phrase
+                    confirm_text = ""
+                    for _ in range(5):
+                        await asyncio.sleep(3)
+                        confirm_text = await page.evaluate("() => document.body.innerText")
+                        c_ok, _ = _verify_fidelity_order_page(confirm_text)
+                        if c_ok or any(p in confirm_text.lower() for p in _ORDER_ERROR_PATTERNS):
+                            break
 
-                    confirm_text = await page.evaluate("() => document.body.innerText")
                     confirmed, confirm_msg = _verify_fidelity_order_page(confirm_text)
                     if not confirmed:
                         raise HTTPException(
@@ -1137,6 +1196,13 @@ class FidelityThematicTradeRequest(BaseModel):
     account:          Optional[str] = None     # Fidelity account number (None = default)
     execute:          bool  = False            # False = preview only, True = place order
     also_paper_trade: bool  = True             # Mirror trade in paper account for tracking
+    quote_time:       Optional[str] = None
+    quote_source:     Optional[str] = None
+    backup_sources:   list[str] = Field(default_factory=list)
+    consensus_ok:     Optional[bool] = None
+    bid:              Optional[float] = None
+    ask:              Optional[float] = None
+    market_open:      Optional[bool] = None
 
 
 @router.post("/fidelity/thematic-trade")
@@ -1259,6 +1325,15 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
         "order_type":  "Limit",
         "quantity":    shares,
         "limit_price": limit_price,
+        "execute":     body.execute,
+        "quote_price": price,
+        "quote_time":  body.quote_time or now_iso,
+        "quote_source": body.quote_source or "yfinance",
+        "backup_sources": body.backup_sources,
+        "consensus_ok": body.consensus_ok,
+        "bid": body.bid,
+        "ask": body.ask,
+        "market_open": body.market_open,
     }
     decision = validate_live_order(order_dict)
     if not decision.allowed:
@@ -1366,19 +1441,25 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
 
             preview_text = await page.evaluate("() => document.body.innerText")
 
-            # Check preview page for errors BEFORE placing
+            # Block on any non-confirmed preview — unknown/error state must not proceed
             preview_ok, preview_msg = _verify_fidelity_order_page(preview_text)
-            if not preview_ok and any(p in preview_text.lower() for p in _ORDER_ERROR_PATTERNS):
-                raise HTTPException(status_code=400, detail=f"Fidelity rejected at preview stage: {preview_msg}\n\nPage excerpt:\n{preview_text[:400]}")
+            if not preview_ok:
+                raise HTTPException(status_code=400, detail=f"Preview not confirmed: {preview_msg}\n\nPage excerpt:\n{preview_text[:400]}")
 
             # Place order
             place_btn = page.locator('button:has-text("Place Order")').first
             await place_btn.wait_for(state="visible", timeout=8000)
             await place_btn.click()
-            await asyncio.sleep(6)
+            # Poll up to 15 s for confirmation or rejection phrase
+            confirm_text = ""
+            for _ in range(5):
+                await asyncio.sleep(3)
+                confirm_text = await page.evaluate("() => document.body.innerText")
+                c_ok, _ = _verify_fidelity_order_page(confirm_text)
+                if c_ok or any(p in confirm_text.lower() for p in _ORDER_ERROR_PATTERNS):
+                    break
 
             # Verify confirmation — NEVER assume success
-            confirm_text = await page.evaluate("() => document.body.innerText")
             confirmed, confirm_msg = _verify_fidelity_order_page(confirm_text)
             if not confirmed:
                 # Order status unknown — do NOT mark executed
@@ -1405,53 +1486,55 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
     paper_result = None
     if body.also_paper_trade and body.execute and order_status == "executed":
         try:
-            PAPER_STATE = ROOT / "tmp" / "paper_trading_today" / "unified_brain" / "state.json"
-            PAPER_STATE.parent.mkdir(parents=True, exist_ok=True)
-            state: dict = {}
-            if PAPER_STATE.exists():
-                try:
-                    state = json.loads(PAPER_STATE.read_text())
-                except Exception:
-                    pass
+            from web.api.thematic_auto import _paper_state_lock, PAPER_STATE_FILE
+            PAPER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            async with _paper_state_lock:
+                state: dict = {}
+                if PAPER_STATE_FILE.exists():
+                    try:
+                        state = json.loads(PAPER_STATE_FILE.read_text())
+                    except Exception:
+                        pass
 
-            positions = state.get("positions", {})
-            if ticker not in positions:
-                positions[ticker] = {
-                    "ticker": ticker, "shares": shares, "entry_price": price,
-                    "stop": stop_price, "target": target_price,
-                    "entry_time": now_iso, "signal_date": today,
-                    "score": 80.0, "alpha_tier": "A",
-                    "atr": round(price * 0.02, 4),
-                    "breakeven_moved": False, "peak_price": price, "scans_held": 0,
-                    "partial_sold": False, "defensive_trimmed": False, "scaled_in": False,
-                    "sector": "thematic", "theme": body.theme,
-                    "strategy_label": "fidelity_thematic",
-                    "thesis": body.thesis, "catalyst": body.catalyst,
-                    "hold_days": body.hold_days,
-                    "exit_plan": f"Target +{body.target_pct}%, stop -{body.stop_pct}%, {body.hold_days}d",
-                    "entry_date": today,
-                    "funded_by_unsettled": False, "unsettled_settle_date": "",
-                    "regime_at_entry": "thematic",
-                    "regime_score_at_entry": None, "crash_risk_at_entry": None,
-                    "regime_confidence_at_entry": None,
-                    "_source": "fidelity_thematic",
-                    "_fidelity_order_status": order_status,
-                }
-                cash = float(state.get("cash", 100_000))
-                settled = float(state.get("settled_cash", cash))
-                state["positions"]    = positions
-                state["cash"]         = round(cash - cost, 4)
-                state["settled_cash"] = round(settled - cost, 4)
-                # Atomic write
-                fd, tmp_p = tempfile.mkstemp(dir=PAPER_STATE.parent, prefix=".tmp_")
-                try:
-                    with os.fdopen(fd, "w") as f:
-                        f.write(json.dumps(state, indent=2))
-                    os.replace(tmp_p, PAPER_STATE)
-                except Exception:
-                    try: os.unlink(tmp_p)
-                    except Exception: pass
-                paper_result = {"ok": True, "shares": shares, "cost": cost}
+                positions = state.get("positions", {})
+                if ticker not in positions:
+                    positions[ticker] = {
+                        "ticker": ticker, "shares": shares, "entry_price": price,
+                        "stop": stop_price, "target": target_price,
+                        "entry_time": now_iso, "signal_date": today,
+                        "score": 80.0, "alpha_tier": "A",
+                        "atr": round(price * 0.02, 4),
+                        "breakeven_moved": False, "peak_price": price, "scans_held": 0,
+                        "partial_sold": False, "defensive_trimmed": False, "scaled_in": False,
+                        "sector": "thematic", "theme": body.theme,
+                        "strategy_label": "fidelity_thematic",
+                        "thesis": body.thesis, "catalyst": body.catalyst,
+                        "hold_days": body.hold_days,
+                        "exit_plan": f"Target +{body.target_pct}%, stop -{body.stop_pct}%, {body.hold_days}d",
+                        "entry_date": today,
+                        "funded_by_unsettled": False, "unsettled_settle_date": "",
+                        "regime_at_entry": "thematic",
+                        "regime_score_at_entry": None, "crash_risk_at_entry": None,
+                        "regime_confidence_at_entry": None,
+                        "_source": "fidelity_thematic",
+                        "_fidelity_order_status": order_status,
+                    }
+                    # Use actual starting_cash as fallback — never invent a phantom balance
+                    cash = float(state.get("cash", state.get("starting_cash", 0)))
+                    settled = float(state.get("settled_cash", cash))
+                    state["positions"]    = positions
+                    state["cash"]         = round(cash - cost, 4)
+                    state["settled_cash"] = round(settled - cost, 4)
+                    # Atomic write
+                    fd, tmp_p = tempfile.mkstemp(dir=PAPER_STATE_FILE.parent, prefix=".tmp_")
+                    try:
+                        with os.fdopen(fd, "w") as f:
+                            f.write(json.dumps(state, indent=2))
+                        os.replace(tmp_p, PAPER_STATE_FILE)
+                    except Exception:
+                        try: os.unlink(tmp_p)
+                        except Exception: pass
+                    paper_result = {"ok": True, "shares": shares, "cost": cost}
         except Exception as pe:
             paper_result = {"ok": False, "error": str(pe)}
 
@@ -1490,9 +1573,16 @@ class FidelityExitRequest(BaseModel):
     ticker:     str
     shares:     Optional[float] = None  # None = sell all found in Fidelity positions
     order_type: str = "Limit"           # Limit or Market
-    limit_pct:  float = -0.2            # Limit = last_price - limit_pct% (default 0.2% below)
+    limit_pct:  float = Field(-0.2, ge=-5.0, le=5.0)  # capped ±5% — prevents far-off-market limits
     account:    Optional[str] = None
     execute:    bool = False
+    quote_time: Optional[str] = None
+    quote_source: Optional[str] = None
+    backup_sources: list[str] = Field(default_factory=list)
+    consensus_ok: Optional[bool] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    market_open: Optional[bool] = None
 
 
 @router.post("/fidelity/thematic-exit")
@@ -1611,6 +1701,15 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
         "order_type": "Limit",
         "quantity": shares_to_sell,
         "limit_price": limit_price,
+        "execute": body.execute,
+        "quote_price": last_price,
+        "quote_time": body.quote_time,
+        "quote_source": body.quote_source or "yfinance",
+        "backup_sources": body.backup_sources,
+        "consensus_ok": body.consensus_ok,
+        "bid": body.bid,
+        "ask": body.ask,
+        "market_open": body.market_open,
     }
     decision = validate_live_order(order_dict)
     if not decision.allowed:
@@ -1717,10 +1816,16 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
             place_btn = exit_page.locator('button:has-text("Place Order")').first
             await place_btn.wait_for(state="visible", timeout=8000)
             await place_btn.click()
-            await asyncio.sleep(6)
+            # Poll up to 15 s for confirmation or rejection phrase
+            confirm_text = ""
+            for _ in range(5):
+                await asyncio.sleep(3)
+                confirm_text = await exit_page.evaluate("() => document.body.innerText")
+                c_ok, _ = _verify_fidelity_order_page(confirm_text)
+                if c_ok or any(p in confirm_text.lower() for p in _ORDER_ERROR_PATTERNS):
+                    break
 
             # Verify confirmation — NEVER assume success
-            confirm_text = await exit_page.evaluate("() => document.body.innerText")
             confirmed, confirm_msg = _verify_fidelity_order_page(confirm_text)
             if not confirmed:
                 raise HTTPException(

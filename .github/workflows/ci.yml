@@ -1,71 +1,18 @@
 name: CI
-
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
-
 jobs:
-  test:
+  build-and-test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    strategy:
-      matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
-
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -e .[dev]
-
-    - name: Run tests
-      run: |
-        pytest --cov=tradingagents --cov-report=xml
-
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@eaaf4bedf32ec9fa2f59b48e575bc2222af11b93
-      with:
-        file: ./coverage.xml
-        flags: unittests
-        name: codecov-umbrella
-        fail_ci_if_error: false
-
-  lint:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: "3.11"
-
-    - name: Install linting dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install black isort flake8 mypy
-
-    - name: Run Black (code formatting)
-      run: black --check --diff tradingagents cli tests scripts
-
-    - name: Run isort (import sorting)
-      run: isort --check-only --diff tradingagents cli tests scripts
-
-    - name: Run flake8 (linting)
-      run: flake8 tradingagents cli tests scripts --max-line-length=88 --extend-ignore=E203,W503
-
-    - name: Run mypy (type checking)
-      run: mypy tradingagents --ignore-missing-imports
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test

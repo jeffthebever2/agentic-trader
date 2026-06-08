@@ -1,18 +1,55 @@
 {
-  "name": "agentic-trader-monorepo",
-  "private": true,
-  "version": "0.1.0",
-  "scripts": {
-    "web:dev": "cd frontend && npm run dev",
-    "web:build": "cd frontend && npm run build",
-    "web:lint": "cd frontend && npm run lint",
-    "desktop:dev": "cd desktop && npm run tauri:dev",
-    "desktop:build": "cd desktop && npm run build",
-    "desktop:dmg": "cd desktop && npm run tauri:dmg",
-    "desktop:tauri-build": "cd desktop && npm run tauri:build"
+  "name": "ai-orchestrator",
+  "version": "1.0.0",
+  "description": "AI-powered code orchestrator using Claude, Gemini, OpenCode, and Codex",
+  "main": "dist/cli.js",
+  "type": "module",
+  "bin": {
+    "orchestrate": "./dist/cli.js"
   },
-  "workspaces": [
-    "frontend",
-    "desktop"
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "clean": "rm -rf dist logs goals.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": [
+    "claude",
+    "gemini",
+    "codex",
+    "opencode",
+    "orchestrator"
+  ],
+  "author": "Will",
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^11.1.0",
+    "dotenv": "^16.3.1",
+    "ink": "^4.4.1",
+    "ink-select-input": "^5.0.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^5.0.1",
+    "strip-ansi": "^7.1.0",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.3.31",
+    "@types/uuid": "^10.0.0",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^5.3.3",
+    "vitest": "^2.1.9"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "dist"
   ]
 }

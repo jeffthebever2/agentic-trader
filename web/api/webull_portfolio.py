@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tradingagents.compliance import validate_live_order
 
 from web.auth import require_admin, require_step_up, get_current_user
@@ -98,6 +98,13 @@ class PlaceOrderRequest(BaseModel):
     qty: int
     price: Optional[float] = None
     time_in_force: str = "GTC"
+    quote_time: Optional[str] = None
+    quote_source: Optional[str] = None
+    backup_sources: list[str] = Field(default_factory=list)
+    consensus_ok: Optional[bool] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    market_open: Optional[bool] = None
 
 
 # ── Endpoints ──────────────────────────────────────────────────
@@ -322,7 +329,6 @@ async def wb_place_order(req: PlaceOrderRequest, admin: dict = Depends(require_s
             detail={
                 "error": "LIVE_TRADING_BLOCKED",
                 "message": decision.reason,
-                "blocked_actions": list(decision.blocked_actions),
             },
         )
     wb = _get_wb(admin["email"])

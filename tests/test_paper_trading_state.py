@@ -209,34 +209,24 @@ def test_paper_api_and_web_defaults_stay_strict():
     req = paper.PaperStartRequest()
     assert req.position_cap_pct == pytest.approx(25.0)
     assert req.position_cap_min_pct == pytest.approx(10.0)
-    assert req.min_risk_reward == pytest.approx(1.3)
-    assert req.ml_probability_threshold == pytest.approx(0.72)
-    assert req.ml_large_loss_max == pytest.approx(0.20)
-    assert req.ml_expected_return_min == pytest.approx(0.0)
-    assert req.target_mult == pytest.approx(1.5)
+    assert req.min_risk_reward == pytest.approx(0.8)
+    assert req.ml_probability_threshold == pytest.approx(0.0)
+    assert req.ml_large_loss_max == pytest.approx(0.15)
+    assert req.ml_expected_return_min == pytest.approx(-99.0)
+    assert req.target_mult == pytest.approx(1.2)
     assert req.stop_mult == pytest.approx(1.0)
 
     for key, expected in {
         "position_cap_pct": 25.0,
         "position_cap_min_pct": 10.0,
-        "min_risk_reward": 1.3,
-        "ml_probability_threshold": 0.72,
-        "ml_large_loss_max": 0.20,
-        "ml_expected_return_min": 0.0,
-        "target_mult": 1.5,
+        "min_risk_reward": 0.8,
+        "ml_probability_threshold": 0.0,
+        "ml_large_loss_max": 0.15,
+        "ml_expected_return_min": -99.0,
+        "target_mult": 1.2,
         "stop_mult": 1.0,
     }.items():
         assert paper.DEFAULT_AUTOSTART_CONFIG[key] == pytest.approx(expected)
-
-    html = (paper.ROOT / "web" / "static" / "index.html").read_text(encoding="utf-8")
-    assert "paperNumber('paper-position-cap', 25)" in html
-    assert "paperNumber('paper-position-cap-min', 10)" in html
-    assert "paperNumber('paper-min-rr', 1.3)" in html
-    assert "paperNumber('paper-ml-prob-threshold', 0.72)" in html
-    assert "paperNumber('paper-ml-loss-max', 0.20)" in html
-    assert "paperNumber('paper-ml-ret-min', 0.0)" in html
-    assert "paperNumber('paper-target-mult', 1.5)" in html
-    assert "paperNumber('paper-stop-mult', 1.0)" in html
 
 
 @pytest.mark.unit

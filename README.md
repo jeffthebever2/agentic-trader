@@ -1,305 +1,200 @@
-<p align="center">
-  <img src="assets/TauricResearch.png" style="width: 60%; height: auto;">
-</p>
+# Agentic Trader
 
-<div align="center" style="line-height: 1;">
-  <a href="https://arxiv.org/abs/2412.20138" target="_blank"><img alt="arXiv" src="https://img.shields.io/badge/arXiv-2412.20138-B31B1B?logo=arxiv"/></a>
-  <a href="https://discord.com/invite/hk9PGKShPK" target="_blank"><img alt="Discord" src="https://img.shields.io/badge/Discord-TradingResearch-7289da?logo=discord&logoColor=white&color=7289da"/></a>
-  <a href="./assets/wechat.png" target="_blank"><img alt="WeChat" src="https://img.shields.io/badge/WeChat-TauricResearch-brightgreen?logo=wechat&logoColor=white"/></a>
-  <a href="https://x.com/TauricResearch" target="_blank"><img alt="X Follow" src="https://img.shields.io/badge/X-TauricResearch-white?logo=x&logoColor=white"/></a>
-  <br>
-  <a href="https://github.com/TauricResearch/" target="_blank"><img alt="Community" src="https://img.shields.io/badge/Join_GitHub_Community-TauricResearch-14C290?logo=discourse"/></a>
-</div>
-
-<div align="center">
-  <!-- Keep these links. Translations will automatically update with the README. -->
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=de">Deutsch</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=es">Español</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=fr">français</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ja">日本語</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ko">한국어</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=pt">Português</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ru">Русский</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=zh">中文</a>
-</div>
+Production algorithmic stock trading system. ML-driven candidate scanning, 15-portfolio paper-trading competition, and Qlib alpha-factor research — all wired into a single pipeline.
 
 ---
 
-# TradingAgents: Multi-Agents LLM Financial Trading Framework
-
-## News
-- [2026-05] **TradingAgents v1.0.0** released. First official production release with complete multi-agent orchestration, data integration, paper trading, live verification, web dashboard, and API. See [CHANGELOG.md](CHANGELOG.md) for details.
-- [2026-04] **TradingAgents v0.2.4** released with structured-output agents (Research Manager, Trader, Portfolio Manager), LangGraph checkpoint resume, persistent decision log, DeepSeek/Qwen/GLM/Azure provider support, Docker, and a Windows UTF-8 encoding fix.
-- [2026-03] **TradingAgents v0.2.3** released with multi-language support, GPT-5.4 family models, unified model catalog, backtesting date fidelity, and proxy support.
-- [2026-03] **TradingAgents v0.2.2** released with GPT-5.4/Gemini 3.1/Claude 4.6 model coverage, five-tier rating scale, OpenAI Responses API, Anthropic effort control, and cross-platform stability.
-- [2026-02] **TradingAgents v0.2.0** released with multi-provider LLM support (GPT-5.x, Gemini 3.x, Claude 4.x, Grok 4.x) and improved system architecture.
-- [2026-01] **Trading-R1** [Technical Report](https://arxiv.org/abs/2509.11420) released, with [Terminal](https://github.com/TauricResearch/Trading-R1) expected to land soon.
-
-<div align="center">
-<a href="https://www.star-history.com/#TauricResearch/TradingAgents&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=TauricResearch/TradingAgents&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=TauricResearch/TradingAgents&type=Date" />
-   <img alt="TradingAgents Star History" src="https://api.star-history.com/svg?repos=TauricResearch/TradingAgents&type=Date" style="width: 80%; height: auto;" />
- </picture>
-</a>
-</div>
-
-> 🎉 **TradingAgents** officially released! We have received numerous inquiries about the work, and we would like to express our thanks for the enthusiasm in our community.
->
-> So we decided to fully open-source the framework. Looking forward to building impactful projects with you!
-
-<div align="center">
-
-🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
-
-</div>
-
-## TradingAgents Framework
-
-TradingAgents is a multi-agent trading framework that mirrors the dynamics of real-world trading firms. By deploying specialized LLM-powered agents: from fundamental analysts, sentiment experts, and technical analysts, to trader, risk management team, the platform collaboratively evaluates market conditions and informs trading decisions. Moreover, these agents engage in dynamic discussions to pinpoint the optimal strategy.
-
-<p align="center">
-  <img src="assets/schema.png" style="width: 100%; height: auto;">
-</p>
-
-> TradingAgents framework is designed for research purposes. Trading performance may vary based on many factors, including the chosen backbone language models, model temperature, trading periods, the quality of data, and other non-deterministic factors. [It is not intended as financial, investment, or trading advice.](https://tauric.ai/disclaimer/)
-
-Our framework decomposes complex trading tasks into specialized roles. This ensures the system achieves a robust, scalable approach to market analysis and decision-making.
-
-### Analyst Team
-- Fundamentals Analyst: Evaluates company financials and performance metrics, identifying intrinsic values and potential red flags.
-- Sentiment Analyst: Analyzes social media and public sentiment using sentiment scoring algorithms to gauge short-term market mood.
-- News Analyst: Monitors global news and macroeconomic indicators, interpreting the impact of events on market conditions.
-- Technical Analyst: Utilizes technical indicators (like MACD and RSI) to detect trading patterns and forecast price movements.
-
-<p align="center">
-  <img src="assets/analyst.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-### Researcher Team
-- Comprises both bullish and bearish researchers who critically assess the insights provided by the Analyst Team. Through structured debates, they balance potential gains against inherent risks.
-
-<p align="center">
-  <img src="assets/researcher.png" width="70%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-### Trader Agent
-- Composes reports from the analysts and researchers to make informed trading decisions. It determines the timing and magnitude of trades based on comprehensive market insights.
-
-<p align="center">
-  <img src="assets/trader.png" width="70%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-### Risk Management and Portfolio Manager
-- Continuously evaluates portfolio risk by assessing market volatility, liquidity, and other risk factors. The risk management team evaluates and adjusts trading strategies, providing assessment reports to the Portfolio Manager for final decision.
-- The Portfolio Manager approves/rejects the transaction proposal. If approved, the order will be sent to the simulated exchange and executed.
-
-<p align="center">
-  <img src="assets/risk.png" width="70%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-## Installation and CLI
-
-### Installation
-
-Clone TradingAgents:
-```bash
-git clone https://github.com/TauricResearch/TradingAgents.git
-cd TradingAgents
-```
-
-Create a virtual environment in any of your favorite environment managers:
-```bash
-conda create -n tradingagents python=3.13
-conda activate tradingagents
-```
-
-Install the package and its dependencies:
-```bash
-pip install .
-```
-
-### Docker
-
-Alternatively, run with Docker:
-```bash
-cp .env.example .env  # add your API keys
-docker compose run --rm tradingagents
-```
-
-For local models with Ollama:
-```bash
-docker compose --profile ollama run --rm tradingagents-ollama
-```
-
-### Required APIs
-
-TradingAgents supports multiple LLM providers. Set the API key for your chosen provider:
+## Quick Start
 
 ```bash
-export OPENAI_API_KEY=...          # OpenAI (GPT)
-export GOOGLE_API_KEY=...          # Google (Gemini)
-export ANTHROPIC_API_KEY=...       # Anthropic (Claude)
-export XAI_API_KEY=...             # xAI (Grok)
-export DEEPSEEK_API_KEY=...        # DeepSeek
-export DASHSCOPE_API_KEY=...       # Qwen (Alibaba DashScope)
-export ZHIPU_API_KEY=...           # GLM (Zhipu)
-export OPENROUTER_API_KEY=...      # OpenRouter
-export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
+# 1. Set up environment
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env       # fill in brokerage/API keys
+
+# 2. Train all models (first run only — 30–90 min)
+./start.sh train
+
+# 3. Start the system
+./start.sh all             # web dashboard + paper trading
 ```
 
-For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
+Dashboard: **http://localhost:8001**  
+Portfolio competition: **http://localhost:8001/portfolios**
 
-For local models, configure Ollama with `llm_provider: "ollama"` in your config.
+---
 
-Alternatively, copy `.env.example` to `.env` and fill in your keys:
+## Commands
+
+```
+./start.sh web          Start the web dashboard only (port 8001)
+./start.sh paper        Start 15-portfolio paper trading competition
+./start.sh train        Full pipeline: ML + HMM + Qlib + validation
+./start.sh retrain      Weekly model refresh (fastest, Qlib included)
+./start.sh all          Web + paper trading together
+./start.sh status       Show what's running + model health
+./start.sh logs         Tail latest logs
+./start.sh stop         Kill all managed processes
+```
+
+---
+
+## Architecture
+
+```
+Market Data (yfinance / Fidelity API)
+         │
+         ▼
+  Candidate Scanner          ← scripts/paper_trade_today.py
+  (breakout + pullback)
+         │
+         ▼
+  ML Scoring Layer           ← ml_models/latest/model_bundle.joblib
+  (XGBoost win-probability)
+  +  Qlib Alpha Factors      ← tradingagents/qlib_integration/
+  (momentum, volatility,     (qlib_mom_252_21, qlib_mom_63,
+   ATR-Z, close rank,         qlib_vol_ratio, qlib_atr_z,
+   cross-sectional ranks)     cross-sectional percentile ranks)
+         │
+         ▼
+  15 Portfolio Accounts      ← tradingagents/portfolios/
+  (signal / risk / hold / filter groups)
+  competing simultaneously
+         │
+         ▼
+  Web Dashboard              ← web/app.py  +  web/static/
+  + Portfolio Leaderboard    ← /portfolios  (live comparison)
+```
+
+---
+
+## Portfolio Competition
+
+15 named portfolios run simultaneously on the same candidate stream, each with different risk/sizing/hold parameters. The leaderboard at `/portfolios` ranks them by total return in real time.
+
+**Groups:**
+| Group | Hypothesis |
+|-------|-----------|
+| **Signal** | Different entry-signal sources (algo, ML, combined) |
+| **Risk** | Conservative vs. aggressive stop/target/sizing |
+| **Hold** | Quick exits (3d) vs. swing (25d) vs. standard |
+| **Filter** | ML probability gates at different thresholds |
+
+---
+
+## Training Pipeline
+
+### Quick retrain (recommended weekly)
 ```bash
-cp .env.example .env
+./start.sh retrain
+# or with full options:
+python3 scripts/retrain_weekly.py --tickers all_tickers.txt --include-qlib-features
 ```
 
-### CLI Usage
-
-Launch the interactive CLI:
+### Full pipeline (all models, resumable)
 ```bash
-tradingagents          # installed command
-python -m cli.main     # alternative: run directly from source
-```
-You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more.
-
-<p align="center">
-  <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-An interface will appear showing results as they load, letting you track the agent's progress as it runs.
-
-<p align="center">
-  <img src="assets/cli/cli_news.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-<p align="center">
-  <img src="assets/cli/cli_transaction.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-### Runtime Management and Migration
-
-Use the `agentic-restore` command to manage the background web app, cloudflare tunnel, and efficiently migrate your environment (ML models, caches, DBs) between machines.
-
-```bash
-agentic-restore start --restart --quick-tunnel  # Start the dashboard and tunnel
-agentic-restore status                          # Check health of services
-agentic-restore doctor                          # Diagnose missing deps/models
-agentic-restore stop                            # Stop background services
+./start.sh train
+# resume after interruption:
+python3 scripts/train_everything.py --resume tmp/train_everything/<run_id>/state.json
 ```
 
-**Migrating to a new machine:**
-Bundle your models and cache:
-```bash
-agentic-restore bundle-data --output ~/Desktop/agentic-trader-artifacts.tar.gz
+**What gets trained:**
+- `ml_models/latest/` — XGBoost win-probability model (walk-forward validated, gate: WF ROC ≥ 0.49)
+- `ml_models/stock_universe/` — Stock universe ranker
+- `ml_models/hmm_regime/` — Hidden Markov regime detector
+- Qlib features merged in at training time when `--include-qlib-features` is set
+
+### Model gate
+A retrain only deploys if:
+- Walk-forward ROC ≥ 0.49 (SE ≈ 0.009 over ~2000 OOS rows)
+- Brier score ≤ 0.25 (calibration check)
+- PSI feature stability pass
+
+---
+
+## Qlib Integration
+
+Qlib (0.9.8.dev31) provides lagged alpha factors used as model features. Enable with `--include-qlib-features`.
+
+**Factors:**
+| Feature | Description | History needed |
+|---------|-------------|---------------|
+| `qlib_mom_252_21` | 12-month minus 1-month momentum | ~273 days |
+| `qlib_mom_63` | 3-month minus 1-month momentum (fallback for short history) | ~85 days |
+| `qlib_vol_ratio` | Short/long volatility ratio | ~63 days |
+| `qlib_atr_z` | ATR normalized by 63-day mean | ~85 days |
+| `qlib_close_rank` | Cross-sectional price level rank | 1 day |
+| `qlib_cs_rank_*` | Per-scan-date percentile ranks of all 4 base factors | same as base |
+
+All features are lagged ≥ 1 day at the computation layer — no look-ahead.
+
+---
+
+## Directory Structure
+
 ```
-Restore on the new machine:
-```bash
-agentic-restore all \
-  --artifact-tar ~/Desktop/agentic-trader-artifacts.tar.gz \
-  --install \
-  --restart
-```
-See [`docs/COMMANDS.md`](COMMANDS.md) for detailed usage.
+scripts/
+  paper_trade_today.py     Main paper trading engine (15 portfolios)
+  retrain_weekly.py        Weekly ML retrain pipeline
+  train_everything.py      Full training orchestrator (resumable)
+  paper_trade_unified.py   UnifiedBrain alternative runner
+  daily_audit.py           Daily health check
 
-## Security & Hardening
+tradingagents/
+  portfolios/              15-portfolio competition framework
+    config.py              PortfolioConfig dataclass
+    registry.py            All 15 portfolio definitions
+    comparison.py          Stats engine (Sharpe, drawdown, equity curve)
+  ml/                      ML training + calibration
+  qlib_integration/        Qlib alpha factor pipeline
+  backtesting/             Backtest engine
+  screening/               Candidate scanners
 
-TradingAgents utilizes GitHub CodeQL to run static analysis on both Python and JavaScript codebases. The framework is hardened against common web vulnerabilities, including:
-- **Cross-Site Scripting (XSS)**: Strict `DOMPurify` HTML sanitization for dashboard updates.
-- **Path Injection**: Backend routes validating file paths strictly break taint paths.
-- **Information Exposure**: Exception traces are masked before being exposed to SMS endpoints or REST APIs.
-- **Log Injection**: Sensitve credentials stripped, and raw input sanitized before logging.
+web/
+  app.py                   FastAPI server
+  api/portfolios.py        Portfolio leaderboard API
+  static/portfolios.html   Portfolio comparison dashboard
 
-## TradingAgents Package
-
-### Implementation Details
-
-We built TradingAgents with LangGraph to ensure flexibility and modularity. The framework supports multiple LLM providers: OpenAI, Google, Anthropic, xAI, DeepSeek, Qwen (Alibaba DashScope), GLM (Zhipu), OpenRouter, Ollama for local models, and Azure OpenAI for enterprise.
-
-### Python Usage
-
-To use TradingAgents inside your code, you can import the `tradingagents` module and initialize a `TradingAgentsGraph()` object. The `.propagate()` function will return a decision. You can run `main.py`, here's also a quick example:
-
-```python
-from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.default_config import DEFAULT_CONFIG
-
-ta = TradingAgentsGraph(debug=True, config=DEFAULT_CONFIG.copy())
-
-# forward propagate
-_, decision = ta.propagate("NVDA", "2026-01-15")
-print(decision)
+tests/                     pytest suite (19 Qlib leakage tests, etc.)
+ml_models/                 Deployed model artifacts
+  latest/                  Active win-probability model
+  stock_universe/          Stock ranker model
+  hmm_regime/              Regime detector
 ```
 
-You can also adjust the default configuration to set your own choice of LLMs, debate rounds, etc.
+---
 
-```python
-from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.default_config import DEFAULT_CONFIG
+## Configuration
 
-config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"        # openai, google, anthropic, xai, deepseek, qwen, glm, openrouter, ollama, azure
-config["deep_think_llm"] = "gpt-5.4"     # Model for complex reasoning
-config["quick_think_llm"] = "gpt-5.4-mini" # Model for quick tasks
-config["max_debate_rounds"] = 2
+Copy `.env.example` to `.env` and configure:
 
-ta = TradingAgentsGraph(debug=True, config=config)
-_, decision = ta.propagate("NVDA", "2026-01-15")
-print(decision)
-```
+| Variable | Purpose |
+|----------|---------|
+| `FIDELITY_*` | Brokerage connection (paper mode is safe without this) |
+| `OPENAI_API_KEY` | Optional: LLM-based signal augmentation |
+| `ANTHROPIC_API_KEY` | Optional: LLM signal analysis |
+| `WEB_PORT` | Dashboard port (default: 8001) |
+| `PAPER_OUTPUT_DIR` | Where portfolio state files are written |
 
-See `tradingagents/default_config.py` for all configuration options.
+---
 
-## Persistence and Recovery
+## Safety
 
-TradingAgents persists two kinds of state across runs.
+- Paper trading only — no live order execution by default
+- Model gate blocks deployment of underperforming retrains
+- Leakage checks run automatically before every training (via `tests/test_qlib_leakage.py`)
+- `FORCE_FLATTEN` halts all positions on catastrophic drawdown
 
-### Decision log
+See `SECURITY.md` for full threat model.
 
-The decision log is always on. Each completed run appends its decision to `~/.tradingagents/memory/trading_memory.md`. On the next run for the same ticker, TradingAgents fetches the realised return (raw and alpha vs SPY), generates a one-paragraph reflection, and injects the most recent same-ticker decisions plus recent cross-ticker lessons into the Portfolio Manager prompt, so each analysis carries forward what worked and what didn't.
+---
 
-Override the path with `TRADINGAGENTS_MEMORY_LOG_PATH`.
+## Requirements
 
-### Checkpoint resume
-
-Checkpoint resume is opt-in via `--checkpoint`. When enabled, LangGraph saves state after each node so a crashed or interrupted run resumes from the last successful step instead of starting over. On a resume run you will see `Resuming from step N for <TICKER> on <date>` in the logs; on a new run you will see `Starting fresh`. Checkpoints are cleared automatically on successful completion.
-
-Per-ticker SQLite databases live at `~/.tradingagents/cache/checkpoints/<TICKER>.db` (override the base with `TRADINGAGENTS_CACHE_DIR`). Use `--clear-checkpoints` to reset all of them before a run.
+- Python 3.10+
+- Qlib 0.9.8+ (for `--include-qlib-features`)
+- Node.js 18+ (for frontend build only)
 
 ```bash
-tradingagents analyze --checkpoint           # enable for this run
-tradingagents analyze --clear-checkpoints    # reset before running
-```
-
-```python
-config = DEFAULT_CONFIG.copy()
-config["checkpoint_enabled"] = True
-ta = TradingAgentsGraph(config=config)
-_, decision = ta.propagate("NVDA", "2026-01-15")
-```
-
-## Contributing
-
-We welcome contributions from the community! Whether it's fixing a bug, improving documentation, or suggesting a new feature, your input helps make this project better. If you are interested in this line of research, please consider joining our open-source financial AI research community [Tauric Research](https://tauric.ai/).
-
-Past contributions, including code, design feedback, and bug reports, are credited per release in [`CHANGELOG.md`](CHANGELOG.md).
-
-## Citation
-
-Please reference our work if you find *TradingAgents* provides you with some help :)
-
-```
-@misc{xiao2025tradingagentsmultiagentsllmfinancial,
-      title={TradingAgents: Multi-Agents LLM Financial Trading Framework}, 
-      author={Yijia Xiao and Edward Sun and Di Luo and Wei Wang},
-      year={2025},
-      eprint={2412.20138},
-      archivePrefix={arXiv},
-      primaryClass={q-fin.TR},
-      url={https://arxiv.org/abs/2412.20138}, 
-}
+pip install -r requirements.txt
 ```

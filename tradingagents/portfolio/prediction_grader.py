@@ -16,9 +16,79 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# ── Benchmark price cache ─────────────────────────────────────────────────────
+
+def _fetch_benchmark_closes(
+    start: dt.date,
+    end: dt.date,
+    tickers: Tuple[str, ...] = ("SPY", "QQQ"),
+) -> Dict[str, Dict[str, float]]:
+    """Return {ticker: {date_str: close}} for the given date range.
+
+    Returns empty dict on any error (benchmark comparison degrades gracefully).
+    """
+    try:
+        import yfinance as yf
+        import pandas as pd
+        start_str = start.strftime("%Y-%m-%d")
+        end_str = (end + dt.timedelta(days=1)).strftime("%Y-%m-%d")
+        raw = yf.download(
+            list(tickers),
+            start=start_str,
+            end=end_str,
+            auto_adjust=True,
+            progress=False,
+            actions=False,
+        )
+        if raw is None or raw.empty:
+            return {}
+        close = raw["Close"] if "Close" in raw.columns else raw
+        out: Dict[str, Dict[str, float]] = {}
+        for tkr in tickers:
+            if tkr in close.columns:
+                series = close[tkr].dropna()
+                out[tkr] = {str(d.date()): float(v) for d, v in series.items()}
+            elif len(tickers) == 1:
+                series = close.dropna()
+                out[tkr] = {str(d.date()): float(v) for d, v in series.items()}
+        return out
+    except Exception:
+        return {}
+
+
+def _benchmark_return(
+    closes: Dict[str, float],
+    entry_date: str,
+    exit_date: str,
+) -> Optional[float]:
+    """Compute (exit_close - entry_close) / entry_close between two date strings."""
+    # Walk forward from entry_date to find first available close
+    try:
+        ed = dt.date.fromisoformat(entry_date[:10])
+        xd = dt.date.fromisoformat(exit_date[:10])
+    except Exception:
+        return None
+    if xd <= ed:
+        return None
+
+    def _find_close(target: dt.date, direction: int = 1) -> Optional[float]:
+        for offset in range(5):
+            d = target + dt.timedelta(days=offset * direction)
+            v = closes.get(str(d))
+            if v is not None:
+                return v
+        return None
+
+    entry_close = _find_close(ed, 1)
+    exit_close = _find_close(xd, -1) or _find_close(xd, 1)
+    if entry_close is None or exit_close is None or entry_close == 0:
+        return None
+    return round((exit_close - entry_close) / entry_close, 6)
 
 
 # ── GradeResult ───────────────────────────────────────────────────────────────
@@ -58,6 +128,13 @@ class GradeResult:
     # ── Bucketing ────────────────────────────────────────────────────────────
     confidence_bucket: str        # "low" <0.60, "mid" 0.60–0.70, "high" >=0.70
     return_bucket: str            # "loss" <0, "small_gain" 0–2%, "gain" 2%+
+
+    # ── Benchmark comparison ─────────────────────────────────────────────────
+    spy_return_over_hold: Optional[float] = None    # SPY return entry→exit
+    qqq_return_over_hold: Optional[float] = None    # QQQ return entry→exit
+    beat_spy: Optional[bool] = None                 # actual_return > spy_return
+    beat_qqq: Optional[bool] = None                 # actual_return > qqq_return
+    alpha_vs_spy: Optional[float] = None            # actual_return - spy_return
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -320,8 +397,15 @@ class PredictionGrader:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def grade_all(self) -> List[GradeResult]:
-        """Load events, match BUY/SELL pairs, grade all closed trades."""
+    def grade_all(self, fetch_benchmarks: bool = True) -> List[GradeResult]:
+        """Load events, match BUY/SELL pairs, grade all closed trades.
+
+        Parameters
+        ----------
+        fetch_benchmarks : bool
+            If True (default), enrich each grade with SPY/QQQ returns over the
+            hold period.  Set False to skip network calls in tests.
+        """
         events = self._load_events()
         buy_map, sell_list = self._extract_buy_sell(events)
         pairs = self._match_trades(buy_map, sell_list)
@@ -331,7 +415,60 @@ class PredictionGrader:
             g = self._grade_one(sell_ev, buy_ev)
             if g is not None:
                 grades.append(g)
+
+        if fetch_benchmarks and grades:
+            grades = self._enrich_benchmarks(grades)
+
         return grades
+
+    # ── Benchmark enrichment ─────────────────────────────────────────────────
+
+    def _enrich_benchmarks(self, grades: List[GradeResult]) -> List[GradeResult]:
+        """Fetch SPY/QQQ and attach beat_spy, beat_qqq, alpha_vs_spy to each grade."""
+        dates = []
+        for g in grades:
+            try:
+                d0 = dt.date.fromisoformat(g.trade_id.split("_")[1][:10])
+                dates.append(d0)
+            except Exception:
+                pass
+            try:
+                graded = dt.date.fromisoformat(g.graded_at[:10])
+                dates.append(graded)
+            except Exception:
+                pass
+        if not dates:
+            return grades
+
+        min_date = min(dates) - dt.timedelta(days=5)
+        max_date = max(dates) + dt.timedelta(days=5)
+        bench_data = _fetch_benchmark_closes(min_date, max_date)
+        spy_closes = bench_data.get("SPY", {})
+        qqq_closes = bench_data.get("QQQ", {})
+
+        enriched = []
+        for g in grades:
+            try:
+                entry_date = g.trade_id.split("_")[1][:10]
+                exit_date = g.graded_at[:10]
+                spy_ret = _benchmark_return(spy_closes, entry_date, exit_date)
+                qqq_ret = _benchmark_return(qqq_closes, entry_date, exit_date)
+                beat_spy = (g.actual_return > spy_ret) if spy_ret is not None else None
+                beat_qqq = (g.actual_return > qqq_ret) if qqq_ret is not None else None
+                alpha = round(g.actual_return - spy_ret, 6) if spy_ret is not None else None
+                import dataclasses
+                g = dataclasses.replace(
+                    g,
+                    spy_return_over_hold=spy_ret,
+                    qqq_return_over_hold=qqq_ret,
+                    beat_spy=beat_spy,
+                    beat_qqq=beat_qqq,
+                    alpha_vs_spy=alpha,
+                )
+            except Exception:
+                pass
+            enriched.append(g)
+        return enriched
 
     def grade_recent(self, days: int = 30) -> List[GradeResult]:
         """Grade only trades closed in the last N days."""
@@ -382,7 +519,16 @@ class PredictionGrader:
         ll_pred_acc = sum(1 for g in ll_gradeable if g.ll_prediction_correct) / max(len(ll_gradeable), 1)
         stop_rate = sum(1 for g in grades if g.stop_hit) / n
         target_rate = sum(1 for g in grades if g.target_hit) / n
-        return {
+
+        # Benchmark comparison (only grades that have benchmark data)
+        spy_gradeable = [g for g in grades if g.beat_spy is not None]
+        qqq_gradeable = [g for g in grades if g.beat_qqq is not None]
+        alpha_gradeable = [g for g in grades if g.alpha_vs_spy is not None]
+        beat_spy_rate = sum(1 for g in spy_gradeable if g.beat_spy) / max(len(spy_gradeable), 1) if spy_gradeable else None
+        beat_qqq_rate = sum(1 for g in qqq_gradeable if g.beat_qqq) / max(len(qqq_gradeable), 1) if qqq_gradeable else None
+        avg_alpha = sum(g.alpha_vs_spy for g in alpha_gradeable) / max(len(alpha_gradeable), 1) if alpha_gradeable else None
+
+        result = {
             "n": n,
             "win_rate": round(win_rate, 4),
             "win_prediction_accuracy": round(win_pred_acc, 4),
@@ -392,3 +538,11 @@ class PredictionGrader:
             "stop_rate": round(stop_rate, 4),
             "target_rate": round(target_rate, 4),
         }
+        if beat_spy_rate is not None:
+            result["beat_spy_rate"] = round(beat_spy_rate, 4)
+            result["beat_spy_n"] = len(spy_gradeable)
+        if beat_qqq_rate is not None:
+            result["beat_qqq_rate"] = round(beat_qqq_rate, 4)
+        if avg_alpha is not None:
+            result["avg_alpha_vs_spy"] = round(avg_alpha, 4)
+        return result

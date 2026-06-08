@@ -29,6 +29,62 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+# ── CalibrationBucket ────────────────────────────────────────────────────────
+
+@dataclass
+class CalibrationBucket:
+    """One bin of the reliability diagram (predicted prob → actual win rate)."""
+    label: str              # e.g. "0.50–0.55"
+    prob_low: float
+    prob_high: float
+    n: int
+    mean_predicted_prob: float
+    actual_win_rate: float
+    calibration_error: float  # |mean_predicted_prob - actual_win_rate|
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def _compute_calibration_curve(
+    grades: list,
+    edges: Optional[List[float]] = None,
+) -> List[CalibrationBucket]:
+    """Produce a reliability diagram from GradeResult objects.
+
+    Parameters
+    ----------
+    grades : list of GradeResult
+    edges : list of floats defining bin boundaries (default: 0.50..1.00 in 0.05 steps)
+
+    Returns list of CalibrationBucket, one per non-empty bin (sorted by prob_low).
+    """
+    if edges is None:
+        edges = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 1.01]
+
+    buckets: List[CalibrationBucket] = []
+    for i in range(len(edges) - 1):
+        lo, hi = edges[i], edges[i + 1]
+        in_bin = [g for g in grades if lo <= g.predicted_win_prob < hi]
+        if not in_bin:
+            continue
+        n = len(in_bin)
+        mean_pred = sum(g.predicted_win_prob for g in in_bin) / n
+        actual_wr = sum(1 for g in in_bin if g.actual_win) / n
+        cal_err = abs(mean_pred - actual_wr)
+        label = f"{lo:.2f}–{min(hi, 1.0):.2f}"
+        buckets.append(CalibrationBucket(
+            label=label,
+            prob_low=lo,
+            prob_high=min(hi, 1.0),
+            n=n,
+            mean_predicted_prob=round(mean_pred, 4),
+            actual_win_rate=round(actual_wr, 4),
+            calibration_error=round(cal_err, 4),
+        ))
+    return buckets
+
+
 # ── Slice stats ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -86,6 +142,7 @@ class StatsReport:
     by_confidence_bucket: Dict[str, Dict] = field(default_factory=dict)
     by_model_version: Dict[str, Dict] = field(default_factory=dict)
     by_return_bucket: Dict[str, Dict] = field(default_factory=dict)
+    calibration_curve: List[Dict] = field(default_factory=list)  # fine-grained reliability diagram
 
     def to_dict(self) -> Dict[str, Any]:
         d = {
@@ -98,6 +155,7 @@ class StatsReport:
             "by_confidence_bucket": self.by_confidence_bucket,
             "by_model_version": self.by_model_version,
             "by_return_bucket": self.by_return_bucket,
+            "calibration_curve": self.calibration_curve,
         }
         return d
 
@@ -197,6 +255,9 @@ class ReliabilityStats:
             if sl and sl.n >= self.min_n_for_slice:
                 by_ret[bucket] = sl.to_dict()
 
+        # ── Calibration curve (fine-grained reliability diagram) ─────────
+        cal_curve = [b.to_dict() for b in _compute_calibration_curve(recent)]
+
         return StatsReport(
             computed_at=dt.datetime.now().isoformat(),
             window_trades=n,
@@ -207,6 +268,7 @@ class ReliabilityStats:
             by_confidence_bucket=by_conf,
             by_model_version=by_mv,
             by_return_bucket=by_ret,
+            calibration_curve=cal_curve,
         )
 
     def save(self, report: StatsReport, path: str | Path) -> None:
@@ -234,6 +296,7 @@ class ReliabilityStats:
                 by_confidence_bucket=d.get("by_confidence_bucket", {}),
                 by_model_version=d.get("by_model_version", {}),
                 by_return_bucket=d.get("by_return_bucket", {}),
+                calibration_curve=d.get("calibration_curve", []),
             )
         except Exception:
             return None
