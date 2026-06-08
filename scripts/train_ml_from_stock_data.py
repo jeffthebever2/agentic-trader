@@ -657,9 +657,11 @@ def _merge_qlib_features(dataset_path: Path, price_cache: dict) -> Path:
         print(f"[qlib] LEAKAGE ERROR — aborting qlib feature merge: {exc}", file=sys.stderr)
         raise
     except ImportError as exc:
-        print(f"[qlib] WARNING: qlib feature merge skipped — {exc}", file=sys.stderr)
+        print(f"[qlib] ERROR: qlib feature merge requested but unavailable — {exc}", file=sys.stderr)
+        raise
     except Exception as exc:
-        print(f"[qlib] WARNING: qlib feature merge failed — {exc}", file=sys.stderr)
+        print(f"[qlib] ERROR: qlib feature merge requested but failed — {exc}", file=sys.stderr)
+        raise
 
     return dataset_path
 

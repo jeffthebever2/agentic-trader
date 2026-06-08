@@ -54,6 +54,16 @@ bg_start() {
     info "$name PID $pid"
 }
 
+cmd_portfolio_report() {
+    cd "$ROOT"
+    "$PY" scripts/portfolio_report.py "$@"
+}
+
+cmd_model_status() {
+    cd "$ROOT"
+    "$PY" scripts/check_retrain_status.py "$@"
+}
+
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 cmd_web() {
@@ -195,16 +205,21 @@ CMD="${1:-help}"
 shift || true
 
 case "$CMD" in
-    web)     cmd_web "$@" ;;
-    paper)   cmd_paper "$@" ;;
-    train)   cmd_train "$@" ;;
-    retrain) cmd_retrain "$@" ;;
-    all)     cmd_all "$@" ;;
-    status)  cmd_status "$@" ;;
-    logs)    cmd_logs "$@" ;;
-    stop)    cmd_stop "$@" ;;
+    web)              cmd_web "$@" ;;
+    paper)            cmd_paper "$@" ;;
+    train)            cmd_train "$@" ;;
+    retrain)          cmd_retrain "$@" ;;
+    all)              cmd_all "$@" ;;
+    status)           cmd_status "$@" ;;
+    logs)             cmd_logs "$@" ;;
+    stop)             cmd_stop "$@" ;;
+    portfolios|report) cmd_portfolio_report "$@" ;;
+    model|model-status) cmd_model_status "$@" ;;
     help|--help|-h)
         sed -n '2,14p' "$0"
+        echo ""
+        echo "  ./start.sh portfolios       Show portfolio competition leaderboard (CLI)"
+        echo "  ./start.sh model            Show deployed model health + retrain history"
         ;;
     *)
         error "Unknown command: $CMD"

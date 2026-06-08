@@ -115,6 +115,82 @@ Dry-run (prints command, does not execute):
 python scripts/retrain_weekly.py --dry-run --months 84
 ```
 
+## Train everything in one resumable command
+
+Run the production ML retrain, stock-universe ML retrain, HMM regime retrain,
+Qlib smoke validation, Qlib research report, readiness checks, and audit as one
+checkpointed workflow:
+
+```bash
+python3 scripts/train_everything.py
+```
+
+Before a long run, inspect the exact commands without training:
+
+```bash
+python3 scripts/train_everything.py --dry-run
+```
+
+If the machine sleeps, the network drops, or you stop the run, resume from the
+state file printed by the script:
+
+```bash
+python3 scripts/train_everything.py --resume tmp/train_everything/<run_id>/state.json
+```
+
+Safety behavior:
+
+- long stages write logs under `tmp/train_everything/<run_id>/logs/`
+- new artifacts train into `tmp/train_everything/<run_id>/staging/`
+- deployed model directories are backed up under `tmp/train_everything/<run_id>/backups/`
+- `ml_models/latest`, `ml_models/stock_universe`, and `ml_models/hmm_regime`
+  are promoted only after validation passes
+- CPCV, Deflated Sharpe, and noise-feature checks are enabled by default where
+  the trainer supports them
+
+Use `--profile quick --max-tickers 25` for a smoke-sized workflow and
+`--profile full --include-rl` when you intentionally want the long TD3/RL
+training stage included.
+
+Add `--include-qlib-features` when you want both production retraining and
+stock-universe retraining to merge leakage-checked, one-day-lagged `qlib_*`
+features before training. If a staged ML artifact actually used Qlib features,
+promotion is blocked until the Qlib paper account has enough graded forward
+evidence. Defaults: at least 20 graded Qlib paper trades, win rate >= 50%, and
+average return >= 0%. Tune with `--qlib-min-forward-grades`,
+`--qlib-min-forward-win-rate`, and `--qlib-min-forward-avg-return`. The
+`--qlib-forward-evidence-warning-only` flag exists for research/staging only; do
+not use it for production promotion.
+
+## Live broker safety
+
+Live broker execution must pass `tradingagents.compliance.validate_live_order`.
+That shared gate blocks market orders, stale quotes, missing quote timestamps,
+yfinance/Yahoo/fallback-only quotes, untrusted providers, market-closed quotes,
+and wide spreads. Fidelity, Webull, paper-runner Fidelity routing, and thematic
+Fidelity routing all use this contract; preview/paper-only paths may use
+historical feeds, but `execute=True` broker orders require fresh trusted quote
+evidence.
+
+## Qlib paper portfolio
+
+Run a separate, paper-only Qlib factor account to gather forward evidence before
+any production decision:
+
+```bash
+python3 scripts/paper_trade_qlib.py --tickers-file all_tickers.txt --max-tickers 100 --reset
+```
+
+This runner writes under `tmp/paper_trading_qlib/qlib_factor_paper/`, uses the
+same leakage-lagged Qlib feature code as training, and never imports live broker
+execution paths. Inspect `qlib_signals_YYYYMMDD.json`,
+`qlib_factor_audit_YYYYMMDD.jsonl`, `state.json`, and
+`paper_decisions.jsonl` for forward/paper evidence. BUY predictions are also
+logged before paper execution in `prediction_ledger.jsonl`; closed trades can be
+graded with `PredictionGrader` from the same account directory. `daily_audit.py`
+also checks this Qlib paper account via `--qlib-paper-dir`; missing Qlib forward
+evidence is a WARN, not production proof.
+
 ## Validate thematic signals
 
 Backtest historical thematic scanner signals against realized returns. Reads

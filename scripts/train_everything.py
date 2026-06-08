@@ -142,6 +142,7 @@ def _validate_ml_artifacts(model_dir: Path, min_wf_roc: float = 0.49) -> dict[st
         "deflated_sharpe": report.get("deflated_sharpe"),
         "cpcv": report.get("cpcv"),
         "noise_feature_test": report.get("noise_feature_test"),
+        "qlib_features": report.get("qlib_features", {}),
         "schema_warnings": schema_warnings,
     }
 
@@ -168,6 +169,75 @@ def _validate_rl_artifacts(checkpoint_dir: Path) -> dict[str, Any]:
     return {"checkpoint_dir": str(checkpoint_dir), "tickers": meta.get("tickers"), "obs_dim": meta.get("obs_dim")}
 
 
+def _validate_qlib_research_reports(report_dir: Path) -> dict[str, Any]:
+    reports = sorted(report_dir.glob("*_qlib_research.json"))
+    if not reports:
+        raise RuntimeError(f"Qlib research report missing in {report_dir}")
+    latest = reports[-1]
+    report = _load_json(latest)
+    if report.get("status") == "BLOCKED":
+        raise RuntimeError(f"Qlib research blocked: {report.get('blocker', 'unknown blocker')}")
+    if report.get("leakage_safe") is not True:
+        raise RuntimeError(f"Qlib research leakage check did not pass: {report.get('leakage_check')}")
+    if report.get("production_ready") is not False:
+        raise RuntimeError("Qlib research report must stay research-only; production_ready should be false")
+    return {
+        "report": str(latest),
+        "qlib_version": report.get("qlib_version"),
+        "status": report.get("status"),
+        "leakage_safe": report.get("leakage_safe"),
+        "production_ready": report.get("production_ready"),
+        "factor_count": len(report.get("factor_ic", {}).get("aggregated", {}) or {}),
+        "tournament_best_model": report.get("tournament", {}).get("best_model"),
+        "tournament_best_wf_roc": report.get("tournament", {}).get("best_wf_roc"),
+    }
+
+
+def _validate_qlib_forward_evidence(
+    qlib_dir: Path,
+    *,
+    min_grades: int = 20,
+    min_win_rate: float = 0.50,
+    min_avg_return: float = 0.0,
+) -> dict[str, Any]:
+    ledger_path = qlib_dir / "prediction_ledger.jsonl"
+    if not ledger_path.exists():
+        raise RuntimeError(
+            f"Qlib forward-evidence ledger missing at {ledger_path}; "
+            "run scripts/paper_trade_qlib.py and collect paper outcomes before promoting Qlib-feature models"
+        )
+
+    from tradingagents.portfolio.prediction_ledger import PredictionLedger
+    from tradingagents.portfolio.prediction_grader import PredictionGrader
+
+    buys = PredictionLedger(ledger_path).read_buys()
+    grades = PredictionGrader(qlib_dir).grade_all(fetch_benchmarks=False)
+    n_grades = len(grades)
+    if n_grades < min_grades:
+        raise RuntimeError(
+            f"Qlib forward evidence has {n_grades} graded trade(s), requires >= {min_grades}"
+        )
+
+    win_rate = sum(1 for g in grades if g.actual_win) / n_grades
+    avg_return = sum(g.actual_return for g in grades) / n_grades
+    if win_rate < min_win_rate:
+        raise RuntimeError(f"Qlib paper win rate {win_rate:.1%} < required {min_win_rate:.1%}")
+    if avg_return < min_avg_return:
+        raise RuntimeError(f"Qlib paper avg return {avg_return:.2%} < required {min_avg_return:.2%}")
+
+    return {
+        "qlib_dir": str(qlib_dir),
+        "ledger": str(ledger_path),
+        "n_buy_entries": len(buys),
+        "n_grades": n_grades,
+        "win_rate": round(win_rate, 4),
+        "avg_return": round(avg_return, 6),
+        "min_grades": min_grades,
+        "min_win_rate": min_win_rate,
+        "min_avg_return": min_avg_return,
+    }
+
+
 class TrainingRun:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -178,7 +248,7 @@ class TrainingRun:
             self.run_dir = self.state_path.parent
             self.run_id = self.state.get("run_id", self.run_dir.name)
         else:
-            self.run_id = args.run_id or dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.run_id = args.run_id or dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             self.run_dir = RUNS_ROOT / self.run_id
             self.state_path = self.run_dir / "state.json"
             self.state = {
@@ -286,6 +356,7 @@ class TrainingRun:
             "scripts/train_ml_from_stock_data.py",
             "scripts/train_hmm_regime.py",
             "scripts/model_readiness_report.py",
+            "scripts/qlib_research.py",
             "all_tickers.txt",
         ]:
             if not (ROOT / rel).exists():
@@ -353,6 +424,8 @@ class TrainingRun:
             cmd.append("--rebuild-dataset")
         else:
             cmd.append("--resume-dataset")
+        if getattr(self.args, "include_qlib_features", False):
+            cmd.append("--include-qlib-features")
         if self.args.max_tickers:
             cmd.extend(["--max-tickers", str(self.args.max_tickers)])
         return cmd, target
@@ -389,6 +462,26 @@ class TrainingRun:
         if self.args.rl_resume_checkpoint:
             cmd.extend(["--checkpoint", self.args.rl_resume_checkpoint])
         return cmd, target
+
+    def command_qlib_research(self) -> tuple[list[str], Path]:
+        report_dir = self.run_dir / "qlib_reports"
+        end_date = self.args.qlib_end or dt.date.today().isoformat()
+        cmd = [
+            self.python, "scripts/qlib_research.py",
+            "--tickers-file", self.args.tickers,
+            "--max-tickers", str(self.args.qlib_max_tickers),
+            "--start", self.args.qlib_start,
+            "--end", end_date,
+            "--forward-days", str(self.args.qlib_forward_days),
+            "--report-dir", str(report_dir),
+            "--max-tickers-ic", str(self.args.qlib_max_tickers_ic),
+            "--max-tickers-tournament", str(self.args.qlib_max_tickers_tournament),
+        ]
+        if self.args.qlib_skip_ic:
+            cmd.append("--skip-ic")
+        if self.args.qlib_skip_tournament:
+            cmd.append("--skip-tournament")
+        return cmd, report_dir
 
     def run(self) -> None:
         self.run_callable_stage("preflight", self.preflight)
@@ -438,6 +531,12 @@ class TrainingRun:
             self.run_command_stage("qlib_smoke", [
                 self.python, "-m", "tradingagents.qlib_integration.smoke",
             ])
+            qlib_cmd, qlib_report_dir = self.command_qlib_research()
+            self.run_command_stage("qlib_research_report", qlib_cmd)
+            self.run_callable_stage(
+                "qlib_research_validate",
+                lambda: _validate_qlib_research_reports(qlib_report_dir),
+            )
 
         if self.args.include_rl:
             rl_cmd, rl_target = self.command_rl()
@@ -455,14 +554,17 @@ class TrainingRun:
                 "tests/test_training_report_schema.py",
                 "tests/test_model_readiness_report.py",
                 "tests/test_qlib_integration.py",
+                "tests/test_qlib_leakage.py",
                 "tests/test_hmm_regime.py",
                 "tests/test_deflated_sharpe.py",
                 "tests/test_factor_ic.py",
+                "tests/test_qlib_leakage.py",
                 "-q",
             ])
 
         self.run_command_stage("daily_audit", [
             self.python, "scripts/daily_audit.py", "--json",
+            "--qlib-paper-dir", self.args.qlib_paper_dir,
         ], optional=True)
         self.state["completed_at"] = _now()
         self.save()
@@ -470,6 +572,15 @@ class TrainingRun:
 
     def _validate_and_promote_ml(self, staging: Path, target: Path) -> dict[str, Any]:
         validation = _validate_ml_artifacts(staging, min_wf_roc=self.args.min_roc)
+        qlib_features = validation.get("qlib_features") if isinstance(validation, dict) else {}
+        qlib_used = bool(qlib_features.get("used")) if isinstance(qlib_features, dict) else False
+        if qlib_used and not getattr(self.args, "qlib_forward_evidence_warning_only", False):
+            validation["qlib_forward_evidence"] = _validate_qlib_forward_evidence(
+                ROOT / getattr(self.args, "qlib_paper_dir", "tmp/paper_trading_qlib/qlib_factor_paper"),
+                min_grades=int(getattr(self.args, "qlib_min_forward_grades", 20)),
+                min_win_rate=float(getattr(self.args, "qlib_min_forward_win_rate", 0.50)),
+                min_avg_return=float(getattr(self.args, "qlib_min_forward_avg_return", 0.0)),
+            )
         backup = _promote_dir(staging, target, self.backups_dir, self.args.dry_run)
         promotion = {"kind": "ml", "target": str(target), "backup": str(backup) if backup else None, "validation": validation}
         self.state.setdefault("promotions", []).append(promotion)
@@ -511,7 +622,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--skip-hmm", action="store_true")
     p.add_argument("--skip-qlib", action="store_true")
     p.add_argument("--include-qlib-features", action="store_true",
-                   help="Pass --include-qlib-features to retrain_weekly.py to train with qlib alpha factors.")
+                   help="Train production and stock-universe ML with leakage-checked lagged qlib alpha factors.")
+    p.add_argument("--qlib-start", default="2020-01-01")
+    p.add_argument("--qlib-end", default="")
+    p.add_argument("--qlib-forward-days", type=int, default=5)
+    p.add_argument("--qlib-max-tickers", type=int, default=50,
+                   help="Ticker cap for Qlib research report. Use 0 for no cap.")
+    p.add_argument("--qlib-max-tickers-ic", type=int, default=20)
+    p.add_argument("--qlib-max-tickers-tournament", type=int, default=10)
+    p.add_argument("--qlib-skip-ic", action="store_true")
+    p.add_argument("--qlib-skip-tournament", action="store_true")
+    p.add_argument("--qlib-paper-dir", default="tmp/paper_trading_qlib/qlib_factor_paper")
+    p.add_argument("--qlib-min-forward-grades", type=int, default=20)
+    p.add_argument("--qlib-min-forward-win-rate", type=float, default=0.50)
+    p.add_argument("--qlib-min-forward-avg-return", type=float, default=0.0)
+    p.add_argument(
+        "--qlib-forward-evidence-warning-only",
+        action="store_true",
+        help=(
+            "Do not block Qlib-feature ML promotion on missing or insufficient Qlib paper evidence. "
+            "Use only for research/staging; production should keep the hard gate enabled."
+        ),
+    )
     p.add_argument("--include-rl", action="store_true", help="Include long TD3/RL training.")
 
     p.add_argument("--months", type=int, default=84)
@@ -559,6 +691,9 @@ def parse_args() -> argparse.Namespace:
         args.max_tickers = args.max_tickers or 25
         args.months = min(args.months, 12)
         args.rl_iterations = min(args.rl_iterations, 2_000)
+        args.qlib_max_tickers = min(args.qlib_max_tickers, 10)
+        args.qlib_max_tickers_ic = min(args.qlib_max_tickers_ic, 5)
+        args.qlib_max_tickers_tournament = min(args.qlib_max_tickers_tournament, 3)
         args.skip_holdout = True
     elif args.profile == "full":
         args.include_rl = True if not any(a == "--include-rl" for a in sys.argv) else args.include_rl

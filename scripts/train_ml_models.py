@@ -437,12 +437,25 @@ def train_models(args) -> dict:
         "qlib_mom_252_21", "qlib_mom_63", "qlib_vol_ratio", "qlib_atr_z", "qlib_close_rank",
         "qlib_cs_rank_mom_252_21", "qlib_cs_rank_mom_63", "qlib_cs_rank_vol_ratio", "qlib_cs_rank_close_rank",
     ]
+    _include_qlib_features = bool(getattr(args, "include_qlib_features", False))
     _qlib_cols_used = [c for c in _QLIB_COLS if c in frame.columns]
     _qlib_cols_excluded = [c for c in _QLIB_COLS if c not in frame.columns]
-    if _qlib_cols_used:
+    if _include_qlib_features and not _qlib_cols_used:
+        raise SystemExit(
+            "--include-qlib-features was requested, but the input dataset has no qlib_* "
+            "columns. Enrich the dataset first via train_ml_from_stock_data.py "
+            "--include-qlib-features or retrain_weekly.py --include-qlib-features."
+        )
+    if _include_qlib_features and _qlib_cols_used:
         numeric = numeric + [c for c in _qlib_cols_used if c not in numeric]
         print(f"  qlib features: {_qlib_cols_used} (included in numeric features)")
-    if _qlib_cols_excluded:
+    elif _qlib_cols_used:
+        print(
+            f"  qlib features present but not enabled: {_qlib_cols_used} "
+            "(pass --include-qlib-features to train with them)"
+        )
+        _qlib_cols_used = []
+    if _include_qlib_features and _qlib_cols_excluded:
         print(f"  qlib features: {_qlib_cols_excluded} not in frame — skipped "
               f"(run with --include-qlib-features to add them)")
 
@@ -716,6 +729,7 @@ def train_models(args) -> dict:
         "models": {},
         "leakage_check": {"status": "clean", "leaky_features": []},
         "qlib_features": {
+            "requested": _include_qlib_features,
             "used": bool(_qlib_cols_used),
             "columns": _qlib_cols_used,
             "count": len(_qlib_cols_used),
@@ -1181,6 +1195,16 @@ def parse_args():
     parser.add_argument(
         "--noise-feature-test", action="store_true", default=False,
         help="Inject Gaussian noise features and flag real features below noise threshold.",
+    )
+    parser.add_argument(
+        "--include-qlib-features",
+        action="store_true",
+        default=False,
+        help=(
+            "Train with precomputed, leakage-checked qlib_* columns. This flag does not "
+            "create the columns; enrich the dataset first via train_ml_from_stock_data.py "
+            "or retrain_weekly.py with --include-qlib-features."
+        ),
     )
     # MS-1: GBDT ensemble member selection
     parser.add_argument(
