@@ -180,10 +180,12 @@ class PredictionGrader:
     # ── Load events ──────────────────────────────────────────────────────────
 
     def _load_events(self) -> List[Dict[str, Any]]:
-        """Load all events from all event_log.jsonl files under account_dir."""
+        """Load all events from event_log.jsonl/events.jsonl files under account_dir."""
         events = []
-        # Search all day subdirectories for event logs
-        for event_file in sorted(self.account_dir.rglob("event_log.jsonl")):
+        # Search all day subdirectories for both legacy and dashboard event logs.
+        event_files = set(self.account_dir.rglob("event_log.jsonl"))
+        event_files.update(self.account_dir.rglob("events.jsonl"))
+        for event_file in sorted(event_files):
             try:
                 with open(event_file) as f:
                     for line in f:

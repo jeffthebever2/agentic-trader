@@ -16,6 +16,7 @@ from daily_audit import (
     FAIL,
     _audit_change_control,
     _audit_prediction_ledger,
+    _audit_qlib_forward_evidence,
 )
 
 
@@ -43,8 +44,36 @@ def test_audit_report_pass_when_all_ok(tmp_path):
     PredictionLedger(paper_dir / "prediction_ledger.jsonl").log(
         "AAPL", "BUY", now=dt.datetime(2026, 6, 6, 14, 0)
     )
+    qlib_dir = tmp_path / "qlib_factor_paper"
+    PredictionLedger(qlib_dir / "prediction_ledger.jsonl").log(
+        "AAPL", "BUY", now=dt.datetime(2026, 6, 6, 14, 0)
+    )
+    (qlib_dir / "events.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-06-06T14:00:00",
+                "type": "BUY",
+                "ticker": "AAPL",
+                "entry_time": "2026-06-06T14:00:00",
+                "entry_price": 100.0,
+                "alpha_score": 0.9,
+                "alpha_tier": "QLIB",
+                "model_version": "qlib_factor_v1",
+            }),
+            json.dumps({
+                "timestamp": "2026-06-07T14:00:00",
+                "type": "SELL",
+                "ticker": "AAPL",
+                "entry_time": "2026-06-06T14:00:00",
+                "pnl_pct": 0.03,
+                "exit_reason": "TAKE_PROFIT",
+                "target_hit": True,
+            }),
+        ]),
+        encoding="utf-8",
+    )
     cc_path = tmp_path / "cc.jsonl"
-    rpt = run_audit(bundle, rpt_path, paper_dir, cc_path)
+    rpt = run_audit(bundle, rpt_path, paper_dir, cc_path, qlib_dir)
     assert rpt.overall == PASS
 
 
@@ -116,6 +145,69 @@ def test_ledger_present_passes(tmp_path):
     ledger.log("AAPL", "BUY", now=dt.datetime(2026, 6, 6, 14, 0))
     findings = _audit_prediction_ledger(tmp_path)
     assert any(f.id == "LEDGER_OK" and f.severity == PASS for f in findings)
+
+
+# ── _audit_qlib_forward_evidence ──────────────────────────────────────────────
+
+def test_qlib_forward_evidence_missing_warns(tmp_path):
+    findings = _audit_qlib_forward_evidence(tmp_path / "missing_qlib")
+    assert any(f.id == "QLIB_LEDGER_MISSING" and f.severity == WARN for f in findings)
+
+
+def test_qlib_forward_evidence_awaiting_outcomes_warns(tmp_path):
+    import datetime as dt
+    from tradingagents.portfolio.prediction_ledger import PredictionLedger
+
+    qlib_dir = tmp_path / "qlib"
+    PredictionLedger(qlib_dir / "prediction_ledger.jsonl").log(
+        "AAPL", "BUY", now=dt.datetime(2026, 6, 6, 14, 0)
+    )
+
+    findings = _audit_qlib_forward_evidence(qlib_dir)
+
+    assert any(f.id == "QLIB_AWAITING_OUTCOMES" and f.severity == WARN for f in findings)
+
+
+def test_qlib_forward_evidence_grades_closed_trade(tmp_path):
+    import datetime as dt
+    from tradingagents.portfolio.prediction_ledger import PredictionLedger
+
+    qlib_dir = tmp_path / "qlib"
+    PredictionLedger(qlib_dir / "prediction_ledger.jsonl").log(
+        "AAPL", "BUY", now=dt.datetime(2026, 6, 6, 14, 0)
+    )
+    (qlib_dir / "events.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "timestamp": "2026-06-06T14:00:00",
+                "type": "BUY",
+                "ticker": "AAPL",
+                "entry_time": "2026-06-06T14:00:00",
+                "entry_price": 100.0,
+                "alpha_score": 0.9,
+                "alpha_tier": "QLIB",
+                "model_version": "qlib_factor_v1",
+            }),
+            json.dumps({
+                "timestamp": "2026-06-08T14:00:00",
+                "type": "SELL",
+                "ticker": "AAPL",
+                "entry_time": "2026-06-06T14:00:00",
+                "pnl_pct": 0.04,
+                "exit_reason": "TAKE_PROFIT",
+                "target_hit": True,
+            }),
+        ]),
+        encoding="utf-8",
+    )
+
+    findings = _audit_qlib_forward_evidence(qlib_dir)
+
+    finding = next(f for f in findings if f.id == "QLIB_FORWARD_EVIDENCE")
+    assert finding.severity == PASS
+    assert finding.detail["n_buy_entries"] == 1
+    assert finding.detail["n_grades"] == 1
+    assert finding.detail["avg_return"] == pytest.approx(0.04)
 
 
 # ── CLI smoke test ────────────────────────────────────────────────────────────

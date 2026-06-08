@@ -38,6 +38,12 @@ def test_execute_rejects_yfinance_only_quote():
     assert "provider_untrusted" in decision.reason
 
 
+def test_execute_rejects_webull_market_abbreviation():
+    decision = validate_live_order(_order(order_type="MKT"))
+    assert not decision.allowed
+    assert "prohibited" in decision.reason
+
+
 def test_execute_rejects_stale_quote():
     decision = validate_live_order(
         _order(quote_time=(NOW - dt.timedelta(seconds=10)).isoformat())

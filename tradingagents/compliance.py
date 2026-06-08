@@ -61,7 +61,11 @@ def validate_live_order(order: dict[str, Any] | None = None) -> ComplianceDecisi
         return ComplianceDecision(allowed=False, reason="Order dict is None — rejected.")
 
     action     = str(order.get("action", "")).lower()
-    order_type = str(order.get("order_type", "")).lower()
+    raw_order_type = str(order.get("order_type", "")).lower().strip()
+    order_type = {
+        "mkt": "market",
+        "lmt": "limit",
+    }.get(raw_order_type, raw_order_type)
     quantity   = float(order.get("quantity", 0) or 0)
     limit_px   = float(order.get("limit_price", 0) or 0)
     symbol     = str(order.get("symbol", "")).upper().strip()

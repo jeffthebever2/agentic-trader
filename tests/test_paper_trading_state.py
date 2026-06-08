@@ -166,6 +166,54 @@ def test_paper_status_uses_fallback_for_missing_strategy_state(tmp_path, monkeyp
 
 
 @pytest.mark.unit
+def test_paper_status_includes_separate_qlib_factor_account(tmp_path, monkeypatch):
+    data_dir = tmp_path / "paper_today" / "20260508"
+    _write_state(data_dir / "algorithm" / "state.json", cash=10000.0)
+    qlib_dir = tmp_path / "paper_qlib" / "qlib_factor_paper"
+    qlib_dir.mkdir(parents=True)
+    (qlib_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "strategy": "qlib_factor_paper",
+                "strategy_label": "Qlib Factor Paper",
+                "paper_only": True,
+                "starting_cash": 100000.0,
+                "cash": 99000.0,
+                "total_value": 101000.0,
+                "realized_pnl": 0.0,
+                "open_positions": [],
+                "trades_closed": 0,
+                "candidates": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (qlib_dir / "qlib_signals_20260508.json").write_text(
+        json.dumps([
+            {
+                "ticker": "AAPL",
+                "score": 91.5,
+                "price": 100.0,
+                "thesis": "Qlib lagged factor rank score 91.5",
+            }
+        ]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(paper, "_last_output_base", tmp_path / "paper_today")
+    monkeypatch.setattr(paper, "QLIB_OUTPUT_BASE", tmp_path / "paper_qlib")
+    monkeypatch.setattr(paper, "_ny_today", lambda: __import__("datetime").date(2026, 5, 8))
+
+    status = asyncio.run(paper.paper_status(force=True))
+    accounts = {account["strategy"]: account for account in status["accounts"]}
+
+    assert "qlib_factor_paper" in accounts
+    assert accounts["qlib_factor_paper"]["summary"]["paper_only"] is True
+    assert accounts["qlib_factor_paper"]["summary"]["total_value"] == pytest.approx(101000.0)
+    assert accounts["qlib_factor_paper"]["candidates"]["rows"][0]["ticker"] == "AAPL"
+
+
+@pytest.mark.unit
 def test_paper_start_refuses_weekend_without_creating_empty_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(paper, "DEFAULT_OUTPUT_BASE", tmp_path)
     monkeypatch.setattr(paper, "_last_output_base", tmp_path)

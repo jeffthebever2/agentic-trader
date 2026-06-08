@@ -64,6 +64,48 @@ def test_train_models_writes_artifacts_into_report_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
+def test_train_models_requires_qlib_columns_when_flag_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_ml_models, "_XGB_AVAILABLE", False)
+    rows = []
+    for i in range(40):
+        rows.append(
+            {
+                "ticker": f"T{i:03d}",
+                "scan_date": f"2024-01-{(i % 28) + 1:02d}",
+                "year": 2024,
+                "month": "2024-01",
+                "score": 70 + (i % 10),
+                "atr_pct": 0.03,
+                "candidate_status": "executed",
+                "h3_return": 0.03 if i % 2 == 0 else -0.03,
+                "h3_outcome": "TARGET_HIT" if i % 2 == 0 else "STOP_HIT",
+            }
+        )
+    source = tmp_path / "trades.csv"
+    pd.DataFrame(rows).to_csv(source, index=False)
+
+    with pytest.raises(SystemExit, match="no qlib_\\* columns"):
+        train_ml_models.train_models(
+            SimpleNamespace(
+                input=str(source),
+                output_dir=str(tmp_path / "model"),
+                hold=3,
+                max_rows=0,
+                min_rows=20,
+                n_estimators=3,
+                max_depth=2,
+                min_samples_leaf=2,
+                seed=42,
+                ml_probability_threshold=0.58,
+                ml_expected_return_min=0.0,
+                ml_large_loss_max=0.20,
+                gate_diagnostics_limit=5,
+                include_qlib_features=True,
+            )
+        )
+
+
+@pytest.mark.unit
 def test_ml_strategy_comparison_honors_expected_return_gate():
     frame = pd.DataFrame(
         [

@@ -30,7 +30,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from web.auth import get_current_user
 
@@ -1921,7 +1921,38 @@ class ApproveBody(BaseModel):
     target_pct: float | None = None
     fidelity_trade: bool = False   # if True, also route to Fidelity live trading
     execute_fidelity: bool = False  # must be explicitly True to actually submit
+    fidelity_quote_time: str | None = None
+    fidelity_quote_source: str | None = None
+    fidelity_backup_sources: list[str] = Field(default_factory=list)
+    fidelity_consensus_ok: bool | None = None
+    fidelity_bid: float | None = None
+    fidelity_ask: float | None = None
+    fidelity_market_open: bool | None = None
     force: bool = False             # A10: bypass score/spike gate (explicit override)
+
+
+def _fidelity_request_kwargs_from_approval(
+    ticker: str,
+    body: ApproveBody,
+    *,
+    stop_pct: float,
+    target_pct: float,
+) -> dict:
+    return {
+        "ticker": ticker,
+        "dollar_amount": body.dollar_amount,
+        "stop_pct": stop_pct,
+        "target_pct": target_pct,
+        "also_paper_trade": False,
+        "execute": True,
+        "quote_time": body.fidelity_quote_time,
+        "quote_source": body.fidelity_quote_source,
+        "backup_sources": body.fidelity_backup_sources,
+        "consensus_ok": body.fidelity_consensus_ok,
+        "bid": body.fidelity_bid,
+        "ask": body.fidelity_ask,
+        "market_open": body.fidelity_market_open,
+    }
 
 
 @router.post("/thematic/auto/signals/{signal_id}/approve")
@@ -2123,12 +2154,12 @@ async def approve_signal(
                     _ORDER_LOCKS_META,
                 )
                 fid_body = FidelityThematicTradeRequest(
-                    ticker=ticker,
-                    dollar_amount=body.dollar_amount,
-                    stop_pct=stop_pct,
-                    target_pct=target_pct,
-                    also_paper_trade=False,
-                    execute=True,
+                    **_fidelity_request_kwargs_from_approval(
+                        ticker,
+                        body,
+                        stop_pct=stop_pct,
+                        target_pct=target_pct,
+                    )
                 )
                 fid_account = _validate_account_number(None)
                 lock_key = f"{user['email']}:{ticker}"

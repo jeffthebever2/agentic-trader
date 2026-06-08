@@ -22,6 +22,7 @@ from web.auth import require_admin
 
 ROOT = Path(__file__).parent.parent.parent
 DEFAULT_OUTPUT_BASE = ROOT / "tmp" / "paper_trading_today"
+QLIB_OUTPUT_BASE = ROOT / "tmp" / "paper_trading_qlib"
 SCRIPT_PATH = ROOT / "scripts" / "paper_trade_today.py"
 AUTOSTART_CONFIG_PATH = ROOT / "tmp" / "paper_autostart.json"
 DEFAULT_AUTOSTART_CONFIG = {
@@ -82,6 +83,7 @@ STRATEGY_LABELS = {
     "pure_ai": "Pure AI",
     "long_hold": "Long Hold",
     "unified_brain": "Unified Brain",
+    "qlib_factor_paper": "Qlib Factor Paper",
 }
 
 router = APIRouter()
@@ -925,12 +927,37 @@ def _collect_unified_brain_candidates(strategy_dir: Path, data_dir: Path) -> dic
     return {"count": len(rows), "rows": rows[:25]}
 
 
+def _collect_qlib_factor_candidates(strategy_dir: Path) -> dict[str, Any]:
+    found = sorted(strategy_dir.glob("qlib_signals_*.json"))
+    if not found:
+        return {"count": 0, "rows": []}
+    try:
+        raw = json.loads(found[-1].read_text(encoding="utf-8"))
+        rows = []
+        for rec in raw if isinstance(raw, list) else []:
+            rows.append({
+                "ticker": rec.get("ticker", ""),
+                "entry": rec.get("price", ""),
+                "target": round(float(rec.get("price", 0)) * 1.10, 4) if rec.get("price") else "",
+                "stop": round(float(rec.get("price", 0)) * 0.95, 4) if rec.get("price") else "",
+                "score": rec.get("score", ""),
+                "gate_status": "paper_only",
+                "decision_reason": rec.get("thesis", ""),
+                "account": "Qlib Factor Paper",
+            })
+        return {"count": len(rows), "rows": rows[:25]}
+    except Exception:
+        return {"count": 0, "rows": []}
+
+
 def _collect_account(strategy: str, data_dir: Path) -> dict[str, Any]:
     strategy_dir = data_dir / strategy
     summary = _read_json(strategy_dir / "summary.json")
     state = _read_json(strategy_dir / "state.json")
     if strategy == "unified_brain":
         candidates = _collect_unified_brain_candidates(strategy_dir, data_dir)
+    elif strategy == "qlib_factor_paper":
+        candidates = _collect_qlib_factor_candidates(strategy_dir)
     else:
         candidates = _read_candidates(data_dir / f"{strategy}_candidates.csv")
     events = _tail_jsonl(strategy_dir / "events.jsonl")
@@ -968,6 +995,25 @@ def _collect_account(strategy: str, data_dir: Path) -> dict[str, Any]:
     }
 
 
+def _collect_qlib_account() -> dict[str, Any]:
+    account = _collect_account("qlib_factor_paper", QLIB_OUTPUT_BASE)
+    if account.get("summary") is None:
+        account["summary"] = {
+            "strategy": "qlib_factor_paper",
+            "strategy_label": STRATEGY_LABELS["qlib_factor_paper"],
+            "starting_cash": 100000.0,
+            "cash": 100000.0,
+            "total_value": 100000.0,
+            "realized_pnl": 0.0,
+            "open_positions": [],
+            "trades_closed": 0,
+            "candidates": account["candidates"]["count"],
+            "not_started": True,
+            "paper_only": True,
+        }
+    return account
+
+
 @router.get("/paper/status")
 async def paper_status(force: bool = False):
     global _status_cache, _status_cache_ts
@@ -980,6 +1026,7 @@ async def paper_status(force: bool = False):
     data_dir = _latest_data_dir()
     log_path = _last_log_path or data_dir / "web_runner.log"
     accounts = [_collect_account(strategy, data_dir) for strategy in STRATEGIES]
+    accounts.append(_collect_qlib_account())
     fallback_cash = next(
         (
             float(account["summary"]["starting_cash"])

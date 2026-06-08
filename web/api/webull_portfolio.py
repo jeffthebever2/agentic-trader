@@ -10,7 +10,11 @@ if str(ROOT) not in sys.path:
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from tradingagents.compliance import validate_live_order
+from tradingagents.compliance import (
+    LIVE_TRADING_HARD_BLOCKED,
+    live_trading_enabled,
+    validate_live_order,
+)
 
 from web.auth import require_admin, require_step_up, get_current_user
 from web.secure_store import is_encrypted_path, read_encrypted_json, write_encrypted_json
@@ -105,6 +109,29 @@ class PlaceOrderRequest(BaseModel):
     bid: Optional[float] = None
     ask: Optional[float] = None
     market_open: Optional[bool] = None
+
+
+def _webull_compliance_order(req: PlaceOrderRequest) -> dict:
+    order_type = {
+        "MKT": "Market",
+        "LMT": "Limit",
+    }.get(req.order_type.upper(), req.order_type)
+    return {
+        "symbol": req.ticker.upper(),
+        "action": req.action,
+        "order_type": order_type,
+        "quantity": req.qty,
+        "limit_price": req.price or 0,
+        "execute": True,
+        "quote_price": req.price or 0,
+        "quote_time": req.quote_time,
+        "quote_source": req.quote_source,
+        "backup_sources": req.backup_sources,
+        "consensus_ok": req.consensus_ok,
+        "bid": req.bid,
+        "ask": req.ask,
+        "market_open": req.market_open,
+    }
 
 
 # ── Endpoints ──────────────────────────────────────────────────
@@ -322,7 +349,11 @@ async def wb_orders(status: str = "Working", user: dict = Depends(get_current_us
 
 @router.post("/webull/orders")
 async def wb_place_order(req: PlaceOrderRequest, admin: dict = Depends(require_step_up)):
-    decision = validate_live_order(req.model_dump())
+    if LIVE_TRADING_HARD_BLOCKED:
+        raise HTTPException(status_code=403, detail="LIVE_TRADING_HARD_BLOCKED=True in compliance.py")
+    if not live_trading_enabled():
+        raise HTTPException(status_code=403, detail="LIVE_TRADING_ENABLED not set to true in .env")
+    decision = validate_live_order(_webull_compliance_order(req))
     if not decision.allowed:
         raise HTTPException(
             status_code=403,

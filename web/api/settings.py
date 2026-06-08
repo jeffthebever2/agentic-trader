@@ -38,6 +38,7 @@ CONFIG_KEYS = [
     "TRADINGAGENTS_FMP_DAILY_LIMIT",
     "SEC_USER_AGENT",
     "TRADINGAGENTS_PAPER_TRADING_ENABLED",
+    "LIVE_TRADING_ENABLED",
     "TEXTNOW_PHONE",
     "PAPER_SMS_NUMBER",
     "TEXTNOW_ALERT_NUMBER",
@@ -72,6 +73,14 @@ CONFIG_KEYS = [
     "PROVIDER_CLOUDFLARE_ENABLED",
     "PROVIDER_NVIDIA_ENABLED",
 ]
+
+CHANGE_CONTROL_LOG = ROOT / "paper_accounts" / "algorithm" / "change_control.jsonl"
+RISKY_ENV_SETTINGS = {
+    "TRADINGAGENTS_MAX_POSITIONS": "max_positions",
+    "TRADINGAGENTS_MAX_POSITION_SIZE": "position_cap_pct",
+    "TRADINGAGENTS_MAX_DAILY_LOSS": "max_drawdown_halt_pct",
+    "LIVE_TRADING_ENABLED": "live_trading_enabled",
+}
 
 
 def _load_env_file() -> dict:
@@ -115,6 +124,50 @@ def _save_env_file(updates: dict):
         try: _os.unlink(tmp)
         except Exception: pass
         raise
+
+
+def _split_change_controlled_updates(
+    updates: dict[str, str],
+    *,
+    proposed_by: str,
+    cc_path: Path = CHANGE_CONTROL_LOG,
+) -> tuple[dict[str, str], list[dict[str, str]]]:
+    """Return (safe_updates, proposals) for Settings API env writes.
+
+    Risk-sensitive env keys are proposal-only.  They are not written to .env
+    here; an operator must review the proposal and apply it intentionally.
+    """
+    if not updates:
+        return {}, []
+    current = _load_env_file()
+    safe: dict[str, str] = {}
+    proposals: list[dict[str, str]] = []
+    try:
+        from tradingagents.portfolio.change_control import ChangeControl
+        cc = ChangeControl(cc_path)
+    except Exception:
+        cc = None
+
+    for key, value in updates.items():
+        setting = RISKY_ENV_SETTINGS.get(key)
+        if not setting:
+            safe[key] = value
+            continue
+        current_value = current.get(key, os.environ.get(key, ""))
+        if str(current_value) == str(value):
+            continue
+        if cc is None:
+            proposals.append({"key": key, "setting": setting, "proposal_id": "", "status": "proposal_failed"})
+            continue
+        proposal = cc.propose(
+            setting=setting,
+            current_value=current_value,
+            proposed_value=value,
+            reason=f"Settings API requested env update for {key}",
+            proposed_by=proposed_by,
+        )
+        proposals.append({"key": key, "setting": setting, "proposal_id": proposal.proposal_id, "status": proposal.status})
+    return safe, proposals
 
 
 def _mask(val: str) -> str:
@@ -199,10 +252,15 @@ async def update_settings(body: SettingsUpdate, admin: dict = Depends(require_ad
     if not safe:
         return {"success": False, "error": "No valid keys to update"}
     try:
-        _save_env_file(safe)
-        from dotenv import load_dotenv
-        load_dotenv(ROOT / ".env", override=True)
-        return {"success": True, "updated": list(safe.keys())}
+        proposed_by = f"settings_api:{admin.get('email', 'admin')}"
+        env_updates, proposals = _split_change_controlled_updates(safe, proposed_by=proposed_by)
+        if env_updates:
+            _save_env_file(env_updates)
+            from dotenv import load_dotenv
+            load_dotenv(ROOT / ".env", override=True)
+        if not env_updates and proposals:
+            return {"success": True, "updated": [], "proposals_created": proposals}
+        return {"success": True, "updated": list(env_updates.keys()), "proposals_created": proposals}
     except Exception:
         import logging
         logging.exception("Error saving settings")
