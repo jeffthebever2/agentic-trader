@@ -4928,7 +4928,9 @@ def write_end_of_day_statistics(
         "statistics": rows,
     }
     stats_path = output_dir / "end_of_day_statistics.json"
-    stats_path.write_text(json.dumps(_jsonable(payload), indent=2), encoding="utf-8")
+    _stats_tmp = stats_path.with_suffix(".tmp")
+    _stats_tmp.write_text(json.dumps(_jsonable(payload), indent=2), encoding="utf-8")
+    _stats_tmp.replace(stats_path)
 
     csv_path = output_dir / "end_of_day_statistics.csv"
     csv_fields = [

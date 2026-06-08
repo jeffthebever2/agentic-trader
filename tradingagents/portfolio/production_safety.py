@@ -474,8 +474,11 @@ class ProductionSafetyMonitor:
                 with open(self.config_path) as f:
                     overrides = json.load(f)
                 cfg.update(overrides)
-            except Exception:
-                pass
+            except Exception as _e:
+                import logging
+                logging.getLogger("production_safety").warning(
+                    "Safety config load failed (%s), using defaults: %s", self.config_path, _e
+                )
         return cfg
 
     def _write_config_defaults(self) -> None:
@@ -485,8 +488,11 @@ class ProductionSafetyMonitor:
                 self.config_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(self.config_path, "w") as f:
                     json.dump(DEFAULT_SAFETY_CONFIG, f, indent=2)
-            except Exception:
-                pass
+            except Exception as _e:
+                import logging
+                logging.getLogger("production_safety").warning(
+                    "Could not write default safety config to %s: %s", self.config_path, _e
+                )
 
     # ── Kill-switch ───────────────────────────────────────────────────────────
 

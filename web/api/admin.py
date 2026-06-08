@@ -72,8 +72,9 @@ def _read_flags() -> dict[str, bool]:
             for key in DEFAULT_FLAGS:
                 if key in raw:
                     flags[key] = bool(raw[key])
-    except Exception:
-        pass
+    except Exception as _e:
+        import logging
+        logging.getLogger("admin.flags").warning("Flags file read error, using defaults: %s", _e)
     return flags
 
 

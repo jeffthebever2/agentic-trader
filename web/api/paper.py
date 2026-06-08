@@ -618,20 +618,22 @@ async def resolve_hil(req: HilResolveRequest, admin: dict = Depends(require_admi
     if HIL_STATE_FILE.exists():
         try:
             state = json.loads(HIL_STATE_FILE.read_text())
-            if state.get("id") == req.id and state.get("status") == "pending":
-                state["status"] = "approved" if req.action == "approve" else "rejected"
-                import tempfile as _tf, os as _os
-                _fd, _tmp = _tf.mkstemp(dir=HIL_STATE_FILE.parent, prefix=".tmp_")
-                try:
-                    with _os.fdopen(_fd, "w") as _f: _f.write(json.dumps(state))
-                    _os.replace(_tmp, HIL_STATE_FILE)
-                except Exception:
-                    try: _os.unlink(_tmp)
-                    except Exception: pass
-                    raise
-                return {"success": True}
-        except Exception:
-            pass
+        except Exception as _e:
+            import logging
+            logging.getLogger("paper.hil").error("HIL state read/parse error: %s", _e)
+            raise HTTPException(status_code=500, detail="Could not read pending trade state")
+        if state.get("id") == req.id and state.get("status") == "pending":
+            state["status"] = "approved" if req.action == "approve" else "rejected"
+            import tempfile as _tf, os as _os
+            _fd, _tmp = _tf.mkstemp(dir=HIL_STATE_FILE.parent, prefix=".tmp_")
+            try:
+                with _os.fdopen(_fd, "w") as _f: _f.write(json.dumps(state))
+                _os.replace(_tmp, HIL_STATE_FILE)
+            except Exception:
+                try: _os.unlink(_tmp)
+                except Exception: pass
+                raise
+            return {"success": True}
     return {"success": False, "error": "No pending trade found"}
 
 
