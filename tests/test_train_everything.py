@@ -453,3 +453,72 @@ def test_check_report_gates_schema_blocks_even_if_roc_passes(tmp_path):
     }))
     passed, reason = _check_report_gates(rp, min_roc=0.49, max_brier=0.25)
     assert not passed, "High ROC should not bypass schema gate"
+
+
+# ── Web API input validation tests ─────────────────────────────────────────
+
+def test_backtest_request_rejects_empty_tickers():
+    from web.api.backtest import BacktestRequest
+    import pytest
+    with pytest.raises(Exception):
+        BacktestRequest(
+            tickers=[],
+            start_date="2024-01-01",
+            end_date="2024-06-01",
+            analysts=["market"],
+            llm_provider="openai",
+            deep_think_llm="gpt-4",
+            quick_think_llm="gpt-4",
+        )
+
+
+def test_backtest_request_rejects_too_many_tickers():
+    from web.api.backtest import BacktestRequest
+    import pytest
+    with pytest.raises(Exception, match="50"):
+        BacktestRequest(
+            tickers=[f"T{i}" for i in range(51)],
+            start_date="2024-01-01",
+            end_date="2024-06-01",
+            analysts=["market"],
+            llm_provider="openai",
+            deep_think_llm="gpt-4",
+            quick_think_llm="gpt-4",
+        )
+
+
+def test_backtest_request_rejects_invalid_analyst():
+    from web.api.backtest import BacktestRequest
+    import pytest
+    with pytest.raises(Exception):
+        BacktestRequest(
+            tickers=["AAPL"],
+            start_date="2024-01-01",
+            end_date="2024-06-01",
+            analysts=["market", "hacker"],
+            llm_provider="openai",
+            deep_think_llm="gpt-4",
+            quick_think_llm="gpt-4",
+        )
+
+
+def test_backtest_request_normalizes_ticker_case():
+    from web.api.backtest import BacktestRequest
+    req = BacktestRequest(
+        tickers=["aapl", "msft"],
+        start_date="2024-01-01",
+        end_date="2024-06-01",
+        analysts=["market"],
+        llm_provider="openai",
+        deep_think_llm="gpt-4",
+        quick_think_llm="gpt-4",
+    )
+    assert req.tickers == ["AAPL", "MSFT"]
+
+
+def test_preflight_checks_runs_without_error(tmp_path, monkeypatch):
+    """Preflight checks should not raise even when model is missing."""
+    import run_web
+    monkeypatch.setattr(run_web, "ROOT", tmp_path)
+    # Should not raise — just prints warnings
+    run_web._preflight_checks()
