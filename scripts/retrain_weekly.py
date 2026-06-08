@@ -57,13 +57,14 @@ def _check_report_gates(report_path: Path, min_roc: float, max_brier: float, max
     except Exception as e:
         return False, f"Cannot parse training_report.json: {e}"
 
+    _schema_fails: list[str] = []
     try:
         from tradingagents.ml.training_report_schema import validate_training_report
-        _schema_warns = validate_training_report(report, strict=False)
-        if _schema_warns:
-            import logging as _lg
-            for _w in _schema_warns:
-                _lg.warning("[retrain_weekly] Schema warning: %s", _w)
+        _schema_fails = validate_training_report(report, strict=False)
+        if _schema_fails:
+            print(f"[retrain_weekly] SCHEMA FAILURES ({len(_schema_fails)}) — will block deployment:")
+            for _w in _schema_fails:
+                print(f"  SCHEMA: {_w}")
     except Exception:
         pass
 
@@ -79,7 +80,7 @@ def _check_report_gates(report_path: Path, min_roc: float, max_brier: float, max
     brier_after = calibration.get("brier_after")
     calibrated = report.get("settings", {}).get("calibrated", False)
 
-    issues = []
+    issues = list(_schema_fails)  # schema failures block gate
     if win_roc is None:
         issues.append("win_probability ROC missing from report")
     elif win_roc < min_roc:
@@ -124,6 +125,78 @@ def _check_embedded_leakage(report_path: Path) -> tuple[bool, str]:
     if status == "clean" and not leaky_features:
         return True, "embedded leakage check clean"
     return False, f"embedded leakage check failed: status={status}, leaky_features={leaky_features}"
+
+
+def _merge_qlib_features_into_csv(csv_path: Path, batch_size: int = 50) -> dict:
+    """Enrich a retrain CSV with leakage-checked, lagged qlib_* features.
+
+    The retrain CSV comes from backtest.py and does not include raw OHLCV, so
+    this stage rebuilds the required price cache for the exact ticker universe
+    and date span before calling QlibFeatureMerger.
+    """
+    import pandas as pd
+    from backtest import download_all
+    from tradingagents.qlib_integration.feature_merger import (
+        QLIB_FEATURE_COLS,
+        QlibFeatureMerger,
+    )
+
+    frame = pd.read_csv(csv_path, low_memory=False)
+    required = {"ticker", "scan_date"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise RuntimeError(f"cannot merge qlib features; CSV missing columns: {sorted(missing)}")
+
+    tickers = sorted(str(t).upper() for t in frame["ticker"].dropna().unique())
+    scan_dates = pd.to_datetime(frame["scan_date"], errors="coerce").dropna()
+    if not tickers or scan_dates.empty:
+        raise RuntimeError("cannot merge qlib features; no tickers or scan_date values found")
+
+    start = (scan_dates.min().date() - dt.timedelta(days=420)).isoformat()
+    end = (scan_dates.max().date() + dt.timedelta(days=7)).isoformat()
+    print(
+        f"[retrain_weekly] Qlib enrichment: downloading/reusing prices for "
+        f"{len(tickers):,} tickers ({start} → {end})"
+    )
+    raw = download_all(tickers, start, end, batch_size=batch_size, threads=False)
+
+    price_cache: dict = {}
+    for ticker, df in raw.items():
+        if df is None or df.empty:
+            continue
+        col_map = {str(c).lower(): c for c in df.columns}
+        close_col = col_map.get("close")
+        high_col = col_map.get("high")
+        low_col = col_map.get("low")
+        if close_col is None or high_col is None or low_col is None:
+            continue
+        price_cache[str(ticker).upper()] = pd.DataFrame(
+            {
+                "close": df[close_col],
+                "high": df[high_col],
+                "low": df[low_col],
+            }
+        ).dropna(subset=["close"])
+
+    if not price_cache:
+        raise RuntimeError("cannot merge qlib features; no usable OHLCV data was loaded")
+
+    merger = QlibFeatureMerger(lag_days=1, run_leakage_check=True)
+    enriched = merger.merge(frame, price_cache)
+    summary = merger.summary(enriched)
+    valid_values = sum(int(enriched[col].notna().sum()) for col in QLIB_FEATURE_COLS if col in enriched.columns)
+    if valid_values <= 0:
+        raise RuntimeError(
+            "qlib feature merge produced zero usable values; refusing to train a run "
+            "that requested --include-qlib-features"
+        )
+
+    enriched.to_csv(csv_path, index=False)
+    sidecar = csv_path.with_suffix(csv_path.suffix + ".qlib_summary.json")
+    sidecar.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    print(f"[retrain_weekly] Qlib features merged into {csv_path}")
+    print(f"[retrain_weekly] Qlib coverage report: {sidecar}")
+    return {"summary_path": str(sidecar), **summary}
 
 
 def main():
@@ -206,10 +279,10 @@ def main():
         action="store_true",
         default=False,
         help=(
-            "Pass --include-qlib-features to train_ml_models.py. Merges lagged qlib_* "
+            "Merge lagged qlib_* "
             "features (qlib_mom_252_21, qlib_vol_ratio, qlib_atr_z, qlib_close_rank) "
-            "into the training dataset. DEFAULT OFF. Production behavior is unchanged "
-            "without this flag."
+            "into the training dataset before train_ml_models.py runs. DEFAULT OFF. "
+            "Production behavior is unchanged without this flag."
         ),
     )
     args = parser.parse_args()
@@ -329,6 +402,8 @@ def main():
             print("\n[dry-run] Step 1 — Backtest:")
             print("  " + " ".join(str(x) for x in backtest_cmd))
         print("\n[dry-run] Step 2 — Train:")
+        if args.include_qlib_features:
+            print(f"  Qlib enrichment before training: {csv_path}")
         print("  " + " ".join(str(x) for x in train_cmd))
         print("\n[dry-run] Step 3 — Leakage check:")
         if (ROOT / "scripts" / "leakage_check.py").exists():
@@ -385,6 +460,23 @@ def main():
         rows = sum(1 for _ in _csv_f) - 1
     print(f"[retrain_weekly] CSV has {rows:,} rows.")
     history_entry["csv_rows"] = rows
+
+    if args.include_qlib_features:
+        print("\n[retrain_weekly] Step 1b/5 — Qlib feature enrichment")
+        try:
+            qlib_summary = _merge_qlib_features_into_csv(csv_path)
+            history_entry["qlib_features"] = {
+                "enabled": True,
+                "summary_path": qlib_summary.get("summary_path"),
+                "coverage": qlib_summary.get("coverage", {}),
+            }
+        except Exception as exc:
+            print(f"[retrain_weekly] ERROR: Qlib feature enrichment failed: {exc}")
+            history_entry["outcome"] = f"qlib_feature_enrichment_failed: {exc}"
+            _log_history(history_entry)
+            sys.exit(1)
+    else:
+        history_entry["qlib_features"] = {"enabled": False}
 
     # ── Run training ────────────────────────────────────────────────────────
     run(train_cmd, "Step 2/5 — Train + calibrate ML models")

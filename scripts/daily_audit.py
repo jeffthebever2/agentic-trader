@@ -248,6 +248,86 @@ def _audit_prediction_ledger(paper_dir: Path) -> List[Finding]:
     return findings
 
 
+def _audit_qlib_forward_evidence(qlib_dir: Path) -> List[Finding]:
+    findings: List[Finding] = []
+    ledger_path = qlib_dir / "prediction_ledger.jsonl"
+    if not ledger_path.exists():
+        findings.append(Finding(
+            id="QLIB_LEDGER_MISSING",
+            severity=WARN,
+            category="qlib",
+            message=(
+                f"Qlib paper prediction ledger not found at {ledger_path}. "
+                "Run scripts/paper_trade_qlib.py to collect forward evidence before production use."
+            ),
+        ))
+        return findings
+
+    try:
+        from tradingagents.portfolio.prediction_ledger import PredictionLedger
+        from tradingagents.portfolio.prediction_grader import PredictionGrader
+
+        ledger = PredictionLedger(ledger_path)
+        buys = ledger.read_buys()
+        n_buys = len(buys)
+        if n_buys <= 0:
+            findings.append(Finding(
+                id="QLIB_NO_BUYS",
+                severity=WARN,
+                category="qlib",
+                message="Qlib paper ledger exists but has no BUY predictions yet",
+                detail={"ledger_path": str(ledger_path), "n_buy_entries": 0},
+            ))
+            return findings
+
+        grades = PredictionGrader(qlib_dir).grade_all(fetch_benchmarks=False)
+        n_grades = len(grades)
+        if n_grades <= 0:
+            findings.append(Finding(
+                id="QLIB_AWAITING_OUTCOMES",
+                severity=WARN,
+                category="qlib",
+                message=(
+                    f"Qlib has {n_buys} pre-outcome BUY prediction(s), "
+                    "but no closed paper trades have been graded yet"
+                ),
+                detail={"ledger_path": str(ledger_path), "n_buy_entries": n_buys, "n_grades": 0},
+            ))
+            return findings
+
+        avg_return = sum(g.actual_return for g in grades) / n_grades
+        win_rate = sum(1 for g in grades if g.actual_win) / n_grades
+        stop_rate = sum(1 for g in grades if g.stop_hit) / n_grades
+        target_rate = sum(1 for g in grades if g.target_hit) / n_grades
+        findings.append(Finding(
+            id="QLIB_FORWARD_EVIDENCE",
+            severity=PASS,
+            category="qlib",
+            message=(
+                f"Qlib paper evidence present: {n_buys} BUY prediction(s), "
+                f"{n_grades} graded closed trade(s), WR={win_rate:.1%}, avg_ret={avg_return:.2%}"
+            ),
+            detail={
+                "ledger_path": str(ledger_path),
+                "n_buy_entries": n_buys,
+                "n_grades": n_grades,
+                "win_rate": round(win_rate, 4),
+                "avg_return": round(avg_return, 6),
+                "stop_rate": round(stop_rate, 4),
+                "target_rate": round(target_rate, 4),
+            },
+        ))
+    except Exception as exc:
+        findings.append(Finding(
+            id="QLIB_EVIDENCE_ERROR",
+            severity=WARN,
+            category="qlib",
+            message=f"Could not audit Qlib paper evidence: {exc}",
+            detail={"qlib_dir": str(qlib_dir)},
+        ))
+    return findings
+
+
 def _audit_protective_put_cost(heat_pct: float = 0.0) -> List[Finding]:
     """Flag when portfolio heat is high and OTM put hedges are relevant."""
     findings: List[Finding] = []
@@ -263,11 +343,11 @@ def _audit_protective_put_cost(heat_pct: float = 0.0) -> List[Finding]:
             ))
             return findings
 
-        vix = float(vix_data.iloc[-1])
+        vix = float(vix_data.iloc[-1].item() if hasattr(vix_data.iloc[-1], 'item') else vix_data.iloc[-1])
         sigma = vix / 100.0
 
         spy_data = yf.download("SPY", period="3d", progress=False, auto_adjust=True)["Close"]
-        spy_price = float(spy_data.iloc[-1]) if not spy_data.empty else 500.0
+        spy_price = float(spy_data.iloc[-1].item() if hasattr(spy_data.iloc[-1], 'item') else spy_data.iloc[-1]) if not spy_data.empty else 500.0
 
         # 30-day, 5% OTM put on SPY
         annual_cost = protective_put_annual_cost_pct(
@@ -322,6 +402,7 @@ def run_audit(
     report_path: Path,
     paper_dir: Path,
     cc_path: Path,
+    qlib_dir: Optional[Path] = None,
 ) -> AuditReport:
     now = dt.datetime.now()
     all_findings: List[Finding] = []
@@ -330,6 +411,9 @@ def run_audit(
     all_findings.extend(_audit_calibration(paper_dir))
     all_findings.extend(_audit_change_control(cc_path))
     all_findings.extend(_audit_prediction_ledger(paper_dir))
+    all_findings.extend(_audit_qlib_forward_evidence(
+        qlib_dir or (ROOT / "tmp" / "paper_trading_qlib" / "qlib_factor_paper")
+    ))
     all_findings.extend(_audit_protective_put_cost())
 
     fails = [f for f in all_findings if f.severity == FAIL]
@@ -366,6 +450,7 @@ def main() -> int:
     parser.add_argument("--bundle", default="ml_models/latest/model_bundle.joblib")
     parser.add_argument("--report", default="ml_models/latest/training_report.json")
     parser.add_argument("--paper-dir", default="paper_accounts/algorithm")
+    parser.add_argument("--qlib-paper-dir", default="tmp/paper_trading_qlib/qlib_factor_paper")
     parser.add_argument("--cc-log", default="paper_accounts/algorithm/change_control.jsonl")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--out", default=None)
@@ -376,9 +461,10 @@ def main() -> int:
     bundle_path = ROOT / args.bundle
     report_path = ROOT / args.report
     paper_dir = ROOT / args.paper_dir
+    qlib_dir = ROOT / args.qlib_paper_dir
     cc_path = ROOT / args.cc_log
 
-    rpt = run_audit(bundle_path, report_path, paper_dir, cc_path)
+    rpt = run_audit(bundle_path, report_path, paper_dir, cc_path, qlib_dir)
 
     if args.out:
         out_p = Path(args.out)

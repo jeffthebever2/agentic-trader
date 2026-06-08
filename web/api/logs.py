@@ -153,6 +153,45 @@ async def list_log_sources(_user: dict = Depends(get_current_user)):
     return {"sources": result}
 
 
+@router.get("/logs/daily-audit")
+async def get_daily_audit(
+    cached: bool = Query(True, description="Return cached result if < 1h old; False forces re-run"),
+    _user: dict = Depends(get_current_user),
+):
+    """Return latest daily audit report. Runs audit if no cached result or cached=False."""
+    import datetime as dt
+    audit_out = ROOT / "tmp" / "daily_audit_latest.json"
+
+    if cached and audit_out.exists():
+        age_s = dt.datetime.now().timestamp() - audit_out.stat().st_mtime
+        if age_s < 3600:  # cache for 1 hour
+            try:
+                return {"ok": True, "cached": True, "age_seconds": round(age_s), "report": json.loads(audit_out.read_text())}
+            except Exception:
+                pass
+
+    try:
+        sys.path.insert(0, str(ROOT))
+        from scripts.daily_audit import run_audit  # type: ignore
+        bundle_path = ROOT / "ml_models" / "latest" / "model_bundle.joblib"
+        if not bundle_path.exists():
+            bundle_path = ROOT / "ml_models" / "stock_universe" / "model_bundle.joblib"
+        report_path = bundle_path.parent / "training_report.json"
+        paper_dir = ROOT / "tmp" / "paper_trading_today"
+        cc_path = ROOT / "tmp" / "change_control_log.jsonl"
+        qlib_dir = ROOT / "tmp" / "qlib_paper"
+
+        rpt = run_audit(bundle_path, report_path, paper_dir, cc_path, qlib_dir)
+        rpt_dict = rpt.to_dict()
+
+        audit_out.parent.mkdir(parents=True, exist_ok=True)
+        audit_out.write_text(json.dumps(rpt_dict, indent=2))
+
+        return {"ok": True, "cached": False, "age_seconds": 0, "report": rpt_dict}
+    except Exception as exc:
+        return {"ok": False, "error": "Audit failed — check server logs", "cached": False}
+
+
 def _read_jsonl(path: Path) -> list:
     entries = []
     if path.exists():

@@ -377,8 +377,32 @@ async def deep_health_check():
             mp = ROOT / "ml_models" / "stock_universe" / "model_bundle.joblib"
         if mp.exists():
             age_h = (now.timestamp() - mp.stat().st_mtime) / 3600
-            ml_ok = True
             ml_detail = {"path": str(mp), "age_hours": round(age_h, 1)}
+            # Run full ModelHealthChecker for ROC, drift, calibration, age_days
+            try:
+                from tradingagents.portfolio.production_safety import ModelHealthChecker
+                import joblib as _jl
+                _bundle = _jl.load(str(mp))
+                _hc = ModelHealthChecker()
+                _report_path = mp.parent / "training_report.json"
+                _drift_path = mp.parent / "drift_log.json"
+                _hc_result = _hc.check(
+                    bundle=_bundle,
+                    validation_summary_path=_report_path if _report_path.exists() else None,
+                    drift_log_path=_drift_path if _drift_path.exists() else None,
+                )
+                ml_detail.update({
+                    "age_days": _hc_result.get("age_days"),
+                    "roc_auc": _hc_result.get("roc_auc"),
+                    "brier": _hc_result.get("brier"),
+                    "n_features": _hc_result.get("n_features"),
+                    "halt_reasons": _hc_result.get("halt_reasons", []),
+                    "warn_reasons": _hc_result.get("warn_reasons", []),
+                })
+                ml_ok = not _hc_result.get("halt_reasons")
+            except Exception as _hc_err:
+                ml_ok = True  # file exists, checker failed non-fatally
+                ml_detail["health_check_error"] = str(_hc_err)
         else:
             ml_detail = {"error": "model_bundle.joblib not found"}
     except Exception as e:

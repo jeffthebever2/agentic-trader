@@ -390,6 +390,58 @@ class Candidate:
     breakout_score: float = 0.0
 
 
+def _parse_csv_arg(value: str | None) -> list[str]:
+    return [part.strip() for part in str(value or "").split(",") if part.strip()]
+
+
+def _build_fidelity_trade_payload(
+    candidate: Candidate,
+    shares: int,
+    *,
+    execute: bool,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "symbol": candidate.ticker,
+        "action": "Buy",
+        "quantity": shares,
+        "order_type": "Limit",
+        "limit_price": round(candidate.entry, 2),
+        "execute": execute,
+    }
+    quote_time = getattr(args, "fidelity_quote_time", "") or ""
+    quote_source = getattr(args, "fidelity_quote_source", "") or ""
+    if quote_time:
+        payload["quote_time"] = quote_time
+    if quote_source:
+        payload["quote_source"] = quote_source
+    if getattr(args, "fidelity_backup_sources", ""):
+        payload["backup_sources"] = _parse_csv_arg(getattr(args, "fidelity_backup_sources", ""))
+    if getattr(args, "fidelity_consensus_ok", False):
+        payload["consensus_ok"] = True
+    if getattr(args, "fidelity_bid", None) is not None:
+        payload["bid"] = getattr(args, "fidelity_bid")
+    if getattr(args, "fidelity_ask", None) is not None:
+        payload["ask"] = getattr(args, "fidelity_ask")
+    if getattr(args, "fidelity_market_open", False):
+        payload["market_open"] = True
+    return payload
+
+
+def _precheck_live_fidelity_payload(payload: dict[str, Any]) -> tuple[bool, str]:
+    """Return whether a Fidelity payload is eligible for live execution.
+
+    This mirrors the broker endpoint's compliance gate so the runner does not
+    ask for human approval and then inevitably fail on stale/yfinance-only data.
+    """
+    from tradingagents.compliance import validate_live_order
+
+    if not bool(payload.get("execute")):
+        return True, "preview"
+    decision = validate_live_order(payload)
+    return decision.allowed, decision.reason
+
+
 @dataclass
 class Position:
     ticker: str
@@ -1238,6 +1290,7 @@ def create_portfolio_accounts(
     webhook_url: str = "",
     sms_number: str = "",
     sms_on_fills: bool = False,
+    only_portfolio: str = "",
 ) -> dict[str, "PaperAccount"]:
     """Create one PaperAccount per registered portfolio with per-portfolio param overrides.
 
@@ -1247,10 +1300,33 @@ def create_portfolio_accounts(
     """
     from tradingagents.portfolios.registry import PORTFOLIO_REGISTRY
 
+    # Validate all source_strategy values reference known candidate buckets
+    _KNOWN_STRATEGIES = {"algorithm", "machine_learning", "ml_new", "combined", "long_hold", "pure_ai"}
+    _invalid = [
+        (p.name, p.source_strategy) for p in PORTFOLIO_REGISTRY
+        if p.source_strategy not in _KNOWN_STRATEGIES
+    ]
+    if _invalid:
+        import logging as _lg
+        for _pname, _src in _invalid:
+            _lg.warning(
+                "Portfolio '%s' references unknown source_strategy '%s'; "
+                "it will receive no candidates. Valid: %s",
+                _pname, _src, sorted(_KNOWN_STRATEGIES),
+            )
+
     accounts: dict[str, "PaperAccount"] = {}
     previous_dir = None if reset else latest_previous_account_dir(output_dir)
 
-    for portfolio in PORTFOLIO_REGISTRY:
+    active_portfolios = PORTFOLIO_REGISTRY
+    if only_portfolio:
+        active_portfolios = [p for p in PORTFOLIO_REGISTRY if p.name == only_portfolio]
+        if not active_portfolios:
+            import logging as _lg
+            _lg.warning("--portfolio '%s' not found in registry; running all portfolios.", only_portfolio)
+            active_portfolios = PORTFOLIO_REGISTRY
+
+    for portfolio in active_portfolios:
         port_dir = output_dir / portfolio.name
         state_path = port_dir / "state.json"
         previous_state_path = previous_dir / portfolio.name / "state.json" if previous_dir else None
@@ -1420,6 +1496,13 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of shares to sell at partial-profit trigger (default 0.5 = half).")
     parser.add_argument("--trade-fidelity", action="store_true", help="Send approved Combined candidates to Fidelity.")
     parser.add_argument("--trade-fidelity-execute", action="store_true", help="If --trade-fidelity is enabled, actually PLACE the order (live money).")
+    parser.add_argument("--fidelity-quote-time", default="", help="ISO timestamp for a trusted execution quote. Required for --trade-fidelity-execute.")
+    parser.add_argument("--fidelity-quote-source", default="", help="Trusted execution quote source, e.g. alpaca_iex, polygon, iex, sip, fidelity_realtime.")
+    parser.add_argument("--fidelity-backup-sources", default="", help="Comma-separated trusted backup quote sources used for consensus.")
+    parser.add_argument("--fidelity-consensus-ok", action="store_true", help="Set when backup quote sources agree within your execution tolerance.")
+    parser.add_argument("--fidelity-bid", type=float, default=None, help="Trusted bid for execution spread check.")
+    parser.add_argument("--fidelity-ask", type=float, default=None, help="Trusted ask for execution spread check.")
+    parser.add_argument("--fidelity-market-open", action="store_true", help="Set only when the trusted quote was captured during an open regular session.")
     parser.add_argument("--defensive-trim-buffer-pct", type=float, default=35.0,
         help="Trim before stop when price falls into this %% of the entry-stop distance above stop. 0=disabled.")
     parser.add_argument("--defensive-trim-fraction", type=float, default=0.5,
@@ -1476,6 +1559,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timezone", default="America/New_York")
     parser.add_argument("--legacy-strategies", action="store_true",
                         help="Use the legacy 6-strategy accounts instead of the 15-portfolio registry.")
+    parser.add_argument("--portfolio", default="", metavar="NAME",
+                        help="Run only this portfolio by name (e.g. algo_conservative). "
+                             "Useful for testing a single config. Default: run all 15.")
     return parser.parse_args()
 
 
@@ -4551,6 +4637,13 @@ def scan_accounts_once(
                 c for c in _raw_candidates
                 if (getattr(c, "ml_probability", None) or 0.0) >= _ml_thresh
             ]
+        # Apply min_risk_reward pre-filter (e.g. high_rr_only portfolio — ≥1.5 R:R at entry)
+        _min_rr = account.portfolio_params.get("min_risk_reward")
+        if _min_rr:
+            _raw_candidates = [
+                c for c in _raw_candidates
+                if (getattr(c, "risk_reward_ratio", None) or getattr(c, "rr_ratio", None) or 0.0) >= _min_rr
+            ]
         cycle = scan_account_once(
             account,
             strategy,
@@ -4916,6 +5009,7 @@ def run() -> None:
             webhook_url=getattr(args, "webhook_url", ""),
             sms_number=getattr(args, "sms_number", ""),
             sms_on_fills=getattr(args, "sms_on_fills", False),
+            only_portfolio=getattr(args, "portfolio", ""),
         )
 
     # ── Ensure safety_config.json exists; apply CLI arg overrides ────────────
@@ -5042,15 +5136,19 @@ def run() -> None:
                 trade_size = 1000.0  # Example default: 10% of 10k
                 shares = int(trade_size / candidate.entry)
                 if shares > 0:
-                    payload = {
-                        "symbol": candidate.ticker,
-                        "action": "Buy",
-                        "quantity": shares,
-                        "order_type": "Limit",
-                        "limit_price": round(candidate.entry, 2),
-                        "execute": getattr(args, "trade_fidelity_execute", False)
-                    }
+                    payload = _build_fidelity_trade_payload(
+                        candidate,
+                        shares,
+                        execute=getattr(args, "trade_fidelity_execute", False),
+                        args=args,
+                    )
                     if getattr(args, "trade_fidelity_execute", False):
+                        ok_to_execute, block_reason = _precheck_live_fidelity_payload(payload)
+                        if not ok_to_execute:
+                            dashboard.event(
+                                f"Fidelity live order blocked before HIL for {candidate.ticker}: {block_reason}"
+                            )
+                            continue
                         dashboard.stop() # Pause dashboard to get user input
                         
                         # Send MMS via Gmail (as a notification only)

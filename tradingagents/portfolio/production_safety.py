@@ -885,8 +885,13 @@ class ProductionSafetyMonitor:
                         drift_log_path=_drift_path,
                     )
                     if _drift_report.has_drift:
+                        # PSI failures with many drifted features = halt (distribution shift)
+                        _psi_critical = _drift_report.psi_fail_count >= 5
                         for alert in _drift_report.alerts:
-                            all_warn.append(f"WARN_drift: {alert}")
+                            if _psi_critical and "PSI" in alert:
+                                all_halt.append(f"psi_drift_halt: {alert}")
+                            else:
+                                all_warn.append(f"WARN_drift: {alert}")
                         gates_active.append("drift_detector")
                     # RS-1 monotonicity check (GC-7)
                     try:

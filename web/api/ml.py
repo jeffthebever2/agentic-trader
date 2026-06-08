@@ -111,6 +111,37 @@ async def get_ml_status():
 RETRAIN_HISTORY_PATH = ROOT / "ml_models" / "retrain_history.jsonl"
 
 
+@router.get("/ml/readiness")
+async def get_ml_readiness():
+    """Run model_readiness_report.py and return structured verdict (READY / DEGRADED / NOT_READY)."""
+    import datetime as dt
+    cache_path = ROOT / "tmp" / "model_readiness_cache.json"
+
+    # Serve cache if < 10 minutes old
+    if cache_path.exists():
+        age_s = dt.datetime.now().timestamp() - cache_path.stat().st_mtime
+        if age_s < 600:
+            try:
+                return json.loads(cache_path.read_text())
+            except Exception:
+                pass
+
+    try:
+        from scripts.model_readiness_report import build_report  # type: ignore
+        bundle_path = ROOT / "ml_models" / "latest" / "model_bundle.joblib"
+        if not bundle_path.exists():
+            bundle_path = ROOT / "ml_models" / "stock_universe" / "model_bundle.joblib"
+        report_path = bundle_path.parent / "training_report.json"
+        paper_dir = ROOT / "tmp" / "paper_trading_today"
+        rpt = build_report(bundle_path, report_path, paper_dir)
+        result = rpt.to_dict()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(result, indent=2, default=str))
+        return result
+    except Exception as exc:
+        return {"verdict": "ERROR", "error": "Readiness check failed — see server logs"}
+
+
 @router.get("/ml/history")
 async def get_ml_history():
     """Return retrain history log as a list of records."""
