@@ -7,7 +7,8 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from web.auth import get_current_user
 
 router = APIRouter()
 
@@ -41,6 +42,7 @@ async def get_history(
     decision: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    _user: dict = Depends(get_current_user),
 ):
     results_dir = _results_dir()
     entries = []
@@ -108,7 +110,7 @@ async def get_history(
 
 
 @router.get("/history/stats")
-async def get_history_stats():
+async def get_history_stats(_user: dict = Depends(get_current_user)):
     results_dir = _results_dir()
     by_decision: dict = {}
     tickers: set = set()
@@ -141,7 +143,7 @@ async def get_history_stats():
 
 
 @router.get("/history/{ticker}/{date}")
-async def get_history_entry(ticker: str, date: str):
+async def get_history_entry(ticker: str, date: str, _user: dict = Depends(get_current_user)):
     # Whitelist path components so /history/../../etc/passwd can't escape
     # results_dir. Tickers are uppercase symbols; dates are short tokens.
     if not _TICKER_RE.match(ticker) or not _DATE_RE.match(date):
@@ -173,7 +175,7 @@ async def get_history_entry(ticker: str, date: str):
 
 
 @router.get("/history/tickers")
-async def list_tickers():
+async def list_tickers(_user: dict = Depends(get_current_user)):
     results_dir = _results_dir()
     tickers = []
     if results_dir.exists():

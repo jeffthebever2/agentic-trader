@@ -11,8 +11,9 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from web.auth import get_current_user
 
 router = APIRouter()
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
@@ -277,7 +278,7 @@ class SimpleAnalyzeRequest(BaseModel):
 
 
 @router.post("/analyze")
-async def analyze_simple(req: SimpleAnalyzeRequest):
+async def analyze_simple(req: SimpleAnalyzeRequest, _user: dict = Depends(get_current_user)):
     """Lightweight synchronous analysis endpoint for bulk scans (algorithm mode only).
     For full LLM agent analysis, use the WebSocket endpoint /ws/analyze.
     """

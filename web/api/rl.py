@@ -10,7 +10,8 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from web.auth import get_current_user
 
 router = APIRouter()
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -69,7 +70,7 @@ def _load_status() -> dict:
 
 
 @router.get("/rl/status")
-async def get_rl_status():
+async def get_rl_status(_user: dict = Depends(get_current_user)):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, _load_status)
 
