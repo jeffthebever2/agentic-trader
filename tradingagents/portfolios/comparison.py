@@ -110,6 +110,8 @@ def compute_portfolio_stats(
             "profit_factor": None,
             "rank": None,
             "source_strategy": portfolio.source_strategy,
+            "avg_hold_days": None,
+            "config": portfolio.as_param_dict(),
         }
 
     starting_cash = float(state.get("starting_cash", 10000.0))
@@ -118,9 +120,9 @@ def compute_portfolio_stats(
     positions = state.get("positions", {})
     trades = state.get("trades", [])
 
-    # Estimate open position market value from state (uses last stored price if available)
+    # Estimate open position market value using current_price if available, else entry_price
     open_value = sum(
-        float(p.get("shares", 0)) * float(p.get("entry_price", 0))
+        float(p.get("shares", 0)) * float(p.get("current_price") or p.get("last_price") or p.get("entry_price", 0))
         for p in positions.values()
     )
     equity = cash + open_value
@@ -167,6 +169,30 @@ def compute_portfolio_stats(
         if equity_curve[i - 1] > 0
     ]
 
+    # Average hold days (calendar) from SELL events that have entry/exit timestamps
+    hold_days_list: list[float] = []
+    for e in sell_events:
+        entry_ts = e.get("entry_time") or e.get("entry_date") or e.get("entry_timestamp")
+        exit_ts = e.get("timestamp") or e.get("time") or e.get("exit_time")
+        if entry_ts and exit_ts:
+            try:
+                from datetime import datetime as _dt
+                fmt = "%Y-%m-%dT%H:%M:%S" if "T" in str(entry_ts) else "%Y-%m-%d"
+                def _parse(s: str) -> _dt:
+                    for f in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+                        try:
+                            return _dt.strptime(str(s)[:19], f[:len(str(s)[:19])])
+                        except ValueError:
+                            continue
+                    return _dt.fromisoformat(str(s)[:19])
+                delta = (_parse(str(exit_ts)) - _parse(str(entry_ts))).days
+                if delta >= 0:
+                    hold_days_list.append(float(delta))
+            except Exception:
+                pass
+
+    avg_hold_days = round(sum(hold_days_list) / len(hold_days_list), 1) if hold_days_list else None
+
     return {
         "name": portfolio.name,
         "label": portfolio.label,
@@ -191,6 +217,8 @@ def compute_portfolio_stats(
         "equity_curve": equity_curve[-50:],  # last 50 points for sparkline
         "rank": None,  # filled by rank_portfolios()
         "source_strategy": portfolio.source_strategy,
+        "avg_hold_days": avg_hold_days,
+        "config": portfolio.as_param_dict(),
     }
 
 

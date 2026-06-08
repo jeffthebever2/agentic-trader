@@ -6,59 +6,80 @@
 <title>Portfolio Competition — Agentic Trader</title>
 <style>
   :root {
-    --bg: #0d1117;
-    --surface: #161b22;
-    --border: #21262d;
-    --text: #c9d1d9;
-    --muted: #8b949e;
-    --accent: #58a6ff;
-    --green: #3fb950;
-    --red: #f85149;
-    --yellow: #d29922;
-    --radius: 8px;
-    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --bg: #0d1117; --surface: #161b22; --border: #21262d;
+    --text: #c9d1d9; --muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    --radius: 8px; --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
-  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   header h1 { font-size: 18px; font-weight: 600; }
   header .subtitle { color: var(--muted); font-size: 13px; }
-  header .pill { background: var(--border); border-radius: 12px; padding: 2px 10px; font-size: 12px; color: var(--muted); }
+  .pill { background: var(--border); border-radius: 12px; padding: 2px 10px; font-size: 12px; color: var(--muted); }
   .refresh-btn { margin-left: auto; background: var(--accent); color: #fff; border: none; border-radius: var(--radius); padding: 6px 14px; font-size: 13px; cursor: pointer; }
   .refresh-btn:hover { opacity: 0.85; }
+  #last-updated { font-size: 12px; color: var(--muted); }
 
-  .main { max-width: 1400px; margin: 0 auto; padding: 24px; }
-  .section-title { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; margin-top: 24px; }
+  .main { max-width: 1600px; margin: 0 auto; padding: 20px 24px; }
+  .section-title { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; margin-top: 20px; }
 
-  /* Top-3 podium */
+  /* Model health banner */
+  .health-bar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); margin-bottom: 16px; font-size: 13px; flex-wrap: wrap; }
+  .health-bar.warn { border-color: var(--yellow); }
+  .health-bar.ok { border-color: var(--green); }
+  .health-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .health-dot.ok { background: var(--green); }
+  .health-dot.warn { background: var(--yellow); }
+  .health-dot.err { background: var(--red); }
+  .health-item { color: var(--muted); }
+  .health-item strong { color: var(--text); }
+  .health-warn { color: var(--yellow); font-size: 12px; }
+
+  /* Group summary cards */
+  .group-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 4px; }
+  .group-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+  .group-card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 6px; }
+  .group-card-best { font-size: 15px; font-weight: 600; }
+  .group-card-return { font-size: 20px; font-weight: 700; }
+  .group-card-meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  /* Podium */
   .podium { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 8px; }
   .podium-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; position: relative; }
   .podium-card.rank-1 { border-color: #ffd700; }
   .podium-card.rank-2 { border-color: #aaa; }
   .podium-card.rank-3 { border-color: #cd7f32; }
   .rank-badge { position: absolute; top: 10px; right: 12px; font-size: 20px; }
-  .podium-emoji { font-size: 24px; margin-bottom: 4px; }
+  .podium-emoji { font-size: 22px; margin-bottom: 4px; }
   .podium-label { font-size: 15px; font-weight: 600; }
   .podium-desc { color: var(--muted); font-size: 12px; margin-top: 2px; margin-bottom: 10px; }
   .podium-return { font-size: 28px; font-weight: 700; }
   .podium-return.pos { color: var(--green); }
   .podium-return.neg { color: var(--red); }
-  .podium-stats { display: flex; gap: 16px; margin-top: 10px; }
-  .stat { }
+  .podium-stats { display: flex; gap: 14px; margin-top: 10px; flex-wrap: wrap; }
   .stat-val { font-weight: 600; font-size: 14px; }
   .stat-label { font-size: 11px; color: var(--muted); }
 
-  /* Full leaderboard table */
+  /* Config badge */
+  .config-badges { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+  .cfg-badge { background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.2); color: var(--muted); border-radius: 4px; padding: 1px 6px; font-size: 10px; font-family: monospace; }
+
+  /* Table */
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; }
   th { background: var(--surface); color: var(--muted); font-size: 12px; font-weight: 500; text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; cursor: pointer; user-select: none; }
   th:hover { color: var(--text); }
-  td { padding: 9px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th.sorted { color: var(--accent); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; font-size: 13px; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(255,255,255,0.02); }
-  .rank-num { color: var(--muted); width: 30px; }
+  .rank-num { color: var(--muted); }
   .portfolio-name { font-weight: 500; }
-  .portfolio-name .emoji { margin-right: 6px; }
+  .portfolio-name .emoji { margin-right: 5px; }
   .group-tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 500; }
   .group-signal  { background: rgba(88,166,255,0.15); color: #58a6ff; }
   .group-risk    { background: rgba(248,81,73,0.15); color: #f85149; }
@@ -68,25 +89,21 @@
   .return-pos    { color: var(--green); font-weight: 600; }
   .return-neg    { color: var(--red); font-weight: 600; }
   .return-zero   { color: var(--muted); }
-
-  /* Sparkline bars */
-  .sparkline { display: flex; align-items: flex-end; gap: 1px; height: 24px; }
-  .sparkline span { background: var(--accent); width: 3px; border-radius: 1px; min-height: 2px; }
-
-  /* Group filter tabs */
-  .tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .sparkline { display: flex; align-items: flex-end; gap: 1px; height: 22px; }
+  .sparkline span { width: 3px; border-radius: 1px; min-height: 2px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
   .tab { background: var(--border); border: none; border-radius: 16px; padding: 5px 14px; font-size: 13px; color: var(--muted); cursor: pointer; }
   .tab:hover { color: var(--text); }
   .tab.active { background: var(--accent); color: #fff; }
-
-  /* Status badges */
   .badge-active { color: var(--green); }
   .badge-inactive { color: var(--muted); }
-
-  /* Refresh indicator */
-  #last-updated { font-size: 12px; color: var(--muted); margin-left: 12px; }
   .loading { color: var(--muted); padding: 40px; text-align: center; }
   .error-msg { color: var(--red); padding: 20px; text-align: center; }
+
+  /* Sort indicator */
+  th::after { content: ''; display: inline-block; margin-left: 4px; }
+  th.sorted-asc::after { content: '↑'; }
+  th.sorted-desc::after { content: '↓'; }
 </style>
 </head>
 <body>
@@ -98,18 +115,29 @@
   </div>
   <span class="pill" id="portfolio-count">— portfolios</span>
   <span id="last-updated"></span>
-  <button class="refresh-btn" onclick="loadLeaderboard()">↻ Refresh</button>
+  <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
 </header>
 
 <div class="main">
-  <div id="podium-section">
-    <div class="section-title">🥇 Top 3 — Current Leaders</div>
-    <div class="podium" id="podium-cards">
-      <div class="loading">Loading...</div>
-    </div>
+
+  <!-- Model health -->
+  <div id="model-health-bar" class="health-bar" style="display:none"></div>
+
+  <!-- Group summary cards -->
+  <div class="section-title">📊 By Group</div>
+  <div class="group-cards" id="group-cards">
+    <div class="group-card"><div class="loading" style="padding:10px;font-size:12px">Loading…</div></div>
+    <div class="group-card"></div><div class="group-card"></div><div class="group-card"></div>
   </div>
 
-  <div class="section-title">📊 Full Leaderboard</div>
+  <!-- Podium -->
+  <div class="section-title" style="margin-top:20px">🥇 Top 3 — Current Leaders</div>
+  <div class="podium" id="podium-cards">
+    <div class="loading">Loading...</div>
+  </div>
+
+  <!-- Table -->
+  <div class="section-title">📋 Full Leaderboard</div>
   <div class="tabs" id="group-tabs">
     <button class="tab active" data-group="all" onclick="filterGroup('all', this)">All</button>
     <button class="tab" data-group="signal" onclick="filterGroup('signal', this)">📡 Signal</button>
@@ -122,23 +150,25 @@
     <table id="leaderboard-table">
       <thead>
         <tr>
-          <th onclick="sortBy('rank')">#</th>
-          <th onclick="sortBy('label')">Portfolio</th>
-          <th onclick="sortBy('group')">Group</th>
-          <th onclick="sortBy('total_return_pct')">Total Return</th>
-          <th onclick="sortBy('win_rate')">Win Rate</th>
-          <th onclick="sortBy('trade_count')">Trades</th>
-          <th onclick="sortBy('open_positions')">Open</th>
-          <th onclick="sortBy('equity')">Equity</th>
-          <th onclick="sortBy('profit_factor')">Profit Factor</th>
-          <th onclick="sortBy('sharpe')">Sharpe</th>
-          <th onclick="sortBy('max_drawdown')">Max DD</th>
+          <th onclick="sortBy('rank')" id="th-rank">#</th>
+          <th onclick="sortBy('label')" id="th-label">Portfolio</th>
+          <th onclick="sortBy('group')" id="th-group">Group</th>
+          <th onclick="sortBy('total_return_pct')" id="th-total_return_pct">Return</th>
+          <th onclick="sortBy('win_rate')" id="th-win_rate">Win Rate</th>
+          <th onclick="sortBy('profit_factor')" id="th-profit_factor">PF</th>
+          <th onclick="sortBy('sharpe')" id="th-sharpe">Sharpe</th>
+          <th onclick="sortBy('max_drawdown')" id="th-max_drawdown">Max DD</th>
+          <th onclick="sortBy('trade_count')" id="th-trade_count">Trades</th>
+          <th onclick="sortBy('avg_hold_days')" id="th-avg_hold_days">Avg Hold</th>
+          <th onclick="sortBy('open_positions')" id="th-open_positions">Open</th>
+          <th onclick="sortBy('equity')" id="th-equity">Equity</th>
           <th>Trend</th>
+          <th>Config</th>
           <th>Status</th>
         </tr>
       </thead>
       <tbody id="table-body">
-        <tr><td colspan="13" class="loading">Loading portfolio data...</td></tr>
+        <tr><td colspan="15" class="loading">Loading portfolio data...</td></tr>
       </tbody>
     </table>
   </div>
@@ -150,6 +180,64 @@ let _activeGroup = 'all';
 let _sortCol = 'rank';
 let _sortAsc = true;
 
+async function loadAll() {
+  loadLeaderboard();
+  loadModelHealth();
+  loadGroupStats();
+}
+
+async function loadModelHealth() {
+  try {
+    const res = await fetch('/api/portfolios/model-health');
+    if (!res.ok) return;
+    const h = await res.json();
+    const bar = document.getElementById('model-health-bar');
+    const isWarn = !h.healthy || (h.warnings && h.warnings.length > 0);
+    bar.className = 'health-bar ' + (isWarn ? 'warn' : 'ok');
+    const dotClass = h.healthy ? 'ok' : 'err';
+    const age = h.age_days != null ? `${h.age_days}d old` : 'unknown age';
+    const roc = h.wf_roc != null ? h.wf_roc.toFixed(4) : '—';
+    const qlib = h.qlib_features ? '<span style="color:var(--green)">Qlib ✓</span>' : '<span style="color:var(--yellow)">No Qlib</span>';
+    const warns = (h.warnings || []).map(w => `<span class="health-warn">⚠ ${w}</span>`).join(' ');
+    bar.innerHTML = `
+      <div class="health-dot ${dotClass}"></div>
+      <span class="health-item"><strong>Model</strong></span>
+      <span class="health-item">WF ROC <strong>${roc}</strong></span>
+      <span class="health-item">${age}</span>
+      <span class="health-item">${qlib}</span>
+      <span class="health-item">Features: <strong>${h.feature_count ?? '—'}</strong></span>
+      ${warns}
+    `;
+    bar.style.display = 'flex';
+  } catch(e) {}
+}
+
+async function loadGroupStats() {
+  try {
+    const res = await fetch('/api/portfolios/leaderboard/groups');
+    if (!res.ok) return;
+    const data = await res.json();
+    const container = document.getElementById('group-cards');
+    const groups = ['signal', 'risk', 'hold', 'filter'];
+    const labels = { signal: '📡 Signal', risk: '🛡️ Risk', hold: '⏳ Hold', filter: '🔬 Filter' };
+    container.innerHTML = groups.map(g => {
+      const s = data.groups[g];
+      if (!s || !s.best_name) return `<div class="group-card"><div class="group-card-title">${labels[g]}</div><div class="group-card-meta">No data</div></div>`;
+      const ret = s.best_return_pct;
+      const retClass = ret > 0 ? 'return-pos' : ret < 0 ? 'return-neg' : 'return-zero';
+      const avgRet = s.avg_return_pct;
+      const avgRetStr = avgRet != null ? `avg ${avgRet >= 0 ? '+' : ''}${avgRet.toFixed(2)}%` : '';
+      const wr = s.avg_win_rate != null ? `${(s.avg_win_rate*100).toFixed(1)}% WR` : '';
+      return `<div class="group-card">
+        <div class="group-card-title">${labels[g]} · ${s.active}/${s.count} active</div>
+        <div class="group-card-best">${s.best_label || s.best_name}</div>
+        <div class="group-card-return ${retClass}">${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%</div>
+        <div class="group-card-meta">${avgRetStr}${avgRetStr && wr ? ' · ' : ''}${wr} · ${s.total_trades} trades</div>
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
 async function loadLeaderboard() {
   const badge = document.getElementById('portfolio-count');
   badge.textContent = '…';
@@ -159,13 +247,12 @@ async function loadLeaderboard() {
     const data = await res.json();
     _allPortfolios = data.portfolios || [];
     badge.textContent = `${_allPortfolios.length} portfolios`;
-    document.getElementById('last-updated').textContent =
-      'Updated ' + new Date().toLocaleTimeString();
+    document.getElementById('last-updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
     renderPodium(_allPortfolios.filter(p => p.status === 'active').slice(0, 3));
     renderTable();
   } catch (e) {
     document.getElementById('table-body').innerHTML =
-      `<tr><td colspan="13" class="error-msg">Failed to load: ${e.message}</td></tr>`;
+      `<tr><td colspan="15" class="error-msg">Failed to load: ${e.message}</td></tr>`;
     badge.textContent = 'error';
   }
 }
@@ -175,34 +262,42 @@ function renderPodium(top3) {
   const rankClass = ['rank-1', 'rank-2', 'rank-3'];
   const container = document.getElementById('podium-cards');
   if (!top3.length) {
-    container.innerHTML = '<div style="color:var(--muted);padding:20px">No active portfolio data yet. Start the paper trader to begin the competition.</div>';
+    container.innerHTML = '<div style="color:var(--muted);padding:20px;grid-column:1/-1">No active data yet. Run: <code>./start.sh paper</code></div>';
     return;
   }
-  container.innerHTML = top3.map((p, i) => `
-    <div class="podium-card ${rankClass[i] || ''}">
+  container.innerHTML = top3.map((p, i) => {
+    const cfg = buildConfigBadges(p);
+    return `<div class="podium-card ${rankClass[i] || ''}">
       <div class="rank-badge">${medals[i] || ''}</div>
       <div class="podium-emoji">${p.emoji || '📊'}</div>
       <div class="podium-label">${p.label}</div>
-      <div class="podium-desc">${p.description.slice(0, 60)}…</div>
+      <div class="podium-desc">${(p.description || '').slice(0, 70)}…</div>
       <div class="podium-return ${p.total_return_pct >= 0 ? 'pos' : 'neg'}">
         ${p.total_return_pct >= 0 ? '+' : ''}${p.total_return_pct?.toFixed(2) ?? '—'}%
       </div>
       <div class="podium-stats">
-        <div class="stat">
-          <div class="stat-val">${p.win_rate != null ? (p.win_rate * 100).toFixed(1) + '%' : '—'}</div>
-          <div class="stat-label">Win Rate</div>
-        </div>
-        <div class="stat">
-          <div class="stat-val">${p.trade_count ?? 0}</div>
-          <div class="stat-label">Trades</div>
-        </div>
-        <div class="stat">
-          <div class="stat-val">${p.profit_factor != null ? p.profit_factor.toFixed(2) : '—'}</div>
-          <div class="stat-label">Profit Factor</div>
-        </div>
+        <div><div class="stat-val">${p.win_rate != null ? (p.win_rate*100).toFixed(1)+'%' : '—'}</div><div class="stat-label">Win Rate</div></div>
+        <div><div class="stat-val">${p.trade_count ?? 0}</div><div class="stat-label">Trades</div></div>
+        <div><div class="stat-val">${p.profit_factor != null ? p.profit_factor.toFixed(2) : '—'}</div><div class="stat-label">PF</div></div>
+        <div><div class="stat-val">${p.sharpe != null ? p.sharpe.toFixed(2) : '—'}</div><div class="stat-label">Sharpe</div></div>
       </div>
-    </div>
-  `).join('');
+      ${cfg ? `<div class="config-badges">${cfg}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function buildConfigBadges(p) {
+  const c = p.config || {};
+  const badges = [];
+  if (c.stop_mult != null)           badges.push(`stop ${c.stop_mult}×ATR`);
+  if (c.target_mult != null)         badges.push(`tgt ${c.target_mult}×ATR`);
+  if (c.risk_per_trade_pct != null)  badges.push(`risk ${c.risk_per_trade_pct}%`);
+  if (c.max_positions != null)       badges.push(`max ${c.max_positions} pos`);
+  if (c.max_hold_days != null)       badges.push(`hold ≤${c.max_hold_days}d`);
+  if (c.ml_probability_threshold != null) badges.push(`ML≥${(c.ml_probability_threshold*100).toFixed(0)}%`);
+  if (c.min_risk_reward != null)     badges.push(`RR≥${c.min_risk_reward}`);
+  if (c.trailing_stop_atr_mult != null) badges.push(`trail ${c.trailing_stop_atr_mult}×`);
+  return badges.map(b => `<span class="cfg-badge">${b}</span>`).join('');
 }
 
 function filterGroup(group, btn) {
@@ -213,16 +308,16 @@ function filterGroup(group, btn) {
 }
 
 function sortBy(col) {
+  document.querySelectorAll('th').forEach(t => t.classList.remove('sorted-asc','sorted-desc','sorted'));
   if (_sortCol === col) _sortAsc = !_sortAsc;
   else { _sortCol = col; _sortAsc = col === 'rank'; }
+  const th = document.getElementById('th-' + col);
+  if (th) th.classList.add(_sortAsc ? 'sorted-asc' : 'sorted-desc', 'sorted');
   renderTable();
 }
 
 function renderTable() {
-  let rows = _activeGroup === 'all'
-    ? [..._allPortfolios]
-    : _allPortfolios.filter(p => p.group === _activeGroup);
-
+  let rows = _activeGroup === 'all' ? [..._allPortfolios] : _allPortfolios.filter(p => p.group === _activeGroup);
   rows.sort((a, b) => {
     const av = a[_sortCol] ?? (_sortAsc ? Infinity : -Infinity);
     const bv = b[_sortCol] ?? (_sortAsc ? Infinity : -Infinity);
@@ -235,57 +330,57 @@ function renderTable() {
     const retClass = p.status === 'no_data' ? 'return-zero' : ret > 0 ? 'return-pos' : ret < 0 ? 'return-neg' : 'return-zero';
     const retStr = p.status === 'no_data' ? '<span class="no-data">no data</span>'
       : `<span class="${retClass}">${ret >= 0 ? '+' : ''}${ret?.toFixed(2) ?? '—'}%</span>`;
-
-    const wr = p.win_rate != null ? (p.win_rate * 100).toFixed(1) + '%' : '—';
+    const wr = p.win_rate != null ? (p.win_rate*100).toFixed(1)+'%' : '—';
     const pf = p.profit_factor != null ? p.profit_factor.toFixed(2) : '—';
     const sh = p.sharpe != null ? p.sharpe.toFixed(2) : '—';
-    const dd = p.max_drawdown > 0 ? `<span style="color:var(--red)">${(p.max_drawdown * 100).toFixed(1)}%</span>` : '—';
-    const equity = p.equity > 0 ? '$' + p.equity.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') : '—';
-    const statusIcon = p.status === 'active' ? '<span class="badge-active">●</span>' : '<span class="badge-inactive">○</span>';
+    const dd = p.max_drawdown > 0 ? `<span style="color:var(--red)">${(p.max_drawdown*100).toFixed(1)}%</span>` : '—';
+    const eq = p.equity > 0 ? '$'+p.equity.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g,',') : '—';
+    const hold = p.avg_hold_days != null ? p.avg_hold_days+'d' : '—';
     const groupClass = 'group-' + p.group;
-
     const curve = p.equity_curve || [];
-    const sparkline = curve.length > 1 ? buildSparkline(curve) : '<span style="color:var(--muted)">—</span>';
+    const spark = curve.length > 1 ? buildSparkline(curve) : '<span style="color:var(--muted)">—</span>';
+    const cfg = buildConfigBadges(p);
+    const statusIcon = p.status === 'active' ? '<span class="badge-active">●</span>' : '<span class="badge-inactive">○</span>';
 
     return `<tr>
       <td class="rank-num">${p.rank ?? '—'}</td>
-      <td class="portfolio-name"><span class="emoji">${p.emoji || '📊'}</span>${p.label}</td>
+      <td class="portfolio-name"><span class="emoji">${p.emoji||'📊'}</span>${p.label}</td>
       <td><span class="group-tag ${groupClass}">${p.group}</span></td>
       <td>${retStr}</td>
       <td>${wr}</td>
-      <td>${p.trade_count ?? 0}</td>
-      <td>${p.open_positions ?? 0}</td>
-      <td>${equity}</td>
       <td>${pf}</td>
       <td>${sh}</td>
       <td>${dd}</td>
-      <td>${sparkline}</td>
+      <td>${p.trade_count ?? 0}</td>
+      <td>${hold}</td>
+      <td>${p.open_positions ?? 0}</td>
+      <td>${eq}</td>
+      <td>${spark}</td>
+      <td style="font-size:11px">${cfg || '<span class="no-data">default</span>'}</td>
       <td>${statusIcon}</td>
     </tr>`;
   }).join('');
 
   if (!rows.length) {
-    tbody.innerHTML = '<tr><td colspan="13" class="loading">No portfolios in this group.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="15" class="loading">No portfolios in this group.</td></tr>';
   }
 }
 
 function buildSparkline(curve) {
   if (curve.length < 2) return '';
-  const min = Math.min(...curve);
-  const max = Math.max(...curve);
-  const range = max - min || 1;
   const pts = curve.slice(-20);
-  return '<div class="sparkline">' +
-    pts.map(v => {
-      const h = Math.max(2, Math.round(((v - min) / range) * 22));
-      const color = v >= pts[0] ? '#3fb950' : '#f85149';
-      return `<span style="height:${h}px;background:${color}"></span>`;
-    }).join('') + '</div>';
+  const min = Math.min(...pts);
+  const max = Math.max(...pts);
+  const range = max - min || 1;
+  return '<div class="sparkline">' + pts.map(v => {
+    const h = Math.max(2, Math.round(((v - min) / range) * 20));
+    const color = v >= pts[0] ? '#3fb950' : '#f85149';
+    return `<span style="height:${h}px;background:${color}"></span>`;
+  }).join('') + '</div>';
 }
 
-// Auto-refresh every 60 seconds
-loadLeaderboard();
-setInterval(loadLeaderboard, 60000);
+loadAll();
+setInterval(loadAll, 60000);
 </script>
 </body>
 </html>
