@@ -32,7 +32,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from web.auth import get_current_user
+from web.auth import get_current_user, require_admin
 
 log = logging.getLogger("thematic_auto")
 
@@ -1959,7 +1959,7 @@ def _fidelity_request_kwargs_from_approval(
 async def approve_signal(
     signal_id: str,
     body: ApproveBody,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(require_admin),
 ):
     """Approve a signal: add to thematic portfolio + inject paper trade.
     If fidelity_trade=True and execute_fidelity=True, also route to Fidelity."""
@@ -2187,7 +2187,7 @@ async def approve_signal(
 
 
 @router.post("/thematic/auto/signals/{signal_id}/skip")
-async def skip_signal(signal_id: str, _user: dict = Depends(get_current_user)):
+async def skip_signal(signal_id: str, _user: dict = Depends(require_admin)):
     data = _load_signals()
     sig = next((s for s in data["signals"] if s["id"] == signal_id), None)
     if not sig:
@@ -2205,7 +2205,7 @@ async def check_exits_dry(_user: dict = Depends(get_current_user)):
 
 
 @router.post("/thematic/auto/exit-check")
-async def execute_exits(_user: dict = Depends(get_current_user)):
+async def execute_exits(_user: dict = Depends(require_admin)):
     """Execute exits: close thematic positions meeting stop/target/hold/buzz-collapse criteria."""
     exits = await _check_thematic_exits(execute=True)
     return {"ok": True, "executed": exits, "count": len(exits)}

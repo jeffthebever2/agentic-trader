@@ -84,7 +84,6 @@ async def me(
         "sms_opted_out": bool(user.get("sms_opted_out", False)),
         "sms_service": user.get("sms_service", ""),
         "viewed_by_admin": bool(user.get("viewed_by_admin", False)),
-        "actual_admin_email": user.get("actual_admin_email", ""),
         "hil_prefs": user_store.get_hil_prefs(user),
     }
 
