@@ -247,8 +247,10 @@ async def ws_ml_train(websocket: WebSocket):
                 )
         except Exception as e:
             import traceback
+            import logging as _logging
+            _logging.getLogger(__name__).exception("ws_ml_train error")
             asyncio.run_coroutine_threadsafe(
-                queue.put({"type": "error", "message": str(e), "traceback": traceback.format_exc()}),
+                queue.put({"type": "error", "message": str(e)}),
                 main_loop,
             )
         finally:
