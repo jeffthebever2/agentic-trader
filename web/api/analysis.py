@@ -493,11 +493,12 @@ async def ws_analyze(websocket: WebSocket):
 
         except Exception as e:
             import traceback
+            import logging as _logging
+            _logging.getLogger(__name__).exception("ws_analyze error")
             asyncio.run_coroutine_threadsafe(
                 queue.put({
                     "type": "error",
                     "message": _humanize_analysis_error(e, req.llm_provider),
-                    "traceback": traceback.format_exc(),
                 }),
                 main_loop,
             )

@@ -102,6 +102,15 @@ async def ws_rl_train(websocket: WebSocket):
     checkpoint   = cfg.get("checkpoint", "")
     checkpoint_dir = cfg.get("checkpoint_dir", str(CHECKPOINT_DIR))
 
+    # Validate checkpoint_dir stays inside project root
+    try:
+        _resolved_ckpt = Path(checkpoint_dir).resolve()
+        _resolved_ckpt.relative_to(ROOT.resolve())
+    except (ValueError, RuntimeError):
+        await websocket.send_json({"type": "error", "message": "checkpoint_dir must be inside the project root"})
+        await websocket.close()
+        return
+
     def run_sync():
         try:
             cmd = [
@@ -147,8 +156,10 @@ async def ws_rl_train(websocket: WebSocket):
                 )
         except Exception as e:
             import traceback
+            import logging as _logging
+            _logging.getLogger(__name__).exception("ws_rl_train error")
             asyncio.run_coroutine_threadsafe(
-                queue.put({"type": "error", "message": str(e), "traceback": traceback.format_exc()}),
+                queue.put({"type": "error", "message": str(e)}),
                 main_loop,
             )
         finally:

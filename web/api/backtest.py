@@ -511,8 +511,10 @@ async def ws_algo_backtest(websocket: WebSocket):
                 )
         except Exception as e:
             import traceback
+            import logging as _logging
+            _logging.getLogger(__name__).exception("ws_backtest error")
             asyncio.run_coroutine_threadsafe(
-                queue.put({"type": "error", "message": str(e), "traceback": traceback.format_exc()}),
+                queue.put({"type": "error", "message": str(e)}),
                 main_loop,
             )
         finally:

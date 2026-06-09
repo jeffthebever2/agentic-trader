@@ -196,6 +196,15 @@ async def ws_ml_train(websocket: WebSocket):
         await websocket.close()
         return
 
+    # Validate output_dir stays inside project root
+    try:
+        _resolved_out = Path(output_dir).resolve()
+        _resolved_out.relative_to(ROOT.resolve())
+    except (ValueError, RuntimeError):
+        await websocket.send_json({"type": "error", "message": "output_dir must be inside the project root"})
+        await websocket.close()
+        return
+
     def run_sync():
         try:
             cmd = [

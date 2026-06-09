@@ -12,8 +12,9 @@ ROOT = Path(__file__).parent.parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from web.auth import get_current_user
 
 router = APIRouter()
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
@@ -67,8 +68,12 @@ def _run_scan(cfg: dict, queue: asyncio.Queue, main_loop: asyncio.AbstractEventL
         tickers_input = cfg.get("tickers", [])
         tickers_file  = cfg.get("tickers_file", "")
         if tickers_file:
+            _tf = str(tickers_file)
+            if ".." in _tf or _tf.startswith("/") or _tf.startswith("~"):
+                emit({"type": "error", "message": "Invalid tickers_file path"})
+                return
             try:
-                tickers = load_tickers(tickers_file)
+                tickers = load_tickers(_tf)
             except Exception as e:
                 emit({"type": "error", "message": f"Cannot load tickers file: {e}"})
                 return
@@ -320,7 +325,7 @@ class ScreenRequest(BaseModel):
 
 
 @router.post("/scanner/screen")
-async def scanner_screen(req: ScreenRequest):
+async def scanner_screen(req: ScreenRequest, _user: dict = Depends(get_current_user)):
     """Synchronous score for a small set of tickers on a specific date.
     Uses the same algorithm as the backtest scanner.
     """
