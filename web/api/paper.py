@@ -1094,6 +1094,37 @@ async def start_paper_runner(body: PaperStartRequest, admin: dict = Depends(requ
             return {"success": False, "running": False, "error": f"Missing script: {SCRIPT_PATH}"}
 
         load_dotenv(ROOT / ".env", override=True)
+
+        # ── input validation ────────────────────────────────────────────────
+        import re as _re, ipaddress as _ipaddress, socket as _socket
+        from urllib.parse import urlparse as _urlparse
+
+        _TICKER_FILE_RE = _re.compile(r'^[A-Za-z0-9_\-]+\.txt$')
+        if not _TICKER_FILE_RE.match(body.tickers):
+            return {"success": False, "running": False, "error": "tickers must be a plain .txt filename with no path separators"}
+
+        for _mb_field, _mb_val in [("model_bundle", body.model_bundle), ("new_model_bundle", body.new_model_bundle)]:
+            if _mb_val:
+                try:
+                    _resolved = Path(_mb_val).resolve()
+                    _resolved.relative_to(ROOT.resolve())
+                except (ValueError, RuntimeError):
+                    return {"success": False, "running": False, "error": f"{_mb_field} must be inside the project root"}
+
+        if body.webhook_url:
+            _pu = _urlparse(body.webhook_url)
+            if _pu.scheme not in ("https",):
+                return {"success": False, "running": False, "error": "webhook_url must use https"}
+            try:
+                _addrs = _socket.getaddrinfo(_pu.hostname, None)
+                for _af, _st, _pr, _cn, _sa in _addrs:
+                    _ip = _ipaddress.ip_address(_sa[0])
+                    if _ip.is_private or _ip.is_loopback or _ip.is_link_local or _ip.is_reserved:
+                        return {"success": False, "running": False, "error": "webhook_url must not point to an internal address"}
+            except (OSError, ValueError):
+                return {"success": False, "running": False, "error": "webhook_url hostname could not be resolved"}
+        # ────────────────────────────────────────────────────────────────────
+
         _last_output_base = DEFAULT_OUTPUT_BASE
         today = _ny_today()
         if not body.force and today.weekday() >= 5:
