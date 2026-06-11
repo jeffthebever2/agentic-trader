@@ -240,7 +240,7 @@ function RunnerControls({ running }: { running: boolean }) {
   const [posMin, setPosMin]       = useState('10')
   const [maxPos, setMaxPos]       = useState('5')
   const [mlThresh, setMlThresh]   = useState('0.72')
-  const [mlLossMax, setMlLossMax] = useState('0.25')
+  const [mlLossMax, setMlLossMax] = useState('0.15')
   const [aiShortlist, setAiShortlist] = useState('30')
   const [aiPicks, setAiPicks]     = useState('5')
   const [model, setModel]         = useState('openai/gpt-4o-mini')
@@ -254,7 +254,7 @@ function RunnerControls({ running }: { running: boolean }) {
   const [stopLossPct, setStopLossPct]         = useState('0')
   const [highConfThresh, setHighConfThresh]   = useState('0.80')
   const [maxTickers, setMaxTickers]           = useState('0')
-  const [modelBundle, setModelBundle]         = useState('ml_models/stock_universe_candidate_20260512/model_bundle.joblib')
+  const [modelBundle, setModelBundle]         = useState('ml_models/latest/model_bundle.joblib')
   const [smsNumber, setSmsNumber]             = useState('')
   const [expanded, setExpanded]               = useState(false)
   const [autostartEnabledOverride, setAutostartEnabledOverride] = useState<boolean | null>(null)
@@ -282,24 +282,24 @@ function RunnerControls({ running }: { running: boolean }) {
       scan_interval_minutes: Number(scanInterval) || 15,
       position_cap_pct: Number(posMax) || 25,
       position_cap_min_pct: Number(posMin) || 10,
-      max_open_positions: Number(maxPos) || 5,
+      max_positions: Number(maxPos) || 5,
       ml_probability_threshold: Number(mlThresh) || 0.72,
-      ml_loss_max: Number(mlLossMax) || 0.25,
-      ml_return_min: Number(mlRetMin) || 0,
+      ml_large_loss_max: Number(mlLossMax) || 0.15,
+      ml_expected_return_min: Number(mlRetMin) || -99,
       take_profit_pct: Number(takeProfitPct) || 0,
       stop_loss_pct: Number(stopLossPct) || 0,
-      high_conf_threshold: Number(highConfThresh) || 0.80,
+      position_high_confidence_threshold: Number(highConfThresh) || 0.80,
       max_tickers: Number(maxTickers) || 0,
       model_bundle: modelBundle,
-      ai_shortlist: Number(aiShortlist) || 30,
-      ai_picks: Number(aiPicks) || 5,
+      ai_shortlist_size: Number(aiShortlist) || 30,
+      ai_max_picks: Number(aiPicks) || 5,
       openrouter_model: model,
-      ticker_file: tickerFile,
+      tickers: tickerFile,
       sms_number: smsNumber || undefined,
       hold_overnight: holdOvernight,
       include_pure_ai: includeAi,
       trade_fidelity: tradeFidelity,
-      execute_real_trades: executeReal,
+      trade_fidelity_execute: executeReal,
     }),
     onSuccess: () => { toast.success('Runner started'); qc.invalidateQueries({ queryKey: ['paper', 'status'] }) },
     onError: (e: unknown) => toast.error((e as Error)?.message ?? 'Start failed'),

@@ -93,7 +93,7 @@ def _run_scan(cfg: dict, queue: asyncio.Queue, main_loop: asyncio.AbstractEventL
         score_mode  = cfg.get("score_mode", "breakout")
         threshold   = float(cfg.get("threshold", 65.0))
         target_mult = float(cfg.get("target_mult", 2.0))
-        stop_mult   = float(cfg.get("stop_mult", 1.0))
+        stop_mult   = float(cfg.get("stop_mult", 1.5))  # matches live paper-trade exit config (2026-06-10 sweep)
         use_ml      = bool(cfg.get("use_ml", True))
         ml_prob_min = float(cfg.get("ml_prob_min", 0.50))
         lookback    = int(cfg.get("lookback_days", 420))
@@ -270,7 +270,7 @@ class ScanRequest(BaseModel):
     score_mode: str = "breakout"
     threshold: float = 65.0
     target_mult: float = 2.0
-    stop_mult: float = 1.0
+    stop_mult: float = 1.5
     use_ml: bool = True
     ml_prob_min: float = 0.50
     max_tickers: int = 0

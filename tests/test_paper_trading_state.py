@@ -262,7 +262,10 @@ def test_paper_api_and_web_defaults_stay_strict():
     assert req.ml_large_loss_max == pytest.approx(0.15)
     assert req.ml_expected_return_min == pytest.approx(-99.0)
     assert req.target_mult == pytest.approx(1.2)
-    assert req.stop_mult == pytest.approx(1.0)
+    # stop 1.5 + 21-day hold: 2026-06-10 sweep (n=658) — survival-to-drift config
+    assert req.stop_mult == pytest.approx(1.5)
+    assert req.max_hold_days == 21
+    assert req.ml_gate_mode == "shadow"
 
     for key, expected in {
         "position_cap_pct": 25.0,
@@ -272,7 +275,8 @@ def test_paper_api_and_web_defaults_stay_strict():
         "ml_large_loss_max": 0.15,
         "ml_expected_return_min": -99.0,
         "target_mult": 1.2,
-        "stop_mult": 1.0,
+        "stop_mult": 1.5,
+        "max_hold_days": 21,
     }.items():
         assert paper.DEFAULT_AUTOSTART_CONFIG[key] == pytest.approx(expected)
 

@@ -1411,6 +1411,14 @@ def parse_args() -> argparse.Namespace:
                              "Re-enable after Cycle 17 retrain with WF ROC > 0.52.")
     parser.add_argument("--ml-large-loss-max", type=float, default=None,
                         help="Override max large-loss probability from bundle (default: use bundle value, typically 0.20).")
+    parser.add_argument("--ml-gate-mode", choices=("full", "veto_only", "shadow"), default="shadow",
+                        help="ML gate enforcement. shadow (default since Cycle 47): nothing enforced, all "
+                             "gates logged. Cycle 47b retrain on live-matched exit labels (stop 1.5/h15) "
+                             "showed NO model with signal (win ROC=0.4861, large_loss ROC=0.4972, n=442) "
+                             "while rule_only made +0.452%%/trade — and the old bundle's large_loss veto "
+                             "was trained on mismatched stop-1.0/h10 labels. veto_only: only the "
+                             "large_loss model vetoes. full: legacy all-gates behavior. "
+                             "Regime crash block (threshold>=0.95) is always enforced in every mode.")
     parser.add_argument("--ml-expected-return-min", type=float, default=None,
                         help="Override minimum expected return from bundle (default: use bundle value, typically 0.0).")
     parser.add_argument("--max-ml-candidates", type=int, default=200,
@@ -1465,9 +1473,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-extended-bounce", action=argparse.BooleanOptionalAction, default=True,
                         help="Skip trades where consec_up>=2 (entering on 2nd+ consecutive up day). "
                              "Evidence: consec_up<=1 E=+0.530pct vs consec_up>=2 E=+0.157pct (VIX=normal, 1.2/0.7).")
-    parser.add_argument("--max-hold-days", type=int, default=14,
+    parser.add_argument("--max-hold-days", type=int, default=21,
                         help="Time-stop: exit confirmed_pullback positions after this many "
-                             "calendar days (~10 trading days). Validated optimum.")
+                             "calendar days (~15 trading days). Cycle 47 (2026-06-10): raised "
+                             "14 → 21. Sweep (n=658 paired, stop 1.5): h15 E=+0.363%%/trade "
+                             "WR=58.4%% vs h10 E=+0.274%% WR=57.0%%. Edge is survival-to-drift; "
+                             "10-day time-stop was cutting winners that needed 11-15 days.")
     parser.add_argument("--hold-overnight", action=argparse.BooleanOptionalAction, default=True,
                         help="Carry paper positions overnight instead of end-of-day flattening. "
                              "Default true to avoid day-trade/PDT churn; use --no-hold-overnight "
@@ -1603,6 +1614,27 @@ def seconds_until_next_scan(now: dt.datetime, interval_minutes: float) -> float:
     interval = max(1, int(interval_minutes * 60))
     epoch = int(now.timestamp())
     return float(interval - (epoch % interval))
+
+
+def release_yfinance_fds() -> None:
+    """Free leaked yfinance tz-cache sqlite handles between scans.
+
+    yfinance's downloader threads each open a peewee SqliteDatabase connection
+    to tkr-tz.db; the dead threads' connections linger until garbage collection,
+    leaking ~100+ file descriptors per trading day (launchd's default 256-fd
+    limit then crashes the runner with OSError Errno 24). Closing the singleton
+    db (peewee auto-reconnects on next use) plus a gc pass releases them.
+    """
+    try:
+        from yfinance.cache import _TzDBManager
+        _TzDBManager.close_db()
+    except Exception:
+        pass
+    try:
+        import gc
+        gc.collect()
+    except Exception:
+        pass
 
 
 def choose_model_path(user_path: str | None) -> Path | None:
@@ -1787,7 +1819,8 @@ def spy_gate_values(spy_df: pd.DataFrame | None, as_of: pd.Timestamp) -> dict[st
 def predict_ml(row: dict[str, Any], bundle: dict[str, Any],
                ml_prob_threshold: float | None = None,
                ml_large_loss_max: float | None = None,
-               ml_expected_return_min: float | None = None) -> dict[str, Any]:
+               ml_expected_return_min: float | None = None,
+               gate_mode: str = "veto_only") -> dict[str, Any]:
     numeric = bundle.get("numeric_features", [])
     categorical = bundle.get("categorical_features", [])
     feature_names = bundle.get("feature_names")
@@ -1887,14 +1920,44 @@ def predict_ml(row: dict[str, Any], bundle: dict[str, Any],
     if loss_prob is not None and loss_prob > ml_large_loss_max:
         failed.append(f"large_loss_probability_above_{ml_large_loss_max:.2f}")
 
+    # ── Gate mode (2026-06-10 audit) ─────────────────────────────────────────
+    # Test-period evidence: rule_only +0.78%/trade PF=1.44 vs full ML gate
+    # -0.05%/trade PF=0.98 (n=39). Win-prob model ROC≈0.51 (coin flip),
+    # uncalibrated (cal_rows=0) — its gate subtracts edge. large_loss is the
+    # only model with real signal (ROC=0.648), so veto_only keeps just that.
+    #   full      — legacy behavior: all gates enforced
+    #   veto_only — only large_loss veto enforced; win_prob/exp_ret logged only
+    #   shadow    — nothing enforced; all gates logged for offline analysis
+    # Regime hard block (ml_threshold >= 0.95 = crash regime, MR-6) is always
+    # enforced regardless of mode — it is a risk control, not a model gate.
+    full_pass = not failed
+    regime_hard_block = ml_probability_threshold >= 0.95 and (
+        win_prob is None or win_prob < ml_probability_threshold)
+    if gate_mode == "shadow":
+        enforced = ["regime_hard_block"] if regime_hard_block else []
+    elif gate_mode == "veto_only":
+        enforced = [f for f in failed if f.startswith("large_loss_probability_above")]
+        if regime_hard_block:
+            enforced.append("regime_hard_block")
+    else:  # full
+        enforced = list(failed)
+
+    if not enforced:
+        decision_reason = "rule_pass_and_ml_pass"
+        if failed:  # shadow record of what the full gate would have done
+            decision_reason += ":shadow_failed:" + ",".join(failed)
+    else:
+        decision_reason = "ml_gate_failed:" + ",".join(enforced)
+
     return {
         "ml_probability": win_prob,
         "expected_return": expected_return,
         "large_loss_probability": loss_prob,
         "target_before_stop_probability": target_prob,
         "timeout_probability": timeout_prob,
-        "ml_pass": not failed,
-        "decision_reason": "rule_pass_and_ml_pass" if not failed else "ml_gate_failed:" + ",".join(failed),
+        "ml_pass": not enforced,
+        "ml_pass_full_gate": full_pass,
+        "decision_reason": decision_reason,
     }
 
 
@@ -2514,6 +2577,7 @@ def build_candidates(
                 ml_prob_threshold=ML_OLD_THRESHOLD,
                 ml_large_loss_max=getattr(args, "ml_large_loss_max", None),
                 ml_expected_return_min=getattr(args, "ml_expected_return_min", None),
+                gate_mode=getattr(args, "ml_gate_mode", "veto_only"),
             )
 
         # Compute new_ml early so it can gate near-miss candidates.
@@ -2526,6 +2590,7 @@ def build_candidates(
                 ml_prob_threshold=eff_ml_threshold,
                 ml_large_loss_max=getattr(args, "ml_large_loss_max", None),
                 ml_expected_return_min=getattr(args, "ml_expected_return_min", None),
+                gate_mode=getattr(args, "ml_gate_mode", "veto_only"),
             )
 
         # If a risk model is available, require it to approve near-miss rule setups.
@@ -3827,11 +3892,12 @@ def scan_account_once(
                 )
             sold += 1
 
-    # confirmed_pullback time-stop: validated optimum exits unresolved positions
-    # at ~10 trading days (14 calendar). Without this the live algo diverges from
-    # the backtested config (the +profit edge depends on the timeout exit).
+    # confirmed_pullback time-stop: exits unresolved positions at ~15 trading
+    # days (21 calendar; Cycle 47 sweep — h15 E=+0.363%/trade vs h10 +0.274% at
+    # stop 1.5). Without this the live algo diverges from the backtested config
+    # (the +profit edge depends on the timeout exit).
     if strategy != "long_hold":
-        cp_max_hold = account.get_param("max_hold_days", getattr(args, "max_hold_days", 14))
+        cp_max_hold = account.get_param("max_hold_days", getattr(args, "max_hold_days", 21))
         # DL-8: apply high-VIX 2-day max-hold override if set.
         # Previously built, returned, captured into _hv_max_hold, then never read.
         if _hv_max_hold is not None:
@@ -4147,15 +4213,38 @@ def scan_account_once(
             continue
 
         # ── Pre-trade quote freshness gate ────────────────────────────────────
+        # Try the multi-provider quote gateway first: fresher price, real
+        # bid/ask when available, source + consensus evidence for the gate.
         _ptg_snapshot = price_snapshot_time if price_snapshot_time is not None else now
+        _gw_kwargs: dict = {}
+        _gw_quote = None
+        try:
+            from tradingagents.data.quote_gateway import get_gateway
+            _gw = get_gateway()
+            if _gw is not None:
+                _gw_quote = _gw.get_quote(candidate.ticker)
+        except Exception:
+            _gw_quote = None
+        if _gw_quote is not None:
+            _gw_kwargs = _gw_quote.pretrade_kwargs()
+            # Use the live gateway price for gating/entry only if it is sane
+            # relative to the pipeline price (guards against bad provider data).
+            if price > 0 and abs(_gw_kwargs["price"] - price) / price <= 0.05:
+                price = _gw_kwargs["price"]
+            else:
+                _gw_kwargs["price"] = price
         from tradingagents.portfolio.pretrade_gate import PreTradeGate
         _ptg_max_age = int(getattr(args, "pretrade_max_quote_age_seconds", 3))
         _ptg_result = PreTradeGate(max_quote_age_seconds=_ptg_max_age).check(
             ticker=candidate.ticker,
-            price_snapshot_time=_ptg_snapshot,
+            price_snapshot_time=_gw_kwargs.get("price_snapshot_time", _ptg_snapshot),
             price=price,
+            bid=_gw_kwargs.get("bid"),
+            ask=_gw_kwargs.get("ask"),
             now=now,
-            quote_source="yfinance",
+            quote_source=_gw_kwargs.get("quote_source", "yfinance"),
+            backup_sources=_gw_kwargs.get("backup_sources"),
+            consensus_ok=_gw_kwargs.get("consensus_ok"),
             signal_price=candidate.signal_close,
             stop=buy_candidate.stop,
             target=buy_candidate.target,
@@ -4389,8 +4478,8 @@ def scan_account_once(
                 now=now,
                 strategy=strategy,
                 shares=shares,
-                quote_source="yfinance",
-                quote_time=_ptg_snapshot.isoformat(),
+                quote_source=_gw_kwargs.get("quote_source", "yfinance"),
+                quote_time=_gw_kwargs.get("price_snapshot_time", _ptg_snapshot).isoformat(),
                 quote_age_seconds=_ptg_result.detail.get("quote_age_seconds"),
                 quote_price=price,
                 quote_spread_bps=_ptg_result.detail.get("spread_bps"),
@@ -5369,6 +5458,7 @@ def run() -> None:
             if now >= market_close:
                 dashboard.event("Reached market close. Today's paper run is complete.")
                 break
+            release_yfinance_fds()
             sleep_seconds = min(
                 seconds_until_next_scan(now, args.scan_interval_minutes),
                 max(1, (market_close - now).total_seconds()),

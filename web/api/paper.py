@@ -11,7 +11,7 @@ import time
 from collections import deque
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -42,7 +42,7 @@ DEFAULT_AUTOSTART_CONFIG = {
     "position_high_confidence_threshold": 0.80,
     "take_profit_pct": 0.0,
     "stop_loss_pct": 0.0,
-    "partial_profit_pct": 0.833,  # Synced with breakeven: stop_mult/target_mult = 1.0/1.2
+    "partial_profit_pct": 0.833,  # Partial at 1.0 ATR gain (0.833 x 1.2 target); offsets 2/3 of the 1.5 ATR stop risk on the remainder
     "partial_profit_fraction": 0.5,
     "trailing_stop_atr_mult": 0.5,
     "time_decay_scans": 0,
@@ -58,7 +58,9 @@ DEFAULT_AUTOSTART_CONFIG = {
     "ml_large_loss_max": 0.15,
     "ml_expected_return_min": -99.0,
     "target_mult": 1.2,
-    "stop_mult": 1.0,
+    "stop_mult": 1.5,  # 2026-06-10 sweep (n=658): stop 1.5 + ~15 trading day hold beats 1.0/10d on expectancy
+    "max_hold_days": 21,  # calendar days (~15 trading); matches paper_trade_today.py default
+    "ml_gate_mode": "shadow",  # rule-only trading, ML logged; cycle 47 gate blocked deploy (win ROC 0.486)
     "skip_vix_low_vol": True,
     "skip_extended_bounce": True,
     "skip_thursday": True,
@@ -237,7 +239,9 @@ class PaperStartRequest(BaseModel):
     ml_large_loss_max: float = Field(0.15, ge=0.01, le=0.99)
     ml_expected_return_min: float = Field(-99.0, ge=-99.0, le=0.5)
     target_mult: float = Field(1.2, ge=0.05, le=10.0)
-    stop_mult: float = Field(1.0, ge=0.1, le=10.0)
+    stop_mult: float = Field(1.5, ge=0.1, le=10.0)
+    max_hold_days: int = Field(21, ge=1, le=120)
+    ml_gate_mode: Literal["full", "veto_only", "shadow"] = "shadow"
     skip_vix_low_vol: bool = True
     skip_extended_bounce: bool = True
     skip_thursday: bool = True
@@ -1201,6 +1205,10 @@ async def start_paper_runner(body: PaperStartRequest, admin: dict = Depends(requ
             str(body.target_mult),
             "--stop-mult",
             str(body.stop_mult),
+            "--max-hold-days",
+            str(body.max_hold_days),
+            "--ml-gate-mode",
+            body.ml_gate_mode,
             "--breadth-threshold",
             str(body.breadth_threshold),
             "--max-portfolio-drawdown",

@@ -127,7 +127,8 @@ def _safe_auc(y, prob):
     }
 
 
-def _calibrate_classifier(clf, x_val, y_val, method: str = "isotonic"):
+def _calibrate_classifier(clf, x_val, y_val, method: str = "isotonic",
+                          sample_weight=None):
     """Wrap a pre-fit classifier with isotonic/sigmoid calibration.
 
     Isotonic regression is preferred for large val sets (n > 1000) because it
@@ -152,7 +153,13 @@ def _calibrate_classifier(clf, x_val, y_val, method: str = "isotonic"):
             # Fallback for older sklearn — cv="prefit" is deprecated but calibrates in-place
             _clf_to_calibrate = clf  # type: ignore[assignment]
         cal = CalibratedClassifierCV(_clf_to_calibrate, method=actual_method, cv=None)
-        cal.fit(x_val, y_val)
+        # Weight calibration the same way training is weighted (executed ×N,
+        # temporal decay); otherwise the calibrator is fit to the rejected-row
+        # distribution while inference targets executed-like rows.
+        try:
+            cal.fit(x_val, y_val, sample_weight=sample_weight)
+        except TypeError:
+            cal.fit(x_val, y_val)
         raw_prob = clf.predict_proba(x_val)[:, 1]
         cal_prob = cal.predict_proba(x_val)[:, 1]
         # Build calibration curve for the report
@@ -176,6 +183,45 @@ def _calibrate_classifier(clf, x_val, y_val, method: str = "isotonic"):
         return cal, report
     except Exception as exc:
         return clf, {"status": f"failed: {exc}"}
+
+
+def _cv_calibrate_small(fitted_clf, x_train, y_train, sample_weight=None):
+    """Cross-validated calibration for small training sets (< 500 rows).
+
+    Carving a holdout calibration slice would starve training at these sizes,
+    so instead a FRESH clone of the classifier is wrapped in
+    CalibratedClassifierCV(cv=3): each fold trains on 2/3 of the data and fits
+    a sigmoid calibrator on the held-out 1/3 — no rows are lost to a holdout.
+    Sigmoid (Platt) only: isotonic overfits badly below ~1000 calibration rows.
+    The CV-ensembled model replaces the raw fitted model for inference
+    (predict_proba averages the 3 calibrated fold models), trading a little
+    fit strength for honest probabilities — raw XGB probs at these sample
+    sizes ship 0.99s that are coin flips (Brier 0.372 on 2026-06-08 bundle).
+
+    Returns (calibrated_model, calibration_report_dict).
+    """
+    if len(y_train) < 150 or len(set(y_train)) < 2:
+        return fitted_clf, {"status": "skipped_too_few_samples"}
+    try:
+        from sklearn.base import clone
+        cal = CalibratedClassifierCV(clone(fitted_clf), method="sigmoid", cv=3)
+        try:
+            cal.fit(x_train, y_train, sample_weight=sample_weight)
+        except TypeError:
+            cal.fit(x_train, y_train)
+        raw_prob = fitted_clf.predict_proba(x_train)[:, 1]
+        cal_prob = cal.predict_proba(x_train)[:, 1]
+        # In-sample Briers: only a sanity check that calibration compressed the
+        # overconfident tails, NOT an OOS quality metric (test-set Brier in the
+        # model report is the honest number).
+        report = {
+            "method": "sigmoid_cv3_small_sample",
+            "brier_before_insample": round(float(brier_score_loss(y_train, raw_prob)), 4),
+            "brier_after_insample": round(float(brier_score_loss(y_train, cal_prob)), 4),
+        }
+        return cal, report
+    except Exception as exc:
+        return fitted_clf, {"status": f"failed: {exc}"}
 
 
 # Leaky forward-outcome column prefixes — must never appear in feature_names
@@ -489,6 +535,12 @@ def train_models(args) -> dict:
 
     # BT-2: slippage deduction from labels
     _slippage_bps = float(getattr(args, "label_slippage_bps", 0.0))
+    if _slippage_bps != 0.0 and _label_mode == "triple_barrier":
+        # Slippage relabeling rebuilds _win_label from the fixed-horizon return,
+        # which would silently overwrite the triple-barrier labels just computed.
+        print("  WARNING: --label-slippage-bps ignored with --label-mode triple_barrier "
+              "(would overwrite path-aware labels with fixed-horizon ones)")
+        _slippage_bps = 0.0
     if _slippage_bps != 0.0:
         _ret_col_slip = f"h{args.hold}_return"
         if _ret_col_slip in frame.columns:
@@ -520,6 +572,21 @@ def train_models(args) -> dict:
             train_df = pd.concat([train_df, cal_df]).sort_values("_scan_dt").reset_index(drop=True)
             cal_df = pd.DataFrame()
             calibrate = False
+
+    # P2 fix (2026-06-10): trains under 500 rows used to skip calibration
+    # entirely while still reporting calibrated=True (cal_rows=0 → raw
+    # uncalibrated probs shipped; the 2026-06-08 bundle bought 0.99-confidence
+    # losers, Brier 0.372). Small trains now use CV calibration instead of a
+    # holdout slice — see _cv_calibrate_small.
+    calibration_mode = None
+    if calibrate and len(cal_df) > 0:
+        calibration_mode = "holdout"
+    elif getattr(args, "calibrate", True) and len(train_df) >= 150:
+        calibrate = True
+        calibration_mode = "cv_small_sample"
+        print(f"  Calibration: train={len(train_df)} < 500 → CV (cv=3, sigmoid) instead of holdout slice")
+    else:
+        calibrate = False
 
     # ── Sample weights: upweight executed (rule-passing) rows ─────────────────
     # Executed rows represent the actual trading decisions the model will gate.
@@ -556,15 +623,19 @@ def train_models(args) -> dict:
         effective_n = decay_weights.sum()
         print(f"  Temporal decay: λ={temporal_decay} → effective_n={effective_n:.0f} (raw={len(train_df)})")
 
-    # Also weight calibration set (if any)
+    # Also weight calibration set (if any) — mirrors the train weighting exactly
+    # (executed ×N and/or temporal decay), so the calibrator sees the same
+    # effective distribution the models were trained on.
     sample_weight_cal = None
-    if (sample_weight_train is not None
-            and len(cal_df) > 0
-            and "candidate_status" in cal_df.columns):
-        sample_weight_cal = np.where(
-            cal_df["candidate_status"].values == "executed",
-            executed_weight, 1.0
-        ).astype(np.float64)
+    if sample_weight_train is not None and len(cal_df) > 0:
+        if (executed_weight > 1.0 and not executed_only
+                and "candidate_status" in cal_df.columns):
+            sample_weight_cal = np.where(
+                cal_df["candidate_status"].values == "executed",
+                executed_weight, 1.0
+            ).astype(np.float64)
+        else:
+            sample_weight_cal = np.ones(len(cal_df), dtype=np.float64)
         if temporal_decay > 0.0 and "_scan_dt" in cal_df.columns:
             months_ago_cal = (cal_df["_scan_dt"].max() - cal_df["_scan_dt"]).dt.days / 30.44
             decay_cal = np.exp(-temporal_decay * months_ago_cal.fillna(0).values)
@@ -664,6 +735,7 @@ def train_models(args) -> dict:
         "feature_stats": feature_stats,
         "imputer": imputer,
         "calibrated": calibrate,
+        "calibration_mode": calibration_mode,
         "thresholds": {
             "ml_probability_threshold": args.ml_probability_threshold,
             "ml_expected_return_min": args.ml_expected_return_min,
@@ -717,6 +789,7 @@ def train_models(args) -> dict:
             "test_period": test_period,
             "feature_count": int(len(feature_names)),
             "calibrated": calibrate,
+            "calibration_mode": calibration_mode,
             "ml_probability_threshold": args.ml_probability_threshold,
             "ml_expected_return_min": args.ml_expected_return_min,
             "ml_large_loss_max": args.ml_large_loss_max,
@@ -763,14 +836,22 @@ def train_models(args) -> dict:
         _rf_win.fit(x_train_imp, y_win_train, sample_weight=sample_weight_train)
 
     # Calibrate each model independently
+    _rf_cal_rpt = {"status": "skipped"}
     if calibrate and x_cal_imp is not None:
         y_win_cal = cal_df["_win_label"].astype(int).to_numpy()
-        win_model, win_cal_report = _calibrate_classifier(win_model, x_cal_imp, y_win_cal)
+        win_model, win_cal_report = _calibrate_classifier(
+            win_model, x_cal_imp, y_win_cal, sample_weight=sample_weight_cal)
         if _rf_win is not None:
-            _rf_win, _rf_cal_rpt = _calibrate_classifier(_rf_win, x_cal_imp, y_win_cal)
+            _rf_win, _rf_cal_rpt = _calibrate_classifier(
+                _rf_win, x_cal_imp, y_win_cal, sample_weight=sample_weight_cal)
+    elif calibrate and calibration_mode == "cv_small_sample":
+        win_model, win_cal_report = _cv_calibrate_small(
+            win_model, x_train_imp, y_win_train, sample_weight=sample_weight_train)
+        if _rf_win is not None:
+            _rf_win, _rf_cal_rpt = _cv_calibrate_small(
+                _rf_win, x_train_imp, y_win_train, sample_weight=sample_weight_train)
     else:
         win_cal_report = {"status": "skipped"}
-        _rf_cal_rpt = {"status": "skipped"}
 
     # Ensemble prediction: weighted average (XGB 0.60 + RF 0.40)
     win_prob_primary = win_model.predict_proba(x_test_imp)[:, 1]
@@ -824,7 +905,11 @@ def train_models(args) -> dict:
 
         if calibrate and x_cal_imp is not None:
             y_loss_cal = cal_df["_large_loss_label"].astype(int).to_numpy()
-            loss_model, loss_cal_report = _calibrate_classifier(loss_model, x_cal_imp, y_loss_cal)
+            loss_model, loss_cal_report = _calibrate_classifier(
+                loss_model, x_cal_imp, y_loss_cal, sample_weight=sample_weight_cal)
+        elif calibrate and calibration_mode == "cv_small_sample":
+            loss_model, loss_cal_report = _cv_calibrate_small(
+                loss_model, x_train_imp, y_loss_train, sample_weight=sample_weight_train)
         else:
             loss_cal_report = {"status": "skipped"}
 
@@ -886,7 +971,11 @@ def train_models(args) -> dict:
 
         if calibrate and x_cal_imp is not None:
             y_aux_cal = cal_df[target_col].astype(int).to_numpy()
-            model, aux_cal_report = _calibrate_classifier(model, x_cal_imp, y_aux_cal)
+            model, aux_cal_report = _calibrate_classifier(
+                model, x_cal_imp, y_aux_cal, sample_weight=sample_weight_cal)
+        elif calibrate and calibration_mode == "cv_small_sample":
+            model, aux_cal_report = _cv_calibrate_small(
+                model, x_train_imp, y_train, sample_weight=sample_weight_train)
         else:
             aux_cal_report = {"status": "skipped"}
 

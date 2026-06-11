@@ -325,9 +325,13 @@ def main():
         "--account-commission", str(args.account_commission),
         "--account-slippage-bps", str(args.account_slippage_bps),
         "--target-mult", "1.2",   # match live screener _ATR_TARGET=1.2
-        "--stop-mult", "1.0",     # Cycle 34: raised from 0.7. Evidence: 0.7 ATR too tight for pullbacks
-                                  # → 58% stop-outs in May29 backtest (WR=40%). 1.0 ATR wider stop
-                                  # → ~55% WR, Kelly ~17% (vs 5% with 0.7). Old training CSV used 1.0.
+        "--stop-mult", "1.5",     # Cycle 47 (2026-06-10): raised 1.0 → 1.5 to MATCH LIVE
+                                  # (paper_trade_today.py --stop-mult default is 1.5; training labels
+                                  # at 1.0 were a train/live exit mismatch). Sweep evidence (n=658
+                                  # paired, 2019-07→2026-05): stop 1.5 h15 E=+0.363%/trade WR=58.4%
+                                  # stop-rate 39.5% vs stop 1.0 h10 E=+0.231% WR=49.5% stop-rate 48.5%.
+        "--hold-periods", "10", "15", "20",  # Cycle 47: h15 labels for --hold 15 training
+        "--primary-hold", str(args.hold),
         # consec_up filter: skip extended bounces (default active in backtest)
         # No explicit flag needed — --skip-extended-bounce is True by default
         # Cycle 46: --min-adv and --min-price intentionally omitted from training backtest.

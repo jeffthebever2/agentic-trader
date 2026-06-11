@@ -367,7 +367,7 @@ def precompute(df: pd.DataFrame) -> dict:
     # MACD histogram slope: histogram change over 3 days (positive = building momentum)
     macd_hist_slope3 = macd_hist - macd_hist.shift(3)
 
-    return {
+    out = {
         # ── Raw OHLCV ─────────────────────────────────────────────────────
         "close":  c, "high": h, "low": l, "open": o, "volume": v,
 
@@ -492,6 +492,26 @@ def precompute(df: pd.DataFrame) -> dict:
         "inside_day":    ((h <= h.shift(1)) & (l >= l.shift(1))).astype(float),
         "engulf_bull":   ((o < l.shift(1)) & (c > h.shift(1))).astype(float),
     }
+
+    # ── Per-ticker rolling z-scores (Cycle 47, 2026-06-10) ───────────────────
+    # Raw levels of these features fail PSI every retrain (46/55 features pruned
+    # on the 2026-06-08 bundle) because their distributions drift with regime.
+    # Z-scoring each feature against the ticker's own trailing year makes the
+    # input stationary by construction — same reason the qlib_cs_rank_* features
+    # were the only numeric survivors. min_periods=126 keeps coverage on tickers
+    # with ~6 months of history; earlier rows impute to the training mean.
+    def _roll_z(s, window=252, min_periods=126):
+        mu = s.rolling(window, min_periods=min_periods).mean()
+        sd = s.rolling(window, min_periods=min_periods).std()
+        return ((s - mu) / sd.replace(0, np.nan)).clip(-4.0, 4.0)
+
+    out["rsi14_z252"]     = _roll_z(out["rsi14"])
+    out["cci14_z252"]     = _roll_z(out["cci14"])
+    out["macd_hist_z252"] = _roll_z(out["macd_hist"])
+    out["atr_pct_z252"]   = _roll_z(out["atr14_true"] / c.replace(0, np.nan))
+    out["ret_20d_z252"]   = _roll_z(out["ret20d"])
+    out["cmf20_z252"]     = _roll_z(out["cmf20"])
+    return out
 
 
 # ── Swing scoring ─────────────────────────────────────────────────────────────
@@ -620,6 +640,13 @@ def score_at(pc: dict, df: pd.DataFrame, pos: int,
     sig["roc20"]        = round(g("roc20") or 0.0, 3)
     sig["consec_up"]    = int(g("consec_up")   or 0)
     sig["consec_down"]  = int(g("consec_down") or 0)
+
+    # Rolling z-score variants (regime-stationary; see precompute Cycle 47 note).
+    # None when < min_periods of history — imputed to training mean downstream.
+    for _zf in ("rsi14_z252", "cci14_z252", "macd_hist_z252",
+                "atr_pct_z252", "ret_20d_z252", "cmf20_z252"):
+        _zv = g(_zf)
+        sig[_zf] = round(_zv, 3) if _zv is not None else None
 
     if score_mode == "confirmed_pullback":
         gates_failed = []
@@ -828,7 +855,7 @@ def score_at(pc: dict, df: pd.DataFrame, pos: int,
             return 0.0, {}
 
         # ── Resistance proximity ──────────────────────────────────────────
-        h20  = g("range20h")  # 20-day high (pre-shifted in precompute — no leakage)
+        h20  = g("range20h")  # 20-day high incl. today (known at close — no future leakage)
         h50  = g("high50")
         h52w = g("high52w")
         pct_from_20d_high = (price - h20) / h20 if h20 and h20 > 0 else None
@@ -1369,7 +1396,7 @@ def measure_outcome(df: pd.DataFrame, signal_pos: int, entry: float,
     Check what ACTUALLY happened using real High/Low each day.
       - Gap open below stop  → stopped at open
       - Gap open above target → target hit at open
-      - Both intraday → infer from close vs midpoint
+      - Both intraday → stop-first (conservative, matches live execution)
       - Neither in hold_days → exit at final close
     Also computes MAE, MFE, and R-multiple.
     """
@@ -1438,9 +1465,11 @@ def measure_outcome(df: pd.DataFrame, signal_pos: int, entry: float,
         hit_s = lo <= stop
 
         if hit_t and hit_s:
-            mid       = (target + stop) / 2.0
-            outcome   = "TARGET_HIT" if cl >= mid else "STOP_HIT"
-            exit_px   = target       if cl >= mid else stop
+            # Ambiguous bar: both target and stop touched intraday with no
+            # intrabar ordering data. Resolve stop-first (conservative) to
+            # match live execution, which fills the stop before the target.
+            outcome   = "STOP_HIT"
+            exit_px   = stop
             exit_date = str(dt.date())
             days_held = i
             break
@@ -1642,9 +1671,10 @@ def _stats(df: pd.DataFrame, hold: int) -> dict:
     pf     = wins.sum() / abs(losses.sum()) if losses.sum() != 0 else float("inf")
     sharpe = float(rets.mean() / rets.std()) if rets.std() > 0 else 0.0
 
-    # Sortino
-    neg_rets   = rets[rets < 0]
-    down_std   = float(neg_rets.std()) if len(neg_rets) > 1 else 0.0
+    # Sortino — downside deviation is the RMS of negative returns over ALL
+    # trades (not the std of the losing subset around its own mean).
+    downside   = np.minimum(rets.values, 0.0)
+    down_std   = float(np.sqrt((downside ** 2).mean()))
     sortino    = float(rets.mean() / down_std) if down_std > 0 else 0.0
 
     # Max drawdown (on cumulative product)
@@ -2005,6 +2035,12 @@ ML_NUMERIC_FEATURES = [
     # ── New derived features (Cycle 34) ──────────────────────────────────
     "cci_change_today",  # cci14 - cci14_prev: daily CCI improvement magnitude (Spearman r=-0.07 p=0.006; smaller=better)
     "atr_high_2pct",     # atr_pct > 0.02 binary: higher-ATR stocks → larger bounces (PSI-stable, r=0.09 p=0.0003)
+    # ── Rolling z-score features (Cycle 47, 2026-06-10) ──────────────────
+    # Stationary-by-construction variants of perennial PSI casualties: each is
+    # the feature z-scored against the ticker's own trailing 252d window.
+    # Raw levels stay in the list — PSI pruning drops whichever copy drifts.
+    "rsi14_z252", "cci14_z252", "macd_hist_z252",
+    "atr_pct_z252", "ret_20d_z252", "cmf20_z252",
 ]
 
 ML_CATEGORICAL_FEATURES = [
@@ -3723,9 +3759,15 @@ def run_walk_forward(precomputed: dict, all_scan_dates, spy_df,
     wf_step   = args.wf_step
     i         = 0
 
+    # Purge: drop the last `hold` scan dates from each train window so train
+    # trades' forward-return windows (hold trading days) cannot overlap the
+    # test window and leak into threshold selection.
+    purge = max(0, int(args.primary_hold))
+
     while i + wf_window + wf_step <= len(dates):
-        train_dates = dates[i : i + wf_window]
-        test_dates = dates[i + wf_window : i + wf_window + wf_step]
+        train_end = i + wf_window
+        train_dates = dates[i : max(i + 1, train_end - purge)]
+        test_dates = dates[train_end : train_end + wf_step]
 
         train_trades, _, _, _ = _collect_trades(
             precomputed, train_dates, spy_df, spy_regime, vix_regime, args,
