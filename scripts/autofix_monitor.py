@@ -31,7 +31,7 @@ from scripts.notify import notify_down, notify_fixed, notify_skip
 REPO = Path("/Users/williamscott/Desktop/TradingAgents-0.2.4 copy")
 LOGS = REPO / "logs"
 FIX_LOG = LOGS / "autofix.log"
-CLAUDE_BIN = "/usr/local/bin/claude"
+CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
 
 SERVICES = {
     "webserver": {

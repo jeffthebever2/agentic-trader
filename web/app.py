@@ -310,7 +310,7 @@ app.include_router(market_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
 app.include_router(portfolios_router)  # routes self-declare /api/portfolios/...
 
-@app.get("/portfolios", response_class=None)
+@app.get("/portfolios", include_in_schema=False)
 async def portfolios_page():
     """Portfolio competition dashboard."""
     from fastapi.responses import FileResponse
@@ -429,8 +429,20 @@ async def deep_health_check():
         if state_files:
             newest = max(state_files, key=lambda p: p.stat().st_mtime)
             age_m = (now.timestamp() - newest.stat().st_mtime) / 60
-            paper_ok = age_m < 120  # stale if >2h
-            paper_detail = {"newest_state": str(newest), "age_minutes": round(age_m, 1)}
+            # Staleness only matters while the market is open — overnight and
+            # on weekends the runner correctly writes nothing, so a fixed 2h
+            # threshold would flag "down" every night.
+            now_et = dt.datetime.now(_TZ_ET)
+            market_open_now = (
+                now_et.weekday() < 5
+                and dt.time(9, 30) <= now_et.time() <= dt.time(16, 0)
+            )
+            paper_ok = (age_m < 120) or not market_open_now
+            paper_detail = {
+                "newest_state": str(newest),
+                "age_minutes": round(age_m, 1),
+                "market_open": market_open_now,
+            }
         else:
             paper_detail = {"error": "no state.json found under data/paper"}
     except Exception as e:
@@ -569,6 +581,28 @@ async def _thematic_scan_loop():
         await asyncio.sleep(_INTERVAL)
 
 
+async def _fd_janitor_loop():
+    """Free leaked yfinance tz-cache sqlite handles every 5 minutes.
+
+    yfinance opens a peewee sqlite connection per downloader thread and dead
+    threads' connections linger until garbage collection. Under launchd's
+    default 256-fd limit the server eventually fails every endpoint with
+    OSError Errno 24 (observed 2026-06-10: 123 leaked tkr-tz.db handles).
+    """
+    while True:
+        await asyncio.sleep(300)
+        try:
+            from yfinance.cache import _TzDBManager
+            _TzDBManager.close_db()
+        except Exception:
+            pass
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
+
+
 _background_tasks: list[asyncio.Task] = []
 
 
@@ -577,6 +611,7 @@ async def _startup():
     _background_tasks.append(asyncio.create_task(_paper_autostart_loop()))
     _background_tasks.append(asyncio.create_task(_thematic_scan_loop()))
     _background_tasks.append(asyncio.create_task(_fidelity_keepalive_loop()))
+    _background_tasks.append(asyncio.create_task(_fd_janitor_loop()))
 
 
 @app.on_event("shutdown")

@@ -820,6 +820,11 @@ def main() -> None:
             print("[unified] --once flag set. Exiting.")
             break
 
+        try:
+            from scripts.paper_trade_today import release_yfinance_fds
+            release_yfinance_fds()
+        except Exception:
+            pass
         print(f"[unified] Sleeping {interval_secs:.0f}s until next scan…")
         time.sleep(interval_secs)
 
