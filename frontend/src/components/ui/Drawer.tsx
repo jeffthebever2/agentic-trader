@@ -23,6 +23,7 @@ export function Drawer({ open, onClose, title, children, width = '420px' }: Draw
       <div
         onClick={onClose}
         id="portfolio-drawer-backdrop"
+        className="ta-backdrop-blur"
         style={{
           position: 'fixed', inset: 0,
           background: 'rgba(0,0,0,.6)',

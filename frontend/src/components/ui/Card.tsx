@@ -10,7 +10,7 @@ interface CardProps {
 export function Card({ children, className = '', onClick, style }: CardProps) {
   return (
     <div
-      className={`card ${className}`}
+      className={`card${onClick ? ' card-interactive' : ''} ${className}`}
       onClick={onClick}
       style={style}
     >

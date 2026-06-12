@@ -108,7 +108,7 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
           onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
         />
 
-        <div>
+        <div key={pathname} className="stat-swap">
           <h1
             id="page-title"
             style={{
@@ -252,6 +252,7 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
               borderRadius: 999,
               background: 'var(--accent)',
               flexShrink: 0,
+              position: 'relative',
             }}
           />
           <span id="ta-preview-label">Preview</span>
@@ -269,7 +270,7 @@ export function AppHeader({ onToggleSidebar }: AppHeaderProps) {
 
         <span
           id="current-datetime"
-          style={{ fontSize: 12, color: 'var(--ink-faint)', fontWeight: 500, whiteSpace: 'nowrap' }}
+          style={{ fontSize: 11.5, color: 'var(--ink-faint)', fontWeight: 500, whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}
         >
           {datetime}
         </span>

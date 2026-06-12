@@ -28,8 +28,10 @@ export function AppShell({ children }: AppShellProps) {
 
     const progress = document.getElementById('nav-progress')
     const curtain  = document.getElementById('nav-curtain')
+    const main     = document.getElementById('main-content')
     if (progress) { progress.classList.remove('run'); void progress.offsetWidth; progress.classList.add('run') }
     if (curtain)  { curtain.classList.remove('run');  void curtain.offsetWidth;  curtain.classList.add('run') }
+    if (main)     { main.classList.remove('page-enter'); void main.offsetWidth;  main.classList.add('page-enter') }
   }, [location.pathname])
 
   return (

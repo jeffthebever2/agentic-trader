@@ -154,8 +154,8 @@ function TickerTape() {
         #dash-ticker-track:hover { animation-play-state: paused; }
       `}</style>
       {/* Edge fades */}
-      <div style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: 18, background: 'var(--surface)', pointerEvents: 'none', zIndex: 2 }} />
-      <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: 18, background: 'var(--surface)', pointerEvents: 'none', zIndex: 2 }} />
+      <div style={{ position: 'absolute', right: 0, top: 0, height: '100%', width: 48, background: 'linear-gradient(270deg, var(--surface), transparent)', pointerEvents: 'none', zIndex: 2 }} />
+      <div style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: 48, background: 'linear-gradient(90deg, var(--surface), transparent)', pointerEvents: 'none', zIndex: 2 }} />
       <div id="dash-ticker-track" style={{ padding: '0 16px' }}>
         {content}{content}
       </div>
@@ -222,7 +222,7 @@ function StatRow({ paperQ }: { paperQ: ReturnType<typeof useQuery<ReturnType<typ
           <div style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700 }}>
             {s.label}
           </div>
-          <div className="dash-stat-num" style={{ fontSize: 22, fontWeight: 700, color: s.color, fontFamily: 'var(--font-mono)', letterSpacing: '-0.035em' }}>
+          <div className={`dash-stat-num${s.color === 'var(--ink)' ? ' text-gradient-ink' : ''}`} style={{ fontSize: 22, fontWeight: 700, color: s.color, fontFamily: 'var(--font-mono)', letterSpacing: '-0.035em' }}>
             {s.value}
           </div>
           <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginTop: 4, minHeight: 16 }}>
@@ -609,7 +609,7 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
               </thead>
               <tbody>
                 {candidates.map((c, i) => (
-                  <tr key={i} style={{ borderBottom: '1px solid var(--surface-rule)' }}>
+                  <tr key={i} className="tr-hover" style={{ borderBottom: '1px solid var(--surface-rule)' }}>
                     <td style={{ padding: '8px 12px', fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{c.ticker}</td>
                     <td style={{ padding: '8px 12px', color: 'var(--ink-muted)' }}>{c._stratLabel}</td>
                     <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>${Number(c.entry).toFixed(2)}</td>
@@ -639,7 +639,7 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
                 {trades.map((t, i) => {
                   const pnl = t.pnl ?? 0
                   return (
-                    <tr key={i} style={{ borderBottom: '1px solid var(--surface-rule)' }}>
+                    <tr key={i} className="tr-hover" style={{ borderBottom: '1px solid var(--surface-rule)' }}>
                       <td style={{ padding: '8px 12px', fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{t.ticker ?? '—'}</td>
                       <td style={{ padding: '8px 12px', color: 'var(--ink-muted)' }}>{t.strategy ?? '—'}</td>
                       <td style={{ padding: '8px 12px', color: 'var(--ink-muted)' }}>{(t.timestamp ?? t.exit_date ?? t.date ?? '').slice(0, 10) || '—'}</td>
@@ -701,15 +701,11 @@ function QuickAnalyze() {
           onChange={e => setDate(e.target.value)}
           style={inputStyle}
         />
-        <button onClick={run} style={{
+        <button onClick={run} className="btn-primary" style={{
           padding: '9px 0',
-          background: 'var(--accent)',
-          color: '#fff',
-          border: 'none',
           borderRadius: 6,
           fontSize: 13,
           fontWeight: 700,
-          cursor: 'pointer',
           width: '100%',
         }}>
           Run Analysis

@@ -41,9 +41,10 @@ const NAV: NavItem[] = [
 // ── Connection status ────────────────────────────────────────────────────────
 type ConnState = 'pending' | 'connected' | 'disconnected'
 
-function useConnectionState(): ConnState {
+function useConnectionState(enabled: boolean): ConnState {
   const [state, setState] = useState<ConnState>('pending')
   useEffect(() => {
+    if (!enabled) return
     let alive = true
     const check = async () => {
       try {
@@ -57,7 +58,7 @@ function useConnectionState(): ConnState {
     check()
     const t = setInterval(check, 15_000)
     return () => { alive = false; clearInterval(t) }
-  }, [])
+  }, [enabled])
   return state
 }
 
@@ -81,7 +82,7 @@ const PREFETCH_MAP: Record<string, { queryKey: unknown[]; queryFn: () => Promise
   '/history':  { queryKey: ['history-stats'],    queryFn: () => api.get('/history/stats').then(r => r.data) },
   '/ml':       { queryKey: ['ml', 'status'],     queryFn: () => api.get('/ml/status').then(r => r.data) },
   '/logs':     { queryKey: ['logs', 'stats'],    queryFn: () => api.get('/logs/stats').then(r => r.data) },
-  '/hil':      { queryKey: ['hil', 'pending'],   queryFn: () => api.get('/hil/pending').then(r => r.data) },
+  '/hil':      { queryKey: ['hil-pending'],      queryFn: () => api.get('/paper/hil/pending').then(r => r.data) },
 }
 
 interface SidebarProps {
@@ -94,7 +95,9 @@ export function Sidebar({ onOpenOnboarding, mobileOpen, onMobileClose }: Sidebar
   const { user, isAdmin } = useAuth()
   const { mode, toggle } = useThemeStore()
   const navigate = useNavigate()
-  const connState = useConnectionState()
+  // Server connection card is a developer/admin diagnostic — normal users
+  // shouldn't see (or poll for) "local server" status.
+  const connState = useConnectionState(isAdmin)
   const conn = CONN_COLORS[connState]
   const qc = useQueryClient()
   const hilPending = useLiveStore(s => s.hilPending)
@@ -160,7 +163,7 @@ export function Sidebar({ onOpenOnboarding, mobileOpen, onMobileClose }: Sidebar
               {item.icon}
               <span style={{ flex: 1 }}>{item.label}</span>
               {isHil && hilPending > 0 && (
-                <span style={{
+                <span className="hil-count-badge" style={{
                   display: 'inline-flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -184,7 +187,8 @@ export function Sidebar({ onOpenOnboarding, mobileOpen, onMobileClose }: Sidebar
 
       {/* Footer */}
       <div style={{ padding: 12, borderTop: '1px solid var(--surface-rule)' }}>
-        {/* Connection status card */}
+        {/* Connection status card — admin-only diagnostic */}
+        {isAdmin && (
         <div
           id="api-status"
           className={`ta-connection-card${connState === 'connected' ? ' live' : ''}`}
@@ -221,6 +225,7 @@ export function Sidebar({ onOpenOnboarding, mobileOpen, onMobileClose }: Sidebar
             </span>
           </span>
         </div>
+        )}
 
         {/* Auth user info */}
         {user && (

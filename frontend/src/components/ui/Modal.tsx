@@ -32,16 +32,17 @@ export function Modal({ open, onClose, title, children, size = 'md' }: ModalProp
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
       role="dialog"
       aria-modal="true"
+      className="ta-backdrop-blur backdrop-fade"
       style={{
         position: 'fixed', inset: 0,
-        background: 'rgba(0,0,0,.7)',
+        background: 'rgba(0,0,0,.55)',
         zIndex: 1050,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         padding: 24,
       }}
     >
       <div
-        className="card"
+        className="card modal-pop"
         style={{
           background: 'var(--surface)',
           width: '100%',

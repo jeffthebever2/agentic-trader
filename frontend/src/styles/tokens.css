@@ -620,13 +620,30 @@ button:active, [role="button"]:active { transform: scale(.965); }
   font-weight: 600;
 }
 
-/* ── Header light/dark ────────────────────────────────────────────────────── */
+/* ── Header light/dark — glassmorphism ───────────────────────────────────── */
 #ta-app-header {
-  background: #FFFFFF !important;
+  background: rgba(255,255,255,.78) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
+  backdrop-filter: blur(14px) saturate(1.4);
+  position: relative;
+  z-index: 15;
+}
+#ta-app-header::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(214,58,0,.35) 30%, rgba(214,58,0,.35) 70%, transparent);
+  opacity: .5;
+  pointer-events: none;
 }
 body.theme-dark #ta-app-header {
-  background: #14151A !important;
+  background: rgba(13,14,18,.72) !important;
   border-bottom: 1px solid rgba(255,255,255,.06) !important;
+}
+body.theme-dark #ta-app-header::after {
+  background: linear-gradient(90deg, transparent, rgba(226,67,18,.5) 30%, rgba(226,67,18,.5) 70%, transparent);
+  opacity: .6;
 }
 
 /* ── Brand mark (logo icon) ───────────────────────────────────────────────── */
@@ -870,3 +887,223 @@ body.theme-dark #ta-app-header {
   border-radius: 5px; transition: background .12s; cursor: pointer;
 }
 .dash-signal-row:hover { background: var(--surface-raised); }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PREMIUM POLISH LAYER — ambient depth, glass, glow, micro-interactions
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Ambient background washes (main scroll area) ────────────────────────── */
+#main-content {
+  background-image:
+    radial-gradient(900px 420px at 85% -8%, rgba(214,58,0,.045), transparent 64%),
+    radial-gradient(640px 360px at -8% 108%, rgba(59,130,246,.035), transparent 60%);
+  background-attachment: local;
+}
+body.theme-dark #main-content {
+  background-image:
+    radial-gradient(900px 420px at 85% -8%, rgba(226,67,18,.07), transparent 64%),
+    radial-gradient(640px 360px at -8% 108%, rgba(99,102,241,.06), transparent 60%);
+}
+
+/* ── Card: lift + accent-tinted edge on hover, top-edge highlight in dark ── */
+.card {
+  position: relative;
+  transition: box-shadow .22s var(--ease-out), border-color .22s var(--ease-out),
+              transform .22s var(--ease-out);
+}
+.card:hover {
+  border-color: rgba(214,58,0,.22);
+  box-shadow: var(--shadow-2);
+}
+body.theme-dark .card {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.03);
+}
+body.theme-dark .card:hover {
+  border-color: rgba(226,67,18,.32);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 0 0 1px rgba(226,67,18,.06),
+              0 8px 28px -10px rgba(226,67,18,.12);
+}
+
+/* Interactive card — opt-in stronger lift for clickable cards */
+.card-interactive { cursor: pointer; }
+.card-interactive:hover { transform: translateY(-2px); box-shadow: var(--shadow-3); }
+.card-interactive:active { transform: translateY(0); }
+
+/* ── Gradient text utility (hero numbers / brand moments) ────────────────── */
+@supports (background-clip: text) and (color: color-mix(in srgb, red 50%, blue)) {
+  .text-gradient-accent {
+    background: linear-gradient(120deg, var(--accent) 0%, #f59e0b 120%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+  .text-gradient-ink {
+    background: linear-gradient(180deg, var(--ink) 30%, color-mix(in srgb, var(--ink) 62%, transparent) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+}
+
+/* ── Buttons: gradient + tinted shadow + lift ────────────────────────────── */
+.btn-primary {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff) 0%, var(--accent) 55%, var(--accent-hover) 100%);
+  box-shadow: 0 1px 2px rgba(214,58,0,.25), 0 3px 10px -3px rgba(214,58,0,.35),
+              inset 0 1px 0 rgba(255,255,255,.18);
+  transition: box-shadow .18s var(--ease-out), transform .12s var(--ease-out), filter .15s;
+}
+.btn-primary:hover {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-hover) 80%, #fff) 0%, var(--accent-hover) 60%, var(--accent-hover) 100%);
+  box-shadow: 0 2px 4px rgba(214,58,0,.3), 0 6px 16px -4px rgba(214,58,0,.45),
+              inset 0 1px 0 rgba(255,255,255,.2);
+  transform: translateY(-1px);
+}
+.btn-primary:active { transform: translateY(0) scale(.97); }
+body.theme-dark .btn-primary {
+  box-shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 14px -4px rgba(226,67,18,.5),
+              inset 0 1px 0 rgba(255,255,255,.14);
+}
+.btn-secondary {
+  transition: background .15s, color .15s, border-color .15s, box-shadow .15s var(--ease-out);
+}
+.btn-secondary:hover { border-color: var(--ink-faint); box-shadow: var(--shadow-1); }
+.btn-danger {
+  background: linear-gradient(180deg, #f25555 0%, #ef4444 55%, #dc2626 100%);
+  box-shadow: 0 1px 2px rgba(239,68,68,.25), 0 3px 10px -3px rgba(239,68,68,.35),
+              inset 0 1px 0 rgba(255,255,255,.16);
+}
+.btn-danger:hover {
+  background: linear-gradient(180deg, #ef4444 0%, #dc2626 60%, #b91c1c 100%);
+}
+
+/* ── Inputs: smoother focus bloom ────────────────────────────────────────── */
+.input:focus {
+  box-shadow: 0 0 0 3px rgba(214,58,0,.12), 0 1px 2px rgba(214,58,0,.08);
+}
+body.theme-dark .input:focus {
+  box-shadow: 0 0 0 3px rgba(226,67,18,.18), 0 0 18px -6px rgba(226,67,18,.35);
+}
+
+/* ── Nav item: accent gradient rail on active + glow in dark ─────────────── */
+.nav-item { position: relative; }
+.nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 99px;
+  background: linear-gradient(180deg, var(--accent), #f59e0b);
+}
+body.theme-dark .nav-item.active {
+  box-shadow: inset 0 0 0 1px rgba(226,67,18,.22), 0 0 16px -6px rgba(226,67,18,.35);
+}
+body.theme-dark .nav-item.active::before {
+  box-shadow: 0 0 8px rgba(226,67,18,.6);
+}
+
+/* ── Stat number hover scale + dark glow on hero numbers ─────────────────── */
+.dash-stat-cell { transition: background .18s var(--ease-out); position: relative; }
+.dash-stat-cell::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; top: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent), #f59e0b);
+  opacity: 0;
+  transition: opacity .2s var(--ease-out);
+  pointer-events: none;
+}
+.dash-stat-cell:hover::after { opacity: .85; }
+body.theme-dark .dash-stat-num { text-shadow: 0 0 22px rgba(242,243,245,.12); }
+body.theme-dark .dash-stat-num.text-gradient-ink { text-shadow: none; }
+
+/* ── Section labels: accent brackets ─────────────────────────────────────── */
+.dash-section-label::before,
+.dash-section-label::after { color: color-mix(in srgb, var(--accent) 55%, var(--ink-faint)); }
+
+/* ── Table rows: accent inset rail on hover ──────────────────────────────── */
+.tr-hover { transition: background .12s, box-shadow .12s; }
+.tr-hover:hover { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* ── Status dots: glow when live (dark mode) ─────────────────────────────── */
+body.theme-dark .ta-connection-card[data-state="connected"] .ta-status-dot {
+  box-shadow: 0 0 8px rgba(52,211,153,.65);
+}
+body.theme-dark .dash-chip.ok .dash-chip-dot { box-shadow: 0 0 6px rgba(52,211,153,.6); }
+body.theme-dark .dash-chip.err .dash-chip-dot { box-shadow: 0 0 6px rgba(248,113,113,.6); }
+
+/* ── Badges: subtle inner highlight ──────────────────────────────────────── */
+.badge { box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+
+/* ── Page-enter: stagger main content children on route change ──────────── */
+#main-content.page-enter > * { animation: panelIn .38s var(--ease-out) both; }
+#main-content.page-enter > *:nth-child(1) { animation-delay: 0s; }
+#main-content.page-enter > *:nth-child(2) { animation-delay: .05s; }
+#main-content.page-enter > *:nth-child(3) { animation-delay: .1s; }
+
+/* ── Command bar: glass + glow focus ─────────────────────────────────────── */
+.ta-commandbar {
+  transition: border-color .18s var(--ease-out), box-shadow .18s var(--ease-out), background .18s;
+}
+.ta-commandbar:hover { border-color: var(--ink-faint) !important; }
+.ta-commandbar:focus-within {
+  box-shadow: 0 0 0 3px rgba(214,58,0,.12), 0 4px 18px -6px rgba(214,58,0,.25);
+}
+body.theme-dark .ta-commandbar:focus-within {
+  box-shadow: 0 0 0 3px rgba(226,67,18,.16), 0 0 22px -6px rgba(226,67,18,.4);
+}
+.ta-commandbar kbd {
+  transition: color .15s, border-color .15s;
+}
+.ta-commandbar:hover kbd { color: var(--accent); border-color: rgba(214,58,0,.35); }
+
+/* ── Scrollbar: accent on hover ──────────────────────────────────────────── */
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--accent) 55%, var(--ink-faint)); }
+
+/* ── Modal/drawer backdrop blur + entrance ───────────────────────────────── */
+.ta-backdrop-blur {
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+@keyframes backdropIn { from { opacity: 0; } to { opacity: 1; } }
+.backdrop-fade { animation: backdropIn .18s var(--ease-out); }
+@keyframes modalPop {
+  from { opacity: 0; transform: translateY(10px) scale(.975); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.modal-pop { animation: modalPop .26s var(--ease-out); }
+
+/* ── Glow utility ────────────────────────────────────────────────────────── */
+.glow-accent { box-shadow: 0 0 24px -6px rgba(226,67,18,.45); }
+
+/* ── Sidebar: hairline gradient on right edge (dark) ─────────────────────── */
+body.theme-dark #ta-sidebar {
+  box-shadow: inset -1px 0 0 rgba(255,255,255,.04);
+}
+
+/* ── Header market pulse dot: sonar ping ─────────────────────────────────── */
+.ta-market-pulse::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  animation: sonar 2.2s var(--ease-out) infinite;
+}
+
+/* ── HIL pending count badge: attention pulse ────────────────────────────── */
+@keyframes hilPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,.45); }
+  50%      { box-shadow: 0 0 0 5px rgba(245,158,11,0); }
+}
+.hil-count-badge { animation: hilPulse 2.2s var(--ease-out) infinite; }
+
+/* ── Empty-state shimmer dot grid utility ────────────────────────────────── */
+.dot-grid-bg {
+  background-image: radial-gradient(color-mix(in srgb, var(--ink-faint) 28%, transparent) 1px, transparent 1px);
+  background-size: 14px 14px;
+}

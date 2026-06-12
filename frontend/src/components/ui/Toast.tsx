@@ -85,9 +85,11 @@ function ToastItem({ item }: { item: ToastItem }) {
       style={{
         display: 'flex', alignItems: 'flex-start', gap: 10,
         background: 'var(--surface)', border: '1px solid var(--surface-rule)',
-        borderRadius: 10, padding: '12px 14px', boxShadow: '0 8px 24px rgba(0,0,0,.15)',
+        borderLeft: `3px solid ${ICON_COLOR[item.type]}`,
+        borderRadius: 10, padding: '12px 14px',
+        boxShadow: `0 8px 24px rgba(0,0,0,.15), 0 0 18px -8px ${ICON_COLOR[item.type]}`,
         fontSize: 13, minWidth: 240, maxWidth: 380, position: 'relative', overflow: 'hidden',
-        animation: 'toast-in .2s ease-out',
+        animation: 'toast-in .28s var(--ease-out)',
       }}
     >
       <IconCmp size={16} strokeWidth={2.5} color={ICON_COLOR[item.type]} style={{ flexShrink: 0, marginTop: 1 }} />
