@@ -235,4 +235,16 @@ The alpha numerator is `regime_score × breakout_boost` only. Regime is constant
 
 **IMPLEMENTED:** B1 (stop 0.7→1.0, Cycle 44), B3/B5 (chandelier intermediate breakeven + conditional time-exit in short_hold_exits), B10 (reliability curve unified+clamped), B16 (heat taper). Brain fully unified to the live AlphaEngine formula (vol penalty, breakout boost, tier mults, reliability floor).
 
-**DEFERRED — need validation/retrain (do NOT ship unvalidated per loop ML rules):** B2 (target→2.0 ATR) & B4 (tier-conditional partial) — change payoff geometry, need MFE/MAE re-sim on current geometry; B6 (1−ll to numerator), B7 (survivor head), B8 (breakout diagnose), B9 (composite calibration + re-derived cutoffs); B11 (Kelly port), B12 (continuous conviction), B13 (regime heat + correlation sizing), B14 (drawdown throttle — safe but Brain path not live); B17-B21 (VIX taper, ll_cap sweep, per-sector regime, Thu/Mon gate, earnings/gap filters). All gated on a validated 1.2/1.0-geometry retrain.
+**DEFERRED — need validation/retrain (do NOT ship unvalidated per loop ML rules):** B2 (target→2.0 ATR) & B4 (tier-conditional partial) — change payoff geometry, need MFE/MAE re-sim on current geometry; B6 (1−ll to numerator), B7 (survivor head), B9 (composite calibration + re-derived cutoffs); B13 (regime heat + correlation sizing); B17-B21 (VIX taper, ll_cap sweep, per-sector regime, Thu/Mon gate, earnings/gap filters). All gated on a validated 1.2/1.0-geometry retrain.
+
+## IMPLEMENTATION STATUS — 2026-06-09
+
+**IMPLEMENTED (Wave 3 sizing port into `unified_brain.allocate`):**
+- **B11** Kelly-blended risk: `rolling_trade_stats()` (last-20 closed trades, half-Kelly) × `kelly_fraction=0.5` → quarter-Kelly, clamped [0.5%, 2.5%]; flat 1% fallback below 10 closed trades. cfg `kelly_sizing`.
+- **B14** drawdown throttle: realized-equity-peak DD → factor 1.0/0.75/0.5/0.25 at 5/10/15% tiers; auto-recovers. cfg `dd_throttle`.
+- **B15** anti-martingale streak scaling: identical multipliers to `position_sizing.py` (loss 3+→0.5, 2→0.7, 1→0.85; win 4+→1.2, 2+→1.1). cfg `streak_scaling`.
+- **B12** continuous conviction: alpha∈[0.38,0.72] → mult∈[tier_mult_b, tier_mult_aplus] linear, replaces the tier step function (labels still gate). cfg `continuous_conviction`.
+- All four cfg-gated, on by default, threaded through `process()` from `account.trades`. Tests: `tests/test_unified_brain_sizing.py` (21).
+- **B8** superseded: 2026-06-07 audit found breakout_score saturates at 100 (not 0); `score_factor` already maps it to size [0.5,1.0].
+
+**STILL OPEN:** backtest sweep risk_pct ∈ {1.0,1.5,2.0,2.5} (B11 validation), MFE/MAE re-sim on post-math-audit geometry (B2/B4 blocker), B6/B7/B9 model-head work, B13, B17-B21.

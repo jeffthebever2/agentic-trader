@@ -207,6 +207,7 @@ class BreakoutScanner:
         high   = self._extract(raw, all_tickers, "High")
         low    = self._extract(raw, all_tickers, "Low")
         volume = self._extract(raw, all_tickers, "Volume")
+        open_  = self._extract(raw, all_tickers, "Open")
         spy_c  = close.get(spy_ticker, pd.Series(dtype=float)).dropna()
 
         results: List[BreakoutResult] = []
@@ -215,6 +216,7 @@ class BreakoutScanner:
             h = high.get(ticker, pd.Series(dtype=float)).dropna()
             lo = low.get(ticker, pd.Series(dtype=float)).dropna()
             v  = volume.get(ticker, pd.Series(dtype=float)).dropna()
+            o  = open_.get(ticker, pd.Series(dtype=float)).dropna() if open_ else None
             if len(c) < 60:
                 results.append(BreakoutResult(
                     ticker, 0.0, False,
@@ -222,7 +224,7 @@ class BreakoutScanner:
                 ))
                 continue
             try:
-                result = self.score_one(ticker, c, h, lo, v, spy_c)
+                result = self.score_one(ticker, c, h, lo, v, spy_c, opens=o)
                 result.scan_date = as_of_date
                 results.append(result)
             except Exception as exc:
@@ -240,6 +242,7 @@ class BreakoutScanner:
         lows: pd.Series,
         volume: pd.Series,
         spy_closes: pd.Series,
+        opens: Optional[pd.Series] = None,
     ) -> BreakoutResult:
         """Score a single ticker. Returns BreakoutResult with full feature dict.
 
@@ -283,11 +286,14 @@ class BreakoutScanner:
         sma200 = _safe_sma(closes, 200)
         ema9   = float(closes.ewm(span=9,  adjust=False).mean().iloc[-1])
 
-        high_10d  = float(highs.iloc[-11:-1].max())   if len(highs) >= 11  else price
-        high_20d  = float(highs.iloc[-21:-1].max())   if len(highs) >= 21  else price
-        high_50d  = float(highs.iloc[-51:-1].max())   if len(highs) >= 51  else price
-        high_52w  = float(highs.iloc[-253:-1].max())  if len(highs) >= 253 else float(highs.max())
-        low_52w   = float(lows.iloc[-253:-1].min())   if len(lows)  >= 253 else float(lows.min())
+        # Rolling highs/lows INCLUDE today's bar — matches backtest.py precompute
+        # (h.rolling(N).max()), which generates pct_from_*_high training features.
+        # Today's high is known at the close, so this is not lookahead.
+        high_10d  = float(highs.iloc[-10:].max())   if len(highs) >= 10  else price
+        high_20d  = float(highs.iloc[-20:].max())   if len(highs) >= 20  else price
+        high_50d  = float(highs.iloc[-50:].max())   if len(highs) >= 50  else price
+        high_52w  = float(highs.iloc[-252:].max())  if len(highs) >= 252 else float(highs.max())
+        low_52w   = float(lows.iloc[-252:].min())   if len(lows)  >= 252 else float(lows.min())
 
         bb_mid, bb_upper, bb_lower = _bb(closes, 20)
         kelt_upper, kelt_lower = _keltner(closes, highs, lows, 20)
@@ -304,14 +310,20 @@ class BreakoutScanner:
         vol_surge_3d = vol_3d_avg / vol_20d if vol_20d > 0 else 1.0
         vol_dryup_5d = vol_5d_avg / vol_20d if vol_20d > 0 else 1.0
 
-        range_5d  = float(highs.iloc[-6:-1].max() - lows.iloc[-6:-1].min()) if len(highs) >= 6 else atr
-        range_20d = float(highs.iloc[-21:-1].max() - lows.iloc[-21:-1].min()) if len(highs) >= 21 else atr * 5
+        # Ranges include today — matches backtest range5h/range20h (rolling, no shift)
+        range_5d  = float(highs.iloc[-5:].max() - lows.iloc[-5:].min()) if len(highs) >= 5 else atr
+        range_20d = float(highs.iloc[-20:].max() - lows.iloc[-20:].min()) if len(highs) >= 20 else atr * 5
         range_contraction = range_5d / range_20d if range_20d > 0 else 1.0
 
-        atr_5d = _atr(closes.iloc[-6:], highs.iloc[-6:], lows.iloc[-6:]) if len(closes) >= 6 else atr
-        atr_20d_avg = _atr(closes.iloc[-21:], highs.iloc[-21:], lows.iloc[-21:]) if len(closes) >= 21 else atr
-        atr_compression = atr_5d / atr_20d_avg if atr_20d_avg > 0 else 1.0
-        atr_expansion_ratio = atr / atr_20d_avg if atr_20d_avg > 0 else 1.0
+        # ATR compression/expansion from the Wilder ATR series — matches backtest
+        # breakout_v2: compr = mean(atr14_true[-5:]) / mean(atr14_true[-20:]);
+        # expansion = simple ATR / mean(atr14_true over prior 20d EXCLUDING today).
+        atr_w_series = _wilder_atr_series(closes, highs, lows, 14)
+        _aw5  = float(atr_w_series.iloc[-5:].mean())  if len(atr_w_series) >= 5  else atr
+        _aw20 = float(atr_w_series.iloc[-20:].mean()) if len(atr_w_series) >= 20 else atr
+        _aw20_prior = float(atr_w_series.iloc[-21:-1].mean()) if len(atr_w_series) >= 21 else _aw20
+        atr_compression = _aw5 / _aw20 if _aw20 > 0 and np.isfinite(_aw5) and np.isfinite(_aw20) else 1.0
+        atr_expansion_ratio = atr / _aw20_prior if _aw20_prior > 0 and np.isfinite(_aw20_prior) else 1.0
 
         bb_width = float(bb_upper - bb_lower) / float(bb_mid) if bb_mid and bb_mid > 0 else 0.0
         keltner_squeeze = int(bb_upper < kelt_upper and bb_lower > kelt_lower)
@@ -320,17 +332,22 @@ class BreakoutScanner:
         day_high = float(highs.iloc[-1])
         day_low  = float(lows.iloc[-1])
         day_range = day_high - day_low
-        upper_wick = (day_high - price) / day_range if day_range > 0 else 0.0
+        # Upper wick measured from the body top max(close, open) — matches the
+        # backtest training feature (h - c.clip(lower=o)) / (h - l). Falls back
+        # to close-only when Open data is unavailable.
+        day_open = float(opens.iloc[-1]) if opens is not None and len(opens) else price
+        body_top = max(price, day_open)
+        upper_wick = (day_high - body_top) / day_range if day_range > 0 else 0.0
         close_loc  = (price - day_low) / day_range if day_range > 0 else 0.5
         ret_1d = float(closes.pct_change(1).iloc[-1]) if len(closes) > 1 else 0.0
         ret_3d = float(closes.pct_change(3).iloc[-1]) if len(closes) > 3 else 0.0
         ret_5d = float(closes.pct_change(5).iloc[-1]) if len(closes) > 5 else 0.0
         ret_20d = float(closes.pct_change(20).iloc[-1]) if len(closes) > 20 else 0.0
 
-        # OBV slope
+        # OBV slope — normalizer matches backtest breakout_v2: (price * vol20 * 5)
         obv = _obv(closes, volume)
         obv_5d_slope = float(obv.diff(5).iloc[-1]) if len(obv) >= 5 else 0.0
-        obv_slope_5d_norm = obv_5d_slope / (vol_20d * price) if vol_20d > 0 and price > 0 else 0.0
+        obv_slope_5d_norm = obv_5d_slope / (vol_20d * price * 5) if vol_20d > 0 and price > 0 else 0.0
 
         # Relative strength vs SPY
         rel_strength_20d, rel_strength_5d = _relative_strength(closes, spy_closes)
@@ -663,14 +680,17 @@ class BreakoutScanner:
         h = highs.iloc[-(lookback + 6):-1].values
         count = 0
         for i in range(5, len(c) - 1):
-            if h[i] == np.max(h[i-5:i]):        # new 5-day high
+            # New 5-day high: today's high at/above the prior-5-bar max (0.1%
+            # tolerance, matching backtest). The previous `==` comparison almost
+            # never fired — a genuine new high is strictly greater than the max.
+            if h[i] >= np.max(h[i-5:i]) * 0.999:
                 if c[i] < c[i-1]:               # but closed below prior close
                     count += 1
         return count
 
     @staticmethod
     def _atr(closes: pd.Series, highs: pd.Series, lows: pd.Series, period: int = 14) -> float:
-        """Wilder's ATR using last `period` bars."""
+        """Simple-mean ATR over the last `period` true ranges (matches backtest _atr_at)."""
         n = min(len(closes), len(highs), len(lows))
         if n < 2:
             return float(closes.iloc[-1]) * 0.02
@@ -712,16 +732,29 @@ def _atr(closes: pd.Series, highs: pd.Series, lows: pd.Series, period: int = 14)
 
 
 def _rsi(closes: pd.Series, period: int = 14) -> float:
+    # Wilder RSI (ewm, alpha=1/period) — must match backtest.py _rsi_series,
+    # which generates the rsi9/rsi14 training features for the breakout models.
     if len(closes) < period + 1:
         return 50.0
-    delta = closes.diff().dropna()
-    gains  = delta.clip(lower=0).rolling(period).mean()
-    losses = (-delta.clip(upper=0)).rolling(period).mean()
+    delta = closes.diff()
+    gains  = delta.clip(lower=0).ewm(com=period - 1, adjust=False).mean()
+    losses = (-delta.clip(upper=0)).ewm(com=period - 1, adjust=False).mean()
     last_loss = float(losses.iloc[-1])
     if last_loss == 0:
         return 100.0
     rs = float(gains.iloc[-1]) / last_loss
     return float(100.0 - 100.0 / (1 + rs))
+
+
+def _wilder_atr_series(closes: pd.Series, highs: pd.Series, lows: pd.Series,
+                       period: int = 14) -> pd.Series:
+    """Wilder ATR series (ewm alpha=1/period) — matches backtest.py _atr_series,
+    the source of atr14_true used for atr_compression / atr_expansion / Keltner."""
+    prev_c = closes.shift(1).fillna(closes)
+    tr = pd.concat(
+        [highs - lows, (highs - prev_c).abs(), (lows - prev_c).abs()], axis=1
+    ).max(axis=1)
+    return tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
 
 
 def _macd_hist(closes: pd.Series) -> float:
@@ -749,13 +782,20 @@ def _bb(closes: pd.Series, period: int = 20) -> Tuple[float, float, float]:
 
 def _keltner(closes: pd.Series, highs: pd.Series, lows: pd.Series,
              period: int = 20) -> Tuple[float, float]:
-    """EMA ± 2×ATR Keltner channels."""
+    """EMA(period) ± 2×Wilder-ATR(14) Keltner channels.
+
+    Matches backtest.py precompute: kelt = ema20 ± 2 * atr14_true (Wilder ewm),
+    the definition behind the keltner_squeeze training feature.
+    """
     if len(closes) < period:
         mid = float(closes.mean())
         return mid, mid
-    atr = _atr(closes, highs, lows, period)
+    atr_w = _wilder_atr_series(closes, highs, lows, 14)
+    atr_val = float(atr_w.iloc[-1])
+    if not np.isfinite(atr_val):
+        atr_val = _atr(closes, highs, lows, 14)
     ema = float(closes.ewm(span=period, adjust=False).mean().iloc[-1])
-    return ema + 2 * atr, ema - 2 * atr
+    return ema + 2 * atr_val, ema - 2 * atr_val
 
 
 def _obv(closes: pd.Series, volume: pd.Series) -> pd.Series:

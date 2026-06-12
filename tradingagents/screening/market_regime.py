@@ -252,9 +252,32 @@ class MarketRegimeEngine:
         sector_dfs: Optional[Dict[str, pd.DataFrame]],
         as_of_date: Optional[str] = None,
     ) -> MarketRegimeState:
-        """Compute regime from pre-downloaded DataFrames (faster, backtest-compatible)."""
+        """Compute regime from pre-downloaded DataFrames (faster, backtest-compatible).
+
+        DataFrames are truncated to rows at/before `as_of_date` so the state is
+        point-in-time. Without this, a caller passing full-period frames (e.g.
+        the backtest scanning historical dates) would silently compute every
+        date's regime from the END of the data — a lookahead leak.
+        """
         if as_of_date is None:
             as_of_date = str(dt.date.today())
+
+        def _truncate(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+            if df is None or not isinstance(df.index, pd.DatetimeIndex):
+                return df
+            try:
+                cutoff = pd.Timestamp(as_of_date)
+                if df.index.tz is not None:
+                    cutoff = cutoff.tz_localize(df.index.tz)
+                return df.loc[df.index <= cutoff]
+            except Exception:
+                return df
+
+        spy_df = _truncate(spy_df)
+        vix_df = _truncate(vix_df)
+        vix3m_df = _truncate(vix3m_df)
+        if sector_dfs:
+            sector_dfs = {s: _truncate(df) for s, df in sector_dfs.items()}
 
         features = self._compute_features(spy_df, vix_df, vix3m_df, sector_dfs)
         return self._classify(features, as_of_date)

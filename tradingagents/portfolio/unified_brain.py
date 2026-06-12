@@ -78,6 +78,21 @@ SHORT_HOLD_CONFIG: Dict[str, Any] = {
     "tier_mult_aplus": 1.25, # Cycle 27: partially restored (no-Thu model ROC=0.5253, not full 1.5× until WF>0.55)
     "tier_mult_a": 1.0,
     "tier_mult_b": 0.5,  # Cycle 44: unified with live AlphaEngine TIER_SIZE_MULT B=0.50
+    # B12: continuous conviction-scaled risk — replaces the discrete tier-mult
+    # step function with a linear map alpha∈[tier_b,tier_aplus] → [mult_b,mult_aplus].
+    # Tier labels still gate (C rejected); only the size multiplier is continuous.
+    "continuous_conviction": True,
+    # B11: Kelly-blended risk (ports the battle-tested paper_trade_today sizer).
+    # rolling_stats["kelly"] is already half-Kelly; × kelly_fraction → quarter-Kelly.
+    "kelly_sizing": True,
+    "kelly_fraction": 0.5,          # × half-Kelly = quarter-Kelly
+    "kelly_risk_min_pct": 0.5,      # floor on effective risk %
+    "kelly_risk_max_pct": 2.5,      # cap on effective risk %
+    "kelly_min_trades": 10,         # fall back to risk_pct_per_trade below this n
+    # B14: account-drawdown throttle (portfolio circuit breaker).
+    "dd_throttle": True,            # <5%→1.0, 5-10%→0.75, 10-15%→0.5, >15%→0.25
+    # B15: anti-martingale streak scaling (same multipliers as position_sizing.py).
+    "streak_scaling": True,
     # Regime size factors
     "bear_size_factor": 0.5,
     "neutral_size_factor": 0.75,
@@ -256,6 +271,74 @@ class BrainResult:
             f"/ {len(self.rejected)} rejected "
             f"| regime={self.regime} vix={self.vix_level}"
         )
+
+
+# ── Rolling-stats helpers (B11/B14/B15) ──────────────────────────────────────
+
+def rolling_trade_stats(trades: List[dict], n: int = 20) -> dict:
+    """Rolling win rate, half-Kelly fraction, and streak from last N closed trades.
+
+    Same math as paper_trade_today._rolling_trade_stats — duplicated here so the
+    brain has no dependency on the script module.
+    """
+    closed = [t for t in trades if t.get("pnl") is not None][-n:]
+    if not closed:
+        return {"win_rate": 0.5, "kelly": 0.0, "loss_streak": 0, "win_streak": 0,
+                "avg_win": 0.0, "avg_loss": 0.0, "n": 0}
+    pnls = [float(t["pnl"]) for t in closed]
+    wins = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    win_rate = len(wins) / len(pnls) if pnls else 0.5
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = abs(sum(losses) / len(losses)) if losses else 1.0
+    rr = avg_win / max(avg_loss, 0.01)
+    kelly_raw = win_rate - (1.0 - win_rate) / max(rr, 0.01)
+    kelly = max(0.0, kelly_raw * 0.5)  # half-Kelly
+
+    loss_streak = win_streak = 0
+    for p in reversed(pnls):
+        if p <= 0:
+            if win_streak > 0:
+                break
+            loss_streak += 1
+        else:
+            if loss_streak > 0:
+                break
+            win_streak += 1
+
+    return {
+        "win_rate": win_rate, "kelly": kelly,
+        "loss_streak": loss_streak, "win_streak": win_streak,
+        "avg_win": avg_win, "avg_loss": avg_loss, "n": len(pnls),
+    }
+
+
+def account_drawdown_frac(account: Any, account_value: float) -> float:
+    """Current drawdown fraction vs the realized-equity peak.
+
+    Peak is reconstructed from starting_cash + the running max of cumulative
+    realized PnL (unrealized swings excluded — this is a circuit breaker, not
+    an accounting metric). Current equity below that peak → drawdown.
+    """
+    try:
+        starting = float(getattr(account, "starting_cash", 0.0) or 0.0)
+        trades = list(getattr(account, "trades", []) or [])
+        if starting <= 0:
+            return 0.0
+        cum = 0.0
+        peak_equity = starting
+        for t in trades:
+            pnl = t.get("pnl")
+            if pnl is None:
+                continue
+            cum += float(pnl)
+            peak_equity = max(peak_equity, starting + cum)
+        peak_equity = max(peak_equity, account_value)
+        if peak_equity <= 0:
+            return 0.0
+        return max(0.0, 1.0 - account_value / peak_equity)
+    except Exception:
+        return 0.0
 
 
 # ── UnifiedBrain ─────────────────────────────────────────────────────────────
@@ -615,6 +698,8 @@ class UnifiedBrain:
         vix_level: Optional[float],
         regime_state: Optional[Any],
         spy_regime: str,
+        rolling_stats: Optional[dict] = None,
+        drawdown_frac: Optional[float] = None,
     ) -> List[UnifiedCandidate]:
         """Assign shares and risk_dollars to each accepted candidate.
 
@@ -627,6 +712,49 @@ class UnifiedBrain:
         adv_cap     = float(cfg.get("adv_cap_pct", 0.01))
         max_pos     = int(cfg.get("max_open_positions", 5))
         max_sector  = int(cfg.get("max_sector_positions", 2))
+
+        # B11: Kelly-blended effective risk. rolling_stats["kelly"] is half-Kelly
+        # from the last-20-trade window; × kelly_fraction (0.5) → quarter-Kelly,
+        # clamped to [kelly_risk_min_pct, kelly_risk_max_pct]. Below kelly_min_trades
+        # closed trades there is no statistical basis — keep the flat risk_pct.
+        if (
+            cfg.get("kelly_sizing", True)
+            and rolling_stats
+            and int(rolling_stats.get("n", 0)) >= int(cfg.get("kelly_min_trades", 10))
+        ):
+            k_lo = float(cfg.get("kelly_risk_min_pct", 0.5)) / 100.0
+            k_hi = float(cfg.get("kelly_risk_max_pct", 2.5)) / 100.0
+            kelly_risk = float(rolling_stats.get("kelly", 0.0)) * float(cfg.get("kelly_fraction", 0.5))
+            risk_pct = min(k_hi, max(k_lo, kelly_risk))
+
+        # B14: account-drawdown throttle — portfolio circuit breaker. Auto-recovers
+        # as equity recovers. This is the safety valve that lets Kelly push risk up.
+        dd_factor = 1.0
+        if cfg.get("dd_throttle", True) and drawdown_frac is not None:
+            dd = max(0.0, float(drawdown_frac))
+            if dd >= 0.15:
+                dd_factor = 0.25
+            elif dd >= 0.10:
+                dd_factor = 0.50
+            elif dd >= 0.05:
+                dd_factor = 0.75
+
+        # B15: anti-martingale streak scaling (multipliers identical to
+        # position_sizing.py:188-197 — loss streaks shrink, win streaks grow).
+        streak_factor = 1.0
+        if cfg.get("streak_scaling", True) and rolling_stats:
+            loss_streak = int(rolling_stats.get("loss_streak", 0))
+            win_streak  = int(rolling_stats.get("win_streak", 0))
+            if loss_streak >= 3:
+                streak_factor = 0.50
+            elif loss_streak == 2:
+                streak_factor = 0.70
+            elif loss_streak == 1:
+                streak_factor = 0.85
+            elif win_streak >= 4:
+                streak_factor = 1.20
+            elif win_streak >= 2:
+                streak_factor = 1.10
 
         # Regime size factor
         if regime_state is not None:
@@ -698,6 +826,20 @@ class UnifiedBrain:
                 uc.rejection_reason = "tier_C_no_size"
                 continue
 
+            # B12: continuous conviction-scaled multiplier. The discrete tier
+            # step function throws away continuous alpha (0.71 vs 0.73 → 25%
+            # size cliff; 0.55 vs 0.71 → identical size). Map alpha linearly
+            # across the B→A+ cutoff range onto [tier_mult_b, tier_mult_aplus].
+            # Tier labels still gate above; only the size multiplier changes.
+            if cfg.get("continuous_conviction", True):
+                a_lo = float(cfg.get("tier_b", {}).get("alpha", 0.38))
+                a_hi = float(cfg.get("tier_aplus", {}).get("alpha", 0.72))
+                m_lo = tier_mults["B"]
+                m_hi = tier_mults["A+"]
+                if a_hi > a_lo:
+                    t = (uc.alpha_score - a_lo) / (a_hi - a_lo)
+                    tier_mult = min(m_hi, max(m_lo, m_lo + t * (m_hi - m_lo)))
+
             # Cycle 44 B-16: smooth heat taper. As the book fills toward max_heat,
             # shrink each successive entry (sqrt taper) instead of hitting a hard wall,
             # improving geometric growth by avoiding lumpy all-at-once exposure.
@@ -706,7 +848,10 @@ class UnifiedBrain:
             # Audit 2026-06-07: all signals scored 100 (saturated), defeating rank ordering.
             # Map score to size so a score-70 threshold hit gets 50% of a score-100 setup.
             score_factor = min(1.0, max(0.5, uc.breakout_score / 100.0))
-            combined_factor = reg_factor * vix_factor * tier_mult * heat_taper * score_factor
+            combined_factor = (
+                reg_factor * vix_factor * tier_mult * heat_taper * score_factor
+                * dd_factor * streak_factor
+            )
             uc.size_factor = round(combined_factor, 4)
 
             # ATR-based risk sizing
@@ -878,6 +1023,18 @@ class UnifiedBrain:
             if regime_state else REGIME_SCORE.get(spy_regime, 0.80)
         )
 
+        # B11/B14/B15: rolling Kelly/streak stats + drawdown from the account's
+        # closed-trade history (None when no account → flat-risk fallback).
+        _rolling = None
+        _dd_frac = None
+        if account is not None:
+            try:
+                _rolling = rolling_trade_stats(list(getattr(account, "trades", []) or []), n=20)
+                _dd_frac = account_drawdown_frac(account, account_value)
+            except Exception:
+                _rolling = None
+                _dd_frac = None
+
         accepted_sized = self.allocate(
             candidates=tradeable,
             account_value=account_value,
@@ -887,6 +1044,8 @@ class UnifiedBrain:
             vix_level=vix_level,
             regime_state=regime_state,
             spy_regime=spy_regime,
+            rolling_stats=_rolling,
+            drawdown_frac=_dd_frac,
         )
 
         # Move unsized A/A+ to watchlist

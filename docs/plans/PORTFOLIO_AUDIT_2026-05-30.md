@@ -189,3 +189,34 @@ V-16/V-19/V-20/V-21/V-22/V-23 (safety gates), CR-1/CR-2 (PSI), GC-2/GC-3/GC-4/GC
 
 **DEFERRED (require walk-forward validation / retrain / live run — see ALPHA_EVOLUTION_LOG Cycle 45 Remaining):**
 Target-geometry retrain; SR-3/F2 + B6/B7 (numerator edge promotion); F1/DL-2 (alloc-weight wiring into live sizer); DL-3/F8 (correlation call on entry path); DL-5/V-15 (DriftDetector→halt); DL-8 (high-vol max_hold override); DL-6/AE-5 (tbs_prob); GC-1 (MAE emit) / GC-7 (bucket calibration); SR-1/F4 reassessed as not-a-bug; SR-5/F3 win_prob gate kept deliberately.
+
+---
+
+## DEEP MATH AUDIT — 2026-06-09 (full-repo algorithm sweep)
+
+Scope: backtest.py internals, backtest_analyzer, screening (screener/breakout_scanner/market_regime/pattern_signals), ML training stack (train_ml_models, labeling, hmm, ensemble, validation), qlib_integration, rl, backtesting/tearsheet, hrp, monte_carlo, ta.py, metrics.py. All fixes applied + 591 tests pass + numerical sanity checks.
+
+**FIXED (math bugs):**
+- MA-1 backtest_analyzer.py: Sortino downside dev was std of losing subset (own-mean-centered) → RMS of min(excess,0) over ALL periods. Same fix in backtest.py `_stats`.
+- MA-2 backtest_analyzer.py: beta mixed np.cov(ddof=1)/np.var(ddof=0) → single cov matrix.
+- E-6 backtest.py measure_outcome: ambiguous intrabar (target+stop same bar) now resolves stop-first (conservative, matches live), was close-vs-midpoint optimistic.
+- WF-P backtest.py run_walk_forward: purge gap of `primary_hold` scan dates between train/test windows (threshold-selection label leak).
+- SC-1 screener.py + breakout_scanner.py: RSI was Cutler (rolling mean) while training uses Wilder ewm — live gate values off-distribution. Now Wilder, verified equal to backtest `_rsi_series`.
+- SC-2 screener.py: vol baselines (dryup, vol-trigger) included today; training excludes today (shift(1)) — ratio damped exactly on breakout days. Fixed.
+- BO-2 breakout_scanner.py: rolling highs/lows/ranges excluded today, training includes today (pct_from_*_high could be >0 live, never in training). Fixed.
+- BO-3 breakout_scanner.py: atr_compression/atr_expansion/keltner used raw-TR means; training uses Wilder ATR series (atr14_true). Replicated.
+- BO-4 breakout_scanner.py: obv_slope_5d normalizer missing ×5 (values 5× training scale). Fixed.
+- BO-5 breakout_scanner.py `_count_failed_highs`: `h[i] == max(prior5)` almost never true (new high is strictly greater) → `>= max*0.999`; consec_failed_highs was effectively always 0.
+- BO-6 breakout_scanner.py: upper_wick measured from close; training measures from max(close,open). Open series now extracted and used.
+- MR-7 market_regime.py compute_from_dataframes: **lookahead leak** — full-period frames were never truncated to as_of_date; backtest computed every historical scan date's regime (regime_score/crash_risk/risk_on/risk_off ML features) from the END of data. Now truncates all frames to as_of_date.
+- TM-12 train_ml_models.py: sample_weight_cal computed but never passed — calibrators fit unweighted (rejected-row distribution) while models train 20×-executed. Now threaded through all 4 calibration calls, decay-only case included.
+- TM-13 train_ml_models.py: --label-slippage-bps silently clobbered triple-barrier labels; now ignored with warning under label_mode=triple_barrier.
+- HM-1 hmm_regime.py transform: posteriors were forward-backward SMOOTHED (each row used future obs — leak if used as features). Default now FILTERED (forward-only); hmm_log_likelihood now per-row predictive increment, was whole-sequence scalar broadcast.
+- RL-9 rl/environment.py + rl_signal.py: macd_norm divided by 2|hist| → constant ±0.5 sign bit. Now normalized by trailing 10-step hist std (env and live signal builder kept identical). Stale "fills at close" docstring removed (RL-1 next-open fills are implemented).
+- QE-1 qlib_integration/engine.py `_run_wf_models`: label shift(-1) crossed ticker boundaries in concatenated frame AND TimeSeriesSplit ran over ticker-major row order (train folds contained dates after test folds). Label now per-ticker groupby-shift; rows date-sorted before splitting.
+- TS-1 backtesting/tearsheet.py: ann_vol = std×sqrt(252/n) (inverted; Sharpe inflated ~sqrt(n)×) → std×sqrt(252); Sortino downside = mean(d²) over losses only → RMS over all trades.
+- CC-T change_control.py: pending() clock now injectable; fixed time-bomb tests (frozen 2026-06-06 dates expired vs wall-clock TTL).
+
+**VERIFIED CORRECT (no change):** all backtest.py indicator series (Wilder ATR/RSI/ADX, MACD, BB, CCI, MFI, CMF, OBV, stoch), _stats PF/Kelly/expectancy/maxDD/Calmar, _simulate_account cash/commission/slippage accounting, _ml_time_split + _ml_purged_walk_forward embargo, _ml_prepare_frame labels/features, Monte Carlo bootstrap, regime/VIX/breadth searchsorted indexing (no lookahead), triple_barrier labels, SoftVotingEnsemble, DSR (both impls), CPCV purge/embargo, noise feature test, factor_ic (IC/ICIR, forward-return alignment), feature_merger (lag + perturbation leak test), HRP (LdP-correct), TD3 (clipped double-Q, target smoothing, delayed actor, Polyak, shapes), tearsheet Kelly/SQN/PF, position_sizing Kelly, pattern_signals (shift(-1) bounded ≤ scan date).
+
+**NOTED (intentional, not changed):** B6 (1−ll in UnifiedBrain numerator) diverges from live AlphaEngine — shipped deliberately in Wave 3 EDGE commit 7d7116cb; brain path not live. qlib mom_252_21 is return-difference not ratio (doc wording vs code) — consistent train/live, changing would invalidate deployed bundles.

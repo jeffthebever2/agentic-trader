@@ -236,11 +236,8 @@ class StockTradingEnv:
           penalty because it represents a pure out-of-pocket cost not already embedded
           in mark-to-market portfolio value at mid prices.
 
-        Known limitation: trades execute at today's Close price. In practice,
-        EOD decisions execute at the next day's Open. This gives the agent
-        unrealistic intraday precision. The effect is small for daily strategies
-        but should be fixed for intraday RL by using next_open prices.
-        TODO: add `next_open_prices` parameter to step() for more realistic fills.
+        Fills: step() passes next-bar OPEN prices here (RL-1), so EOD decisions
+        execute at the next day's open — no intrabar lookahead.
         """
         slip_frac = self.slippage_bps / 10_000.0  # per-side fraction
 
@@ -306,11 +303,12 @@ class StockTradingEnv:
             rsi_window = closes[max(0, self._t - 28): self._t + 1]
             rsi = _compute_rsi(rsi_window) / 100.0
 
-            # --- MACD histogram (normalized) ---
+            # --- MACD histogram (normalized by trailing 10-step hist std) ---
+            # Previous norm divided by 2*|hist| which collapsed the feature to
+            # a constant ±0.5 sign bit, destroying all magnitude information.
             macd_window = closes[max(0, self._t - 60): self._t + 1]
-            macd_hist = _compute_macd_hist(macd_window)
-            hist_std = max(abs(macd_hist) * 2, 1e-8)
-            macd_norm = float(np.clip(macd_hist / hist_std, -5.0, 5.0))
+            macd_hist, hist_std = _compute_macd_hist(macd_window)
+            macd_norm = float(np.clip(macd_hist / max(hist_std, 1e-8), -5.0, 5.0))
 
             # --- Volume ratio (10d / 30d) ---
             vol_window = volumes[max(0, self._t - 30): self._t + 1]
@@ -361,15 +359,21 @@ def _compute_rsi(closes: np.ndarray, period: int = 14) -> float:
     return float(100.0 - 100.0 / (1.0 + rs))
 
 
-def _compute_macd_hist(closes: np.ndarray) -> float:
+def _compute_macd_hist(closes: np.ndarray) -> tuple:
     # RL-3/BO-1: same bug as breakout_scanner — signal computed on a one-element Series
     # so signal==macd → hist always 0. Fix: compute signal on the full MACD series.
+    # Returns (last_hist, trailing_10_hist_std) so the caller can normalize by
+    # recent histogram volatility instead of the value's own magnitude.
     if len(closes) < 26:
-        return 0.0
+        return 0.0, 1e-8
     s = pd.Series(closes)
     macd_series = s.ewm(span=12, adjust=False).mean() - s.ewm(span=26, adjust=False).mean()
     signal_series = macd_series.ewm(span=9, adjust=False).mean()
-    return float((macd_series - signal_series).iloc[-1])
+    hist_series = macd_series - signal_series
+    hist_std = float(hist_series.iloc[-10:].std(ddof=0))
+    if not np.isfinite(hist_std) or hist_std <= 0:
+        hist_std = max(abs(float(hist_series.iloc[-1])), 1e-8)
+    return float(hist_series.iloc[-1]), hist_std
 
 
 class _BoxSpace:

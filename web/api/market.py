@@ -655,3 +655,53 @@ async def market_opportunities(mode: str = "gainers"):
     _opp_cache[cache_key] = results
     _opp_cache["_ts"] = time.time()
     return results
+
+
+@router.get("/market/gateway-quote")
+async def market_gateway_quote(symbol: str = Query(..., min_length=1, max_length=10)):
+    """Best live quote across all configured providers (quote gateway)."""
+    def _fetch():
+        from tradingagents.data.quote_gateway import get_gateway
+        gw = get_gateway()
+        if gw is None:
+            return {"error": "gateway_disabled"}
+        q = gw.get_quote(symbol)
+        if q is None:
+            return {"symbol": symbol.upper(), "quote": None}
+        best = q.best
+        return {
+            "symbol": q.symbol,
+            "quote": {
+                "last": best.last,
+                "bid": best.bid,
+                "ask": best.ask,
+                "mid": best.mid,
+                "spread_bps": round(best.spread_bps, 1) if best.spread_bps is not None else None,
+                "source": best.source,
+                "trusted": best.trusted,
+                "age_seconds": round(best.age_seconds, 1),
+                "quote_time": best.quote_time.isoformat(),
+            },
+            "backup_sources": q.backup_sources,
+            "consensus_ok": q.consensus_ok,
+            "consensus_spread_bps": q.consensus_spread_bps,
+            "all_quotes": [
+                {"source": x.source, "last": x.last, "age_seconds": round(x.age_seconds, 1)}
+                for x in q.all_quotes
+            ],
+        }
+
+    return await asyncio.get_running_loop().run_in_executor(None, _fetch)
+
+
+@router.get("/market/gateway-health")
+async def market_gateway_health():
+    """Per-provider success/failure/latency stats for the quote gateway."""
+    def _fetch():
+        from tradingagents.data.quote_gateway import get_gateway
+        gw = get_gateway()
+        if gw is None:
+            return {"enabled": False, "providers": {}}
+        return {"enabled": True, "providers": gw.provider_health()}
+
+    return await asyncio.get_running_loop().run_in_executor(None, _fetch)

@@ -228,9 +228,10 @@ class RLSignalProvider:
             log_rets = np.clip(log_rets / std, -5.0, 5.0)
 
             rsi = _compute_rsi(closes[-29:]) / 100.0
-            macd_hist = _compute_macd_hist(closes[-61:])
-            hist_std = max(abs(macd_hist) * 2, 1e-8)
-            macd_norm = float(np.clip(macd_hist / hist_std, -5.0, 5.0))
+            # Must mirror environment._get_obs exactly (live obs == training obs):
+            # normalize MACD hist by trailing 10-step hist std, not its own magnitude.
+            macd_hist, hist_std = _compute_macd_hist(closes[-61:])
+            macd_norm = float(np.clip(macd_hist / max(hist_std, 1e-8), -5.0, 5.0))
 
             if len(volumes) >= 30:
                 vol_ratio = float(np.clip(volumes[-10:].mean() / (volumes[-30:].mean() + 1e-8) - 1.0, -2.0, 2.0))

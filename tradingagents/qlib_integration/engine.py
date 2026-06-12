@@ -152,17 +152,29 @@ class QlibResearchEngine:
         from sklearn.preprocessing import StandardScaler
         import numpy as np
 
-        feature_cols = [c for c in features_df.columns if c not in ("ticker",)]
-        df = features_df[feature_cols].dropna()
-        if len(df) < 50:
+        df = features_df.dropna()
+        if len(df) < 50 or "ret_1d" not in df.columns:
             return []
 
-        # Label: next-day return > 0.5%
-        if "ret_1d" in df.columns:
-            y = (df["ret_1d"].shift(-1) > 0.005).astype(int).dropna()
-            X = df.loc[y.index].drop(columns=["ret_1d"], errors="ignore")
+        # Label: next-day return > 0.5%. Shift PER TICKER — the frame is a
+        # concatenation of ticker blocks, so a plain shift(-1) would label the
+        # last row of one ticker with the first return of the next ticker.
+        if "ticker" in df.columns:
+            fwd_ret = df.groupby("ticker")["ret_1d"].shift(-1)
         else:
-            return []
+            fwd_ret = df["ret_1d"].shift(-1)
+        valid = fwd_ret.notna().to_numpy()
+        df = df.iloc[valid]
+        y = (fwd_ret[valid] > 0.005).astype(int)
+
+        # Sort by DATE before TimeSeriesSplit. The concatenated frame is
+        # ticker-major ordered; splitting it positionally would put one
+        # ticker's full (future-inclusive) history in train while another
+        # ticker's past sits in test — temporal leakage, not walk-forward.
+        order = np.argsort(df.index.values, kind="stable")
+        df = df.iloc[order]
+        y = y.iloc[order]
+        X = df.drop(columns=["ticker", "ret_1d"], errors="ignore")
 
         # Scaler is fitted per fold on train data only (no look-ahead into test period).
         X_raw = X.fillna(0).to_numpy()

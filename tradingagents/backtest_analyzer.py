@@ -61,12 +61,14 @@ class BacktestAnalyzer:
         daily_rf = risk_free_rate / 252
         excess_returns = self.returns - daily_rf
 
-        # Downside deviation (only negative returns)
-        downside_returns = excess_returns[excess_returns < 0]
-        if len(downside_returns) == 0 or downside_returns.std() == 0:
+        # Downside deviation: root-mean-square of negative excess returns,
+        # computed over ALL periods (not the std of the losing subset).
+        downside = np.minimum(excess_returns, 0.0)
+        downside_dev = np.sqrt((downside ** 2).mean())
+        if downside_dev == 0:
             return 0.0
 
-        return np.sqrt(252) * excess_returns.mean() / downside_returns.std()
+        return np.sqrt(252) * excess_returns.mean() / downside_dev
 
     def calculate_max_drawdown(self) -> Tuple[float, pd.Timestamp, pd.Timestamp]:
         """Calculate maximum drawdown.
@@ -125,9 +127,11 @@ class BacktestAnalyzer:
         strategy = self.returns.loc[common_index]
         benchmark = self.benchmark_returns.loc[common_index]
 
-        # Calculate beta (covariance / variance)
-        covariance = np.cov(strategy, benchmark)[0, 1]
-        benchmark_var = np.var(benchmark)
+        # Calculate beta (covariance / variance) — use the same ddof for both
+        # by taking them from a single covariance matrix (ddof=1).
+        cov_matrix = np.cov(strategy, benchmark)
+        covariance = cov_matrix[0, 1]
+        benchmark_var = cov_matrix[1, 1]
 
         if benchmark_var == 0:
             return 0.0, 1.0

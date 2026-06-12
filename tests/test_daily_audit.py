@@ -125,8 +125,10 @@ def test_cc_audit_pending(tmp_path):
     from tradingagents.portfolio.change_control import ChangeControl
     import datetime as dt
     cc = ChangeControl(tmp_path / "cc.jsonl")
+    # Use the real clock so the proposal is inside the 48h TTL when the
+    # audit (which uses utcnow) evaluates it — a fixed past date expires.
     cc.propose("risk_per_trade_pct", 1.0, 1.5, "test",
-                now=dt.datetime(2026, 6, 6, 12, 0))
+                now=dt.datetime.utcnow())
     findings = _audit_change_control(tmp_path / "cc.jsonl")
     assert any(f.id == "CC_PENDING" and f.severity == WARN for f in findings)
 

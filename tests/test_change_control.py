@@ -126,7 +126,7 @@ def test_pending_excludes_expired(cc):
 def test_pending_returns_active(cc):
     cc.propose("risk_per_trade_pct", 1.0, 1.5, "t1", now=NOW)
     cc.propose("max_heat_pct", 80, 70, "t2", now=NOW)
-    assert len(cc.pending()) == 2
+    assert len(cc.pending(now=NOW)) == 2
 
 
 # ── is_risky ─────────────────────────────────────────────────────────────────

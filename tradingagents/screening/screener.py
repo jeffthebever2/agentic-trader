@@ -213,9 +213,11 @@ class StockScreener:
 
     @staticmethod
     def _rsi(closes: pd.Series, period: int = 14) -> float:
-        delta = closes.diff().dropna()
-        gains = delta.clip(lower=0).rolling(period).mean()
-        losses = (-delta.clip(upper=0)).rolling(period).mean()
+        # Wilder RSI (ewm, alpha=1/period) — must match backtest.py _rsi_series
+        # exactly: live gates are tuned on the trained (Wilder) distribution.
+        delta = closes.diff()
+        gains = delta.clip(lower=0).ewm(com=period - 1, adjust=False).mean()
+        losses = (-delta.clip(upper=0)).ewm(com=period - 1, adjust=False).mean()
         last_loss = float(losses.iloc[-1])
         if last_loss == 0:
             return 100.0
@@ -331,10 +333,11 @@ class SwingScreener(StockScreener):
             elif contraction <= 0.45:  coil_pts += 10.0   # solid base
             elif contraction <= 0.60:  coil_pts +=  5.0   # moderate
 
-        # Volume dry-up: last 3 days (before today) quieter than 20-day avg
+        # Volume dry-up: last 3 days (before today) quieter than 20-day avg.
+        # Baseline excludes today — matches backtest.py vol20 (v.shift(1).rolling(20)).
         if len(volume) >= 5:
             vol_3d_prior = float(volume.iloc[-4:-1].mean())  # 3 days before today
-            vol_20d      = float(volume.iloc[-20:].mean())
+            vol_20d      = float(volume.iloc[-21:-1].mean()) if len(volume) >= 21 else float(volume.iloc[:-1].mean())
             dryup_ratio  = vol_3d_prior / vol_20d if vol_20d > 0 else 1.0
             sig.details["VolDryup"] = f"{dryup_ratio:.2f}× avg (prior 3d)"
             if   dryup_ratio <= 0.65:  coil_pts += 10.0   # institutions quietly exiting sellers
@@ -377,9 +380,11 @@ class SwingScreener(StockScreener):
 
         # ── Volume trigger today (25 pts) ──────────────────────────────────
         # Today's volume should be expanding vs baseline — confirms breakout.
-        if len(volume) >= 20:
+        if len(volume) >= 21:
             v_today = float(volume.iloc[-1])
-            v20     = float(volume.iloc[-20:].mean())
+            # Baseline excludes today (backtest vol_ratio_20d = today / prior-20d avg);
+            # including today dampens the ratio exactly on high-volume breakout days.
+            v20     = float(volume.iloc[-21:-1].mean())
             ratio   = v_today / v20 if v20 > 0 else 1.0
             sig.details["VolToday"] = f"{ratio:.2f}× avg"
             if   ratio >= 2.0:  sig.volume = 25.0
@@ -417,7 +422,11 @@ class SwingScreener(StockScreener):
 
     @staticmethod
     def _atr(closes: pd.Series, highs: pd.Series, lows: pd.Series, period: int = 14) -> float:
-        """Wilder's Average True Range."""
+        """Simple-mean ATR over the last `period` true ranges.
+
+        Intentionally NOT Wilder-smoothed: matches backtest.py _atr_at, which
+        generates the target/stop geometry the models are trained on.
+        """
         n = min(len(closes), len(highs), len(lows))
         c = closes.iloc[-n:].values
         h = highs.iloc[-n:].values
