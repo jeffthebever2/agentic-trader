@@ -172,9 +172,9 @@ function ScannerTab() {
     ws.current = new WebSocket(wsUrl('/ws/scanner/scan'))
     ws.current.onopen = () => {
       ws.current!.send(JSON.stringify({
-        ticker_file: tickerFile, score_mode: scoreMode, threshold,
+        tickers_file: tickerFile, score_mode: scoreMode, threshold,
         max_tickers: maxTickers, target_mult: targetMult, stop_mult: stopMult,
-        ml_win_min: mlWinMin, use_ml_gate: useMlGate,
+        ml_prob_min: mlWinMin, use_ml: useMlGate,
       }))
     }
     ws.current.onmessage = (e) => {
@@ -524,11 +524,12 @@ function AlgoTab() {
       ws.current!.send(JSON.stringify({
         tickers: tickers.split(',').map(t => t.trim()).filter(Boolean),
         start_date: startDate, end_date: endDate,
-        score_threshold: scoreThreshold, score_mode: scoreMode,
-        scan_freq: scanFreq, hold_period: +holdPeriod,
+        threshold: scoreThreshold, score_mode: scoreMode,
+        freq: scanFreq, hold_periods: [+holdPeriod], primary_hold: +holdPeriod,
         account_size: accountSize, min_price: minPrice, max_price: maxPrice,
-        ml_win_min: mlWinMin, ml_max_loss: mlMaxLoss, ml_min_exp_ret: mlMinExpRet,
-        skip_cache: skipCache, skip_ml: skipMl,
+        ml_probability_threshold: mlWinMin, ml_large_loss_max: mlMaxLoss,
+        ml_expected_return_min: mlMinExpRet,
+        no_cache: skipCache, no_ml: skipMl,
       }))
     }
     ws.current.onmessage = (e) => {

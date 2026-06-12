@@ -451,6 +451,31 @@ export default function AnalyzePage() {
     setRunning(true)
     startTimer()
 
+    // Non-agent modes use the lightweight synchronous endpoint — the WebSocket
+    // only runs the full LLM agent graph (see web/api/analysis.py).
+    if (mode !== 'agent') {
+      setStatusText('Running analysis…')
+      api.post('/analyze', {
+        ticker: ticker.trim().toUpperCase(),
+        date,
+        mode,
+        provider,
+        model: deepModel,
+        threshold: Number(threshold),
+        use_ml: useMl || mode === 'machine_learning' || mode === 'algorithm_ml',
+        ml_prob: Number(mlProb),
+        score_mode: algoConfig,
+      })
+        .then(res => {
+          const data = res.data ?? {}
+          setDecision({ decision: data.decision ?? '—', text: data.summary ?? '' })
+          setStatusText('Analysis complete.')
+        })
+        .catch((e: Error) => setStatusText(`Error: ${e.message}`))
+        .finally(() => { setRunning(false); stopTimer() })
+      return
+    }
+
     const ws = new WebSocket(wsUrl('/ws/analyze'))
     wsRef.current = ws
 
@@ -460,18 +485,14 @@ export default function AnalyzePage() {
         .map(([k]) => k)
       ws.send(JSON.stringify({
         ticker: ticker.trim().toUpperCase(),
-        mode,
-        date,
+        analysis_date: date,
         analysts: selectedAnalysts,
-        provider,
-        deep_model: deepModel,
-        quick_model: quickModel,
-        depth: Number(depth),
-        language,
-        algo_config: algoConfig,
-        threshold: Number(threshold),
-        ml_prob: Number(mlProb),
-        use_ml: useMl,
+        llm_provider: provider,
+        deep_think_llm: deepModel,
+        quick_think_llm: quickModel,
+        max_debate_rounds: Number(depth),
+        max_risk_discuss_rounds: Number(depth),
+        output_language: language,
       }))
       setStatusText('Running analysis…')
     }

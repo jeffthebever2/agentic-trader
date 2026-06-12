@@ -275,6 +275,10 @@ class SimpleAnalyzeRequest(BaseModel):
     mode: str = "algorithm"
     provider: str = "cloudflare"
     model: str = ""
+    threshold: Optional[float] = None   # min score to call Buy (default 50)
+    use_ml: bool = False                # apply ML win-prob gate (machine_learning / algorithm_ml modes)
+    ml_prob: float = 0.50               # min ML win probability when use_ml
+    score_mode: str = "confirmed_pullback"  # breakout | confirmed_pullback | mean_reversion | try_all
 
 
 @router.post("/analyze")
@@ -282,13 +286,16 @@ async def analyze_simple(req: SimpleAnalyzeRequest, _user: dict = Depends(get_cu
     """Lightweight synchronous analysis endpoint for bulk scans (algorithm mode only).
     For full LLM agent analysis, use the WebSocket endpoint /ws/analyze.
     """
-    from fastapi import Request
     def _run():
         import datetime as dt
         try:
             import yfinance as yf
             import pandas as pd
-            from backtest import precompute, score_at, build_spy_regime, build_vix_regime
+            from backtest import MIN_HISTORY, precompute, score_at, build_spy_regime, build_vix_regime
+            from scripts.paper_trade_today import (
+                clean_daily_frame, regime_value,
+                load_model_bundle, predict_ml, DEFAULT_MODEL_PATHS,
+            )
         except ImportError as e:
             return {"decision": "Error", "summary": f"Import error: {e}"}
 
@@ -314,52 +321,107 @@ async def analyze_simple(req: SimpleAnalyzeRequest, _user: dict = Depends(get_cu
         except Exception as e:
             return {"decision": "Error", "summary": f"Download failed: {e}"}
 
-        if isinstance(raw.columns, pd.MultiIndex):
-            close_all = raw["Close"] if "Close" in raw.columns.get_level_values(0) else pd.DataFrame()
-        else:
-            close_all = raw
+        def _frame(sym: str):
+            try:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    df_sym = raw.xs(sym, axis=1, level=1).dropna()
+                else:
+                    df_sym = raw.dropna()
+                df_sym = clean_daily_frame(df_sym, trade_date)
+                return df_sym if df_sym is not None and not df_sym.empty else None
+            except Exception:
+                return None
 
-        spy_s = close_all.get("SPY", pd.Series(dtype=float))
-        vix_s = close_all.get("^VIX", pd.Series(dtype=float))
-        spy_regime = build_spy_regime(spy_s) if not spy_s.empty else {}
-        vix_regime = build_vix_regime(vix_s) if not vix_s.empty else {}
+        spy_df = _frame("SPY")
+        vix_df = _frame("^VIX")
+        df = _frame(ticker)
 
+        if df is None or len(df) <= MIN_HISTORY:
+            return {"decision": "Hold", "summary": f"No/insufficient data for {ticker}"}
+
+        spy_regime = build_spy_regime(spy_df) if spy_df is not None and len(spy_df) >= 200 else pd.Series(dtype=str)
+        vix_regime = build_vix_regime(vix_df) if vix_df is not None and not vix_df.empty else None
+
+        valid_modes = ("breakout", "confirmed_pullback", "mean_reversion")
+        modes = valid_modes if req.score_mode == "try_all" else (
+            req.score_mode if req.score_mode in valid_modes else "confirmed_pullback",
+        )
         try:
-            if isinstance(raw.columns, pd.MultiIndex):
-                df = pd.DataFrame({
-                    "Open": raw["Open"].get(ticker, pd.Series()),
-                    "High": raw["High"].get(ticker, pd.Series()),
-                    "Low": raw["Low"].get(ticker, pd.Series()),
-                    "Close": raw["Close"].get(ticker, pd.Series()),
-                    "Volume": raw["Volume"].get(ticker, pd.Series()),
-                }).dropna()
-            else:
-                df = raw.dropna()
-        except Exception as e:
-            return {"decision": "Error", "summary": f"Data prep failed: {e}"}
-
-        if df.empty:
-            return {"decision": "Hold", "summary": f"No data available for {ticker}"}
-
-        try:
-            computed = precompute(df)
-            sc = score_at(computed, trade_date, spy_regime=spy_regime, vix_regime=vix_regime, mode="confirmed_pullback")
+            pc = precompute(df)
+            pos = len(df) - 1
+            as_of = pd.Timestamp(df.index[pos])
+            regime = regime_value(spy_regime, as_of)
+            vix_r = regime_value(vix_regime, as_of) if vix_regime is not None else "unknown"
+            score, signals, mode_used = 0.0, None, modes[0]
+            for m in modes:
+                s, sig = score_at(
+                    pc, df, pos,
+                    target_mult=1.2, stop_mult=1.5,
+                    regime=regime, vix_reg=vix_r,
+                    score_mode=m,
+                )
+                if sig and s > score:
+                    score, signals, mode_used = s, sig, m
         except Exception as e:
             return {"decision": "Error", "summary": str(e)}
 
-        if sc is None or sc.score < 50:
+        threshold = req.threshold if req.threshold is not None else 50.0
+        if not signals or score < threshold:
             return {
                 "decision": "Hold",
-                "summary": f"{ticker}: Score {sc.score if sc else 0:.1f} — no entry signal on {trade_date}",
+                "summary": f"{ticker}: Score {score:.1f} — no entry signal on {trade_date} (threshold {threshold:.0f})",
             }
+
+        entry = signals.get("entry", 0.0)
+        target = signals.get("target", 0.0)
+        stop = signals.get("stop", 0.0)
+        rr = signals.get("risk_reward", 0.0)
+
+        # Optional ML win-probability gate (machine_learning / algorithm_ml modes)
+        ml_note = ""
+        if req.use_ml or req.mode in ("machine_learning", "algorithm_ml"):
+            bundle = None
+            for p in DEFAULT_MODEL_PATHS:
+                full = ROOT / p
+                if full.exists():
+                    try:
+                        bundle = load_model_bundle(full, disabled=False)
+                    except Exception:
+                        pass
+                    break
+            if bundle is not None:
+                try:
+                    row = {
+                        "ticker": ticker,
+                        "score": score,
+                        "signal_date": str(trade_date),
+                        "entry": entry,
+                        **signals,
+                    }
+                    ml_data = predict_ml(row, bundle)
+                    win_prob = ml_data.get("win_probability")
+                    if win_prob is not None:
+                        ml_note = f", ML win prob {win_prob:.0%}"
+                        if win_prob < req.ml_prob:
+                            return {
+                                "decision": "Hold",
+                                "summary": (
+                                    f"{ticker}: Score {score:.1f} passed but ML win prob "
+                                    f"{win_prob:.0%} < {req.ml_prob:.0%} gate"
+                                ),
+                            }
+                except Exception:
+                    ml_note = ", ML gate unavailable"
+            else:
+                ml_note = ", no ML model found"
 
         return {
             "decision": "Buy",
             "action": "BUY",
             "summary": (
-                f"{ticker}: Score {sc.score:.1f} — entry ${sc.entry:.2f}, "
-                f"target ${sc.target:.2f} (+{(sc.target/sc.entry-1)*100:.1f}%), "
-                f"stop ${sc.stop:.2f}, R:R {sc.rr:.2f}"
+                f"{ticker} [{mode_used}]: Score {score:.1f} — entry ${entry:.2f}, "
+                f"target ${target:.2f} (+{(target / entry - 1) * 100:.1f}%), "
+                f"stop ${stop:.2f}, R:R {rr:.2f}{ml_note}"
             ),
         }
 
