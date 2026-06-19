@@ -1182,21 +1182,12 @@ def _sanitize_picks(picks: object, allowed_tickers: set[str]) -> list[dict[str, 
     return list(best.values())
 
 
-async def _ai_pick(tickers_ranked: list[tuple[str, float]], news_blobs: list[str]) -> list[dict[str, Any]]:
-    """Call Cloudflare AI (free) to analyze trending tickers and output conviction picks."""
-    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
-    cf_token   = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
-    model      = os.getenv("CLOUDFLARE_DEFAULT_QUICK_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast").strip()
-    gateway_url = os.getenv("CLOUDFLARE_AI_GATEWAY_URL", "").strip()
-
-    if not (account_id and cf_token):
-        # Fallback to OpenRouter if CF not configured
-        return await _ai_pick_openrouter(tickers_ranked, news_blobs)
-
-    news_text  = "\n".join(news_blobs[:30])[:3000]
-    ticker_str = ", ".join(f"{t}({s:.0f})" for t, s in tickers_ranked[:20])
-
-    prompt = f"""You are an aggressive momentum stock analyst. You track social buzz, news catalysts, AND insider/congressional buying as conviction signals.
+def _build_ai_pick_prompt(ticker_str: str, news_text: str) -> str:
+    """Build the thematic pick prompt. Pure (no I/O) so the picking discipline is
+    testable. Encodes the accuracy rules the deterministic layer also enforces:
+    only the trending tickers, a concrete catalyst, lone-hype down-ranking, and a
+    hard skip on red-flag names — so the LLM and the sanitizer pull the same way."""
+    return f"""You are a disciplined momentum stock analyst. You track social buzz, news catalysts, AND insider/congressional buying as conviction signals.
 
 Trending tickers by combined signal score (Reddit buzz + news mentions + insider buys + congressional trades):
 {ticker_str}
@@ -1204,11 +1195,14 @@ Trending tickers by combined signal score (Reddit buzz + news mentions + insider
 Recent news headlines:
 {news_text}
 
-Analyze the social momentum, news catalysts, insider buying patterns, and sector themes.
-READ WHAT THE CROWD IS ACTUALLY SAYING in the headlines — are people bullish (buy/squeeze/
-breakout/moon) or bearish (sell/dump/short/crash/overvalued)? A heavily-discussed stock the
-crowd is BEARISH on is NOT a buy. Stocks with BOTH social momentum AND insider cluster buying
-get highest conviction. Pick the TOP 6 highest-conviction LONG plays from the trending list.
+RULES (follow strictly — they drive real position sizing):
+1. Pick ONLY from the trending tickers listed above. Never invent or substitute a ticker that is not in that list.
+2. Require a CONCRETE catalyst — a specific earnings date, product launch, contract/award, approval, guidance, or insider cluster buy. A name with only vague "momentum" or "hype" and no specific catalyst gets conviction <= 6.
+3. A name trending on a SINGLE source with no cross-confirmation is unproven — cap its conviction at 6. Names confirmed across MULTIPLE sources AND with insider buying get the highest conviction.
+4. READ WHAT THE CROWD IS ACTUALLY SAYING — bullish (buy/squeeze/breakout) vs bearish (sell/dump/short/crash/overvalued). A name the crowd is BEARISH on is NOT a buy.
+5. SKIP entirely any name whose chatter cites fraud, an SEC/DOJ investigation, a trading halt, delisting, going-concern, dilution, or a short-seller report — these are not buys at any buzz level.
+
+Pick the TOP 6 highest-conviction LONG plays that satisfy the rules.
 
 Respond ONLY with a JSON array (no markdown, no explanation):
 [
@@ -1235,6 +1229,23 @@ sentiment: -1.0 (crowd says SELL/crash) to +1.0 (crowd euphoric/buying) — your
 crowd_view: one short sentence on what people are posting, including any 'sell' / bearish takes
 target_pct: 15-300 — LET WINNERS RUN. Real momentum/social plays routinely run 50-200%+, not 20%. Set the target where the move realistically tops, not a timid 20%. High conviction + strong catalyst → aim 80-200%.
 stop_pct: 5-15, hold_days: 3-30"""
+
+
+async def _ai_pick(tickers_ranked: list[tuple[str, float]], news_blobs: list[str]) -> list[dict[str, Any]]:
+    """Call Cloudflare AI (free) to analyze trending tickers and output conviction picks."""
+    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    cf_token   = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+    model      = os.getenv("CLOUDFLARE_DEFAULT_QUICK_MODEL", "@cf/meta/llama-3.3-70b-instruct-fp8-fast").strip()
+    gateway_url = os.getenv("CLOUDFLARE_AI_GATEWAY_URL", "").strip()
+
+    if not (account_id and cf_token):
+        # Fallback to OpenRouter if CF not configured
+        return await _ai_pick_openrouter(tickers_ranked, news_blobs)
+
+    news_text  = "\n".join(news_blobs[:30])[:3000]
+    ticker_str = ", ".join(f"{t}({s:.0f})" for t, s in tickers_ranked[:20])
+
+    prompt = _build_ai_pick_prompt(ticker_str, news_text)
 
     try:
         if gateway_url:
