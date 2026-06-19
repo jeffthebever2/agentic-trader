@@ -919,8 +919,17 @@ async def _merge_signals(
 
     # Drop crypto / junk, require minimum buzz
     _CRYPTO = {"BTC-USD","ETH-USD","SOL-USD","XRP-USD","DOGE-USD","BTC","ETH","SOL"}
+    # Broad-market index ETFs are social noise ("buy SPY"), not the single-name
+    # conviction stock picks this thematic book trades. Excluded so they can't
+    # rank or seed a signal. Sector/leveraged ETFs are intentionally NOT here —
+    # those can be a deliberate momentum vehicle.
+    _INDEX_ETFS = {
+        "SPY","QQQ","IWM","DIA","VOO","VTI","IVV","SPLG","VT","VEA","VWO",
+        "VXUS","VIG","SCHB","SCHX","RSP","QQQM","ITOT",
+    }
+    _EXCLUDE = _CRYPTO | _INDEX_ETFS
     scores = {t: s for t, s in scores.items()
-              if len(t) >= 2 and t not in _CRYPTO and s >= 2}
+              if len(t) >= 2 and t not in _EXCLUDE and s >= 2}
     breakdown = {t: v for t, v in breakdown.items() if t in scores}
 
     # Insider + social combo bonus: insider buying AND (twitter OR reddit) = +8
