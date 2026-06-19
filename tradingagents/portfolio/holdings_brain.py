@@ -160,12 +160,20 @@ def _min_stop_distance_pct(conviction: int) -> float:
 
 def _adoption_stop(price: float, conviction: int, atr_stop: float) -> float:
     """Protective stop for a newly-managed holding: never tighter than the
-    conviction-aware minimum distance (wider/lower wins → more room to run)."""
-    if price <= 0:
-        return atr_stop
+    conviction-aware minimum distance (wider/lower wins → more room to run).
+
+    A NaN slips past ``price <= 0`` (NaN compares False), so guard non-finite
+    inputs explicitly — a NaN protective stop would never fire correctly and
+    leave a holding effectively unprotected. Never returns a non-finite value."""
+    def _finite_pos(x: object) -> bool:
+        return isinstance(x, (int, float)) and math.isfinite(x) and x > 0
+    if not _finite_pos(price):
+        return atr_stop if _finite_pos(atr_stop) else 0.0
     floor = round(price * (1 - _min_stop_distance_pct(conviction) / 100.0), 4)
+    if not _finite_pos(atr_stop):
+        return floor
     # min → further below price → wider stop → less likely to shake out a winner.
-    return min(atr_stop, floor) if atr_stop > 0 else floor
+    return min(atr_stop, floor)
 
 
 def takeover_verdict(holding: "Holding", ctx: dict) -> tuple[str, int, str]:
