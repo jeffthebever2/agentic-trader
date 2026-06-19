@@ -64,3 +64,26 @@ def test_non_list_and_non_dict_safe():
     assert t._sanitize_picks(None, ALLOWED) == []
     assert t._sanitize_picks("oops", ALLOWED) == []
     assert t._sanitize_picks([None, 5, "x", {"no_ticker": 1}], ALLOWED) == []
+
+
+# ── De-duplication (added run 7) ────────────────────────────────────────────
+def test_duplicate_ticker_deduped_keep_highest_conviction():
+    picks = [
+        {"ticker": "NVDA", "conviction": 6, "thesis": "first"},
+        {"ticker": "nvda", "conviction": 9, "thesis": "second"},   # same name, higher conv
+        {"ticker": "AMD", "conviction": 7},
+    ]
+    out = t._sanitize_picks(picks, {"NVDA", "AMD"})
+    by = {p["ticker"]: p for p in out}
+    assert len(out) == 2                       # NVDA collapsed to one
+    assert by["NVDA"]["conviction"] == 9       # highest-conviction instance kept
+    assert by["NVDA"]["thesis"] == "second"
+
+
+def test_dedup_tie_keeps_first():
+    picks = [
+        {"ticker": "AMD", "conviction": 7, "thesis": "a"},
+        {"ticker": "AMD", "conviction": 7, "thesis": "b"},
+    ]
+    out = t._sanitize_picks(picks, {"AMD"})
+    assert len(out) == 1 and out[0]["thesis"] == "a"

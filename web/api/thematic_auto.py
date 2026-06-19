@@ -1171,7 +1171,15 @@ def _sanitize_picks(picks: object, allowed_tickers: set[str]) -> list[dict[str, 
             q["conviction"] = min(int(q["conviction"]), 4)
             q["red_flag"] = True
         out.append(q)
-    return out
+    # De-duplicate by ticker: the model sometimes lists the same name twice, which
+    # would seed two proposals/trades for one ticker. Keep the highest-conviction
+    # instance (tie → first seen) so a single canonical pick survives per name.
+    best: dict[str, dict[str, Any]] = {}
+    for q in out:
+        cur = best.get(q["ticker"])
+        if cur is None or int(q["conviction"]) > int(cur["conviction"]):
+            best[q["ticker"]] = q
+    return list(best.values())
 
 
 async def _ai_pick(tickers_ranked: list[tuple[str, float]], news_blobs: list[str]) -> list[dict[str, Any]]:
