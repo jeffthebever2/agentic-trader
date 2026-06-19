@@ -1868,7 +1868,26 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
         elif stop > 0 and price <= stop:
             reason = "stop_hit"
         elif age_days >= hold_days:
-            reason = "max_hold_exceeded"
+            # Don't market-dump a still-running winner at max-hold. If it's
+            # meaningfully green, convert to a trailing stop (let the right tail
+            # run — the strategy targets 50-200% moves) instead of a hard timed
+            # exit. Only flat/losing positions take the timed exit. Threshold env
+            # THEMATIC_MAXHOLD_RUN_PCT (default 12%).
+            _ep = float(pos.get("entry_price", 0) or 0)
+            try:
+                _run_buf = 1.0 + max(0.0, float(os.getenv("THEMATIC_MAXHOLD_RUN_PCT", "12"))) / 100.0
+            except ValueError:
+                _run_buf = 1.12
+            if _ep > 0 and price > _ep * _run_buf:
+                if not pos.get("trailing"):
+                    pos["trailing"] = True
+                    pos["peak_price"] = max(price, float(pos.get("peak_price", price) or price))
+                    modified = True
+                    log.info("%s past max-hold but +%.0f%% — trailing instead of timed exit",
+                             ticker, (price / _ep - 1) * 100)
+                # held as a runner; no timed exit this cycle
+            else:
+                reason = "max_hold_exceeded"
         else:
             # Buzz-based exits require PRICE confirmation. Social buzz fading is not
             # a price signal, and the entry is often peak buzz (so next-day decay is
