@@ -806,6 +806,7 @@ _MAX_PER_SOURCE_PTS: float = 60.0
 _QUALITY_SOURCES = frozenset({
     "trusted_twitter", "reddit", "seeking_alpha", "google_news",
     "insider", "marketaux", "twitter", "ddg", "brave", "scan_memory",
+    "google_trends",
 })
 
 
@@ -850,6 +851,7 @@ async def _merge_signals(
     av_movers: dict[str, int] | None = None,
     yahoo_movers: dict[str, int] | None = None,
     brave: dict[str, int] | None = None,
+    google_trends: dict[str, int] | None = None,
 ) -> tuple[list[tuple[str, float]], dict[str, dict[str, float]]]:
     """Combine all sources into ranked list + per-source breakdown.
 
@@ -911,6 +913,8 @@ async def _merge_signals(
         _add(t, "yahoo_movers", n * 2.0)  # yahoo screener momentum
     for t, n in (brave or {}).items():
         _add(t, "brave", n * 2.0)          # brave news search (same weight as DDG)
+    for t, n in (google_trends or {}).items():
+        _add(t, "google_trends", n * 2.0)  # rising Google-search interest (leading attention)
 
     # Multi-source confirmation bonus: +3 per QUALITY source beyond the first
     # (max +15). Confirmation must come from real conviction feeds — two screener
@@ -2060,6 +2064,110 @@ def _scan_source_timeout() -> float:
         return 25.0
 
 
+# ── Google Trends source (trendspyg) ─────────────────────────────────────────
+# Rising web-search interest is a leading ATTENTION signal — it often precedes
+# the social-chatter spike. trendspyg is the maintained pytrends replacement
+# (the original repo is archived). OFF by default (env THEMATIC_GOOGLE_TRENDS)
+# because it is an unofficial scrape that can rate-limit; bounded + graceful so a
+# block/timeout/missing-dep degrades to {} and never stalls or breaks a scan.
+
+def _trends_momentum(series: "list[float]") -> int:
+    """Convert a Google-Trends interest-over-time series (0-100 values, oldest →
+    newest) into a small positive 'rising interest' weight, else 0.
+
+    Pure + deterministic so the weighting is testable without scraping. Rejects
+    noise (sub-floor interest) and only rewards a MEANINGFUL rise of the recent
+    window over the earlier baseline, so steady/declining interest scores 0."""
+    import math as _m
+    vals = [float(v) for v in (series or [])
+            if isinstance(v, (int, float)) and _m.isfinite(float(v))]
+    if len(vals) < 4:
+        return 0
+    n = len(vals)
+    recent = sum(vals[-2:]) / 2.0
+    half = max(1, n // 2)
+    baseline = sum(vals[:half]) / half
+    if recent < 15:                         # below the attention noise floor
+        return 0
+    if baseline <= 0:                       # rose from no interest at all
+        return max(1, min(int(recent / 12), 8))
+    accel = recent / baseline
+    if accel < 1.25:                        # not meaningfully accelerating
+        return 0
+    return max(1, min(int(round((accel - 1.0) * 5)), 8))
+
+
+def _google_trends_enabled() -> bool:
+    return os.getenv("THEMATIC_GOOGLE_TRENDS", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _google_trends_watch_terms() -> "dict[str, str]":
+    """{ticker: query} watchlist for Google-Trends scanning. Trends needs seed
+    terms (it can't discover from nothing), so we watch a configurable set —
+    env THEMATIC_TRENDS_TICKERS (comma list), else a small catalyst-theme set
+    skewed to the explosive small/mid-cap names a buzz scanner enters late."""
+    raw = [x.strip().upper() for x in os.getenv("THEMATIC_TRENDS_TICKERS", "").split(",") if x.strip()]
+    tickers = raw or [
+        "IREN", "CIFR", "WULF", "APLD", "OKLO", "SMR", "RGTI", "IONQ",
+        "RCAT", "ONDS", "NVDA", "AMD", "AVGO", "MU", "VRT",
+    ]
+    return {t: f"{t} stock" for t in tickers}
+
+
+def _fetch_google_trend_series(query: str) -> "list[float]":
+    """Best-effort fetch of a Google-Trends interest series via trendspyg. Returns
+    [] on any problem (missing dep / API drift / block) so callers degrade
+    gracefully. Kept isolated + injectable so the rest is testable offline."""
+    try:
+        import trendspyg  # type: ignore
+    except Exception:
+        return []
+    try:
+        # trendspyg's surface has shifted across versions; try the documented
+        # entry points and normalize whatever interest-over-time it returns.
+        fn = getattr(trendspyg, "download_trends", None) or getattr(trendspyg, "get_trends", None)
+        if fn is None:
+            return []
+        data = fn(query)
+        # Accept list[number] | dict-like | DataFrame-like → flatten to floats.
+        if hasattr(data, "values") and not isinstance(data, dict):
+            try:
+                return [float(x) for x in list(data.values.flatten())]  # DataFrame
+            except Exception:
+                pass
+        if isinstance(data, dict):
+            data = list(data.values())
+        return [float(x) for x in data if isinstance(x, (int, float))]
+    except Exception as e:
+        log.debug("google_trends fetch failed for %s: %s", query, e)
+        return []
+
+
+async def _google_trends_tickers(client=None, *, fetch=None, terms=None) -> "dict[str, int]":
+    """Source scraper: rising-search-interest tickers as {ticker: weight}. Each
+    term fetched off-loop (trendspyg is sync) and bounded by the caller's
+    per-source timeout. Disabled unless THEMATIC_GOOGLE_TRENDS is set."""
+    if not _google_trends_enabled():
+        return {}
+    terms = terms if terms is not None else _google_trends_watch_terms()
+    if not terms:
+        return {}
+    fetch = fetch or _fetch_google_trend_series
+    out: dict[str, int] = {}
+    for ticker, query in terms.items():
+        try:
+            series = await asyncio.to_thread(fetch, query)
+            w = _trends_momentum(series or [])
+            if w > 0:
+                tk = _norm_ticker(ticker)
+                if tk:
+                    out[tk] = out.get(tk, 0) + w
+        except Exception as e:
+            log.debug("google_trends term %s: %s", ticker, e)
+            continue
+    return out
+
+
 async def _run_scan() -> None:
     async with _scan_lock:
         has_marketaux = bool(os.getenv("MARKETAUX_API_TOKEN", "").strip())
@@ -2091,6 +2199,7 @@ async def _run_scan() -> None:
                     _b(_alphavantage_movers(client)),      # 12
                     _b(_yahoo_movers(client)),             # 13
                     _b(_brave_tickers(client)),            # 14
+                    _b(_google_trends_tickers(client)),    # 15
                     return_exceptions=True,
                 )
 
@@ -2112,11 +2221,13 @@ async def _run_scan() -> None:
             av_res          = _safe(gather_results[12], {})
             yahoo_movers_res= _safe(gather_results[13], {})
             brave_res       = _safe(gather_results[14], {})
+            google_trends_res = _safe(gather_results[15], {})
             twitter: dict[str, int] = {}
 
             _SOURCE_NAMES = ["reddit","ddg","yahoo","google_news","seeking_alpha",
                              "stockanalysis","marketaux","insider","trusted_twitter",
-                             "stocktwits","finviz","rss_news","av_movers","yahoo_movers","brave"]
+                             "stocktwits","finviz","rss_news","av_movers","yahoo_movers","brave",
+                             "google_trends"]
             for i, name in enumerate(_SOURCE_NAMES):
                 if isinstance(gather_results[i], Exception):
                     log.warning("Source %s exception: %s", name, gather_results[i])
@@ -2126,7 +2237,7 @@ async def _run_scan() -> None:
                 reddit, ddg, yahoo, twitter,
                 google_news, seeking_alpha, stockanalysis, marketaux_res, insider_res,
                 trusted_twitter, stocktwits_res, finviz_res, rss_res, av_res, yahoo_movers_res,
-                brave_res,
+                brave_res, google_trends=google_trends_res,
             )
             if not ranked:
                 _set_status("done", "No tickers found")
