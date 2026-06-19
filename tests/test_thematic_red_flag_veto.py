@@ -50,3 +50,16 @@ def test_halt_and_dilution_terms_trigger():
     for txt in ("Shares were halted today", "company announced a dilutive offering priced below market"):
         out = t._sanitize_picks([{"ticker": "DLST", "conviction": 7, "sentiment": 0.5, "crowd_view": txt}], ALLOWED)
         assert out[0].get("red_flag") is True
+
+
+# ── Extended lexicon (run 9) ────────────────────────────────────────────────
+def test_extended_red_flag_terms_trigger():
+    for txt in (
+        "looks like a classic pump and dump",
+        "anon thread calls it a ponzi",
+        "warning of a rug pull on this one",
+        "headed for a bankruptcy filing",
+        "charged with securities fraud",
+    ):
+        out = t._sanitize_picks([{"ticker": "SCAM", "conviction": 8, "sentiment": 0.7, "crowd_view": txt}], ALLOWED)
+        assert out[0].get("red_flag") is True

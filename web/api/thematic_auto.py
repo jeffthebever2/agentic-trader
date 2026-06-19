@@ -1112,6 +1112,8 @@ _RED_FLAG_TERMS = (
     "going concern", "short report", "short-seller", "short seller",
     "accounting irregular", "restatement", "dilution", "offering priced",
     "going-concern", "default on", "investigation into", "class action",
+    "pump and dump", "pump-and-dump", "ponzi", "rug pull", "rug-pull",
+    "going to zero", "bankruptcy filing", "chapter 7", "securities fraud",
 )
 
 

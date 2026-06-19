@@ -38,9 +38,10 @@ def test_min_signal_score_floor():
 
 
 def test_auto_trade_score_floor():
-    # Composite auto-trade / SMS-request gate default. Floor raised 75→80.
+    # Composite auto-trade / SMS-request gate default. Floor raised 75→80→82.
+    # This is the money-moving auto-execute path; it may only ever be RAISED.
     from web.users import DEFAULT_THEMATIC_HIL
-    assert DEFAULT_THEMATIC_HIL["auto_trade_score"] >= 80.0
+    assert DEFAULT_THEMATIC_HIL["auto_trade_score"] >= 82.0
 
 
 # ── Adaptive sizing ─────────────────────────────────────────────────────────

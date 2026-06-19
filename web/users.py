@@ -236,7 +236,7 @@ DEFAULT_THEMATIC_HIL: dict[str, Any] = {
     "daily_loss_limit_pct": 3.0, # halt new entries if today's P&L < -X%
     "conviction_scale": True,    # scale position size by conviction (8/10 → 1.2× base, 5/10 → 0.7×)
     # ── Auto-trade + adaptive sizing (2026-06-18) ──
-    "auto_trade_score": 80.0,    # only signals at/above this 0-100 composite score auto-trade / text a request (raised 75→80 2026-06-19: stronger conviction required before money moves)
+    "auto_trade_score": 82.0,    # only signals at/above this 0-100 composite score auto-trade / text a request (75→80→82 2026-06-19: auto-execute is the money-moving path; raised again now that buzz filtering (source cap, solo dampener, red-flag veto, ETF exclusion) cuts noise upstream)
     "adaptive_sizing": True,     # size each trade off portfolio value × score × target (not flat dollar_amount)
     "base_position_pct": 4.0,    # adaptive base: % of account value per position before score scaling
     "min_dollar": 25.0,          # floor for an adaptive position
