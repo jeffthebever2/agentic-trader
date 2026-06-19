@@ -1075,6 +1075,25 @@ _VALID_THEMES = frozenset({
 })
 
 
+# Hard negative-catalyst terms. If a pick's OWN crowd_view/catalyst/thesis text
+# mentions one of these, the situation is materially bad regardless of the buzz
+# score or the LLM's sentiment number — a classic pump/disaster false positive
+# (fraud probes, halts, delistings, short reports, dilution, going-concern).
+# NOTE: bear_case is intentionally NOT scanned — it always describes downside.
+_RED_FLAG_TERMS = (
+    "fraud", "sec investigation", "sec probe", "subpoena", "doj ",
+    "halted", "trading halt", "delist", "bankrupt", "chapter 11",
+    "going concern", "short report", "short-seller", "short seller",
+    "accounting irregular", "restatement", "dilution", "offering priced",
+    "going-concern", "default on", "investigation into", "class action",
+)
+
+
+def _has_red_flag(pick: dict) -> bool:
+    text = " ".join(str(pick.get(k, "")) for k in ("crowd_view", "catalyst", "thesis", "name")).lower()
+    return any(term in text for term in _RED_FLAG_TERMS)
+
+
 def _clamp_num(val, lo, default, hi, *, as_int=False):
     """Coerce val to a finite number clamped to [lo, hi]; default on garbage."""
     import math as _m
@@ -1117,6 +1136,14 @@ def _sanitize_picks(picks: object, allowed_tickers: set[str]) -> list[dict[str, 
         q["hold_days"]  = _clamp_num(p.get("hold_days"), 3, 10, 30, as_int=True)
         if q.get("theme") not in _VALID_THEMES:
             q["theme"] = "future_tech"
+        # Red-flag veto: a pick whose own narrative cites a hard negative catalyst
+        # cannot be bullish, no matter the number the model returned. Force deep
+        # bearish (composite_score hard-caps ≤ -0.5 to ≤45 → never auto-tradeable)
+        # and knock conviction down so sizing/gates treat it as a probe at most.
+        if _has_red_flag(q):
+            q["sentiment"] = min(float(q["sentiment"]), -0.5)
+            q["conviction"] = min(int(q["conviction"]), 4)
+            q["red_flag"] = True
         out.append(q)
     return out
 
