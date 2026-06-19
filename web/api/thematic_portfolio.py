@@ -489,6 +489,32 @@ class ThematicTradeIn(BaseModel):
     def upper_ticker(cls, v: str) -> str:
         return v.upper().strip()
 
+    @field_validator("entry_price")
+    @classmethod
+    def entry_price_positive(cls, v: float | None) -> float | None:
+        # A negative/zero entry would invert stop/target and produce nonsense
+        # share counts. None is fine (means "fetch the live price").
+        if v is not None and v <= 0:
+            raise ValueError("entry_price must be > 0")
+        return v
+
+    @field_validator("stop_pct")
+    @classmethod
+    def stop_pct_sane(cls, v: float) -> float:
+        # Stop must sit below entry but above zero: 0 < stop_pct < 100. A stop_pct
+        # >= 100 puts the stop at/below $0; <= 0 puts it at/above entry.
+        if not (0 < v < 100):
+            raise ValueError("stop_pct must be between 0 and 100 (exclusive)")
+        return v
+
+    @field_validator("target_pct")
+    @classmethod
+    def target_pct_sane(cls, v: float) -> float:
+        # Target must be above entry and within a sane ceiling.
+        if not (0 < v <= 1000):
+            raise ValueError("target_pct must be between 0 and 1000")
+        return v
+
 
 @router.post("/thematic/trade")
 async def thematic_paper_trade(body: ThematicTradeIn, user: dict = Depends(get_current_user)):
