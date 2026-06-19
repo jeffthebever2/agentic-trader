@@ -800,6 +800,14 @@ async def _yahoo_movers(client: httpx.AsyncClient) -> dict[str, int]:
 # intentionally exempt from this cap.
 _MAX_PER_SOURCE_PTS: float = 60.0
 
+# Sources that count as real conviction signal (not OTC/foreign-stock noise from
+# screener/mover feeds). Used both for the multi-source confirmation bonus and
+# the quality gate — confirmation must come from quality feeds, not two screeners.
+_QUALITY_SOURCES = frozenset({
+    "trusted_twitter", "reddit", "seeking_alpha", "google_news",
+    "insider", "marketaux", "twitter", "ddg", "brave", "scan_memory",
+})
+
 
 # Dual-class / renamed tickers that refer to the same company. Without folding
 # these, one name's social signal is split across two tickers (so neither
@@ -904,11 +912,13 @@ async def _merge_signals(
     for t, n in (brave or {}).items():
         _add(t, "brave", n * 2.0)          # brave news search (same weight as DDG)
 
-    # Multi-source confirmation bonus: +3 per source beyond the first (max +15)
+    # Multi-source confirmation bonus: +3 per QUALITY source beyond the first
+    # (max +15). Confirmation must come from real conviction feeds — two screener
+    # / mover feeds agreeing is not a confirmed thesis, so they earn no bonus.
     for t, src_set in source_presence.items():
-        n_sources = len(src_set)
-        if n_sources >= 2:
-            bonus = min((n_sources - 1) * 3.0, 15.0)
+        n_quality = len(src_set & _QUALITY_SOURCES)
+        if n_quality >= 2:
+            bonus = min((n_quality - 1) * 3.0, 15.0)
             scores[t] = scores.get(t, 0.0) + bonus
             breakdown.setdefault(t, {})["multi_source_bonus"] = bonus
 
@@ -955,9 +965,8 @@ async def _merge_signals(
             breakdown[t]["insider_social_combo"] = 8.0
 
     # Quality gate: tickers from low-signal sources (finviz/movers/rss/pr) only
-    # are likely OTC/foreign stocks — require at least one quality source OR score >= 60
-    _QUALITY_SOURCES = {"trusted_twitter","reddit","seeking_alpha","google_news",
-                        "insider","marketaux","twitter","ddg","brave","scan_memory"}
+    # are likely OTC/foreign stocks — require at least one quality source OR score >= 60.
+    # Uses the module-level _QUALITY_SOURCES (shared with the confirmation bonus).
     # stockanalysis/finviz/movers can pick up OTC/foreign stocks — require quality source
     # OR very high score (80+) to make it through without a quality source
     _LOW_SIGNAL_ONLY_MIN_SCORE = 80.0
