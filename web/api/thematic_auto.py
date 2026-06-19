@@ -2528,6 +2528,10 @@ async def scan_status(_user: dict = Depends(get_current_user)):
 async def get_signals(_user: dict = Depends(get_current_user)):
     data = _load_signals()
     pending = [s for s in data["signals"] if s.get("status") == "pending"]
+    # Regime-adaptive buy gate: in risk-off markets demand stronger signals
+    # (env THEMATIC_REGIME_GATE, default off → multiplier 1.0, no change).
+    _regime_mult = _regime_threshold_multiplier()
+    _eff_min = MIN_SIGNAL_SCORE * _regime_mult
     # Annotate each signal with buy eligibility, spike status, and scan history
     for sig in pending:
         rs = float(sig.get("raw_score", 0) or 0)
@@ -2540,17 +2544,19 @@ async def get_signals(_user: dict = Depends(get_current_user)):
         # (THEMATIC_BREAKOUT_CONFIRM, default off). Still HIL-approved; this only
         # flips will_buy on a name that already clears the score gate.
         breakout_ok = False
-        if is_spike and rs >= MIN_SIGNAL_SCORE and _breakout_confirm_enabled():
+        if is_spike and rs >= _eff_min and _breakout_confirm_enabled():
             try:
                 breakout_ok = _ticker_breakout(str(sig.get("ticker", "")))
             except Exception:
                 breakout_ok = False
         if breakout_ok:
             sig["breakout_confirmed"] = True
-        # will_buy: clear score threshold AND (confirmed by 2+ scans OR a price breakout)
-        # Spike-only signals are shown but flagged — user can still approve manually
-        sig["will_buy"]        = (rs >= MIN_SIGNAL_SCORE) and (not is_spike or breakout_ok)
-        sig["score_threshold"] = MIN_SIGNAL_SCORE
+        # will_buy: clear the (regime-adjusted) score threshold AND (confirmed by
+        # 2+ scans OR a price breakout). Spike-only signals are shown but flagged.
+        sig["will_buy"]        = (rs >= _eff_min) and (not is_spike or breakout_ok)
+        sig["score_threshold"] = round(_eff_min, 1)
+        if _regime_mult != 1.0:
+            sig["regime_multiplier"] = round(_regime_mult, 2)
         sig["buzz_tier"]       = _buzz_tier(rs)
         sig["score"]           = composite_score(sig.get("conviction", 7), rs, sig.get("sentiment", 0.0))  # unified 0-100
         sig["is_spike"]        = is_spike
@@ -2749,6 +2755,51 @@ def _atr_stop_pct(price: float, atr: float, base_pct: float, *,
 
 def _risk_sizing_enabled() -> bool:
     return os.getenv("THEMATIC_RISK_SIZING", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── Regime gate (adaptive buy threshold by market regime) ────────────────────
+_regime_cache: dict = {"ts": 0.0, "mult": 1.0}
+
+
+def _regime_gate_enabled() -> bool:
+    return os.getenv("THEMATIC_REGIME_GATE", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _fetch_spy_closes() -> "list[float]":
+    """Daily SPY closes (~1y) for regime detection. [] on any failure → caller
+    keeps the normal gate. Isolated + injectable for tests."""
+    try:
+        import yfinance as yf
+        df = yf.download("SPY", period="1y", auto_adjust=True, progress=False)
+        if df is None or df.empty:
+            return []
+        return [float(x) for x in df["Close"].squeeze().tolist()]
+    except Exception as e:
+        log.debug("regime SPY fetch failed: %s", e)
+        return []
+
+
+def _regime_threshold_multiplier(*, fetch=None, now=None) -> float:
+    """Multiplier on the buy-score gate for the current market regime (1.0 when
+    disabled or data missing → no behavior change; up to 1.5 in risk-off).
+    Cached ~1h so the per-signal annotation is cheap."""
+    if not _regime_gate_enabled():
+        return 1.0
+    import time as _t
+    _now = now if now is not None else _t.time()
+    if _now - _regime_cache.get("ts", 0.0) < 3600 and _regime_cache.get("mult"):
+        return _regime_cache["mult"]
+    closes = (fetch or _fetch_spy_closes)()
+    if not closes:
+        return 1.0  # missing data must not change behavior
+    try:
+        from tradingagents.portfolio.regime import assess_regime
+        mult = float(assess_regime(spy_closes=closes)["threshold_multiplier"])
+    except Exception as e:
+        log.debug("regime assess failed: %s", e)
+        return 1.0
+    _regime_cache["ts"], _regime_cache["mult"] = _now, mult
+    return mult
 
 
 def _risk_pct_per_trade() -> float:
