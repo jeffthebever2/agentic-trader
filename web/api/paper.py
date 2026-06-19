@@ -736,7 +736,12 @@ async def sendblue_inbound(request: Request):
     from_number = str(payload.get("from_number") or payload.get("number") or "")
     result = dispatch(from_number, content)
     reply = result.get("reply") or ""
-    if reply and from_number:
+    # Only reply to REGISTERED numbers (dispatch sets result["user"] to the email,
+    # or None for an unknown sender). Without this, an unauthenticated POST with a
+    # forged from_number turns the webhook into an SMS reflector — the server would
+    # text arbitrary victim numbers on demand (cost + spam), especially when
+    # SENDBLUE_INBOUND_SECRET is unset. Unknown senders are logged, never replied to.
+    if reply and from_number and result.get("user"):
         try:
             await asyncio.to_thread(send_sms, from_number, reply)
         except Exception as exc:
