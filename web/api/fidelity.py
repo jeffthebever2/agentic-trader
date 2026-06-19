@@ -50,6 +50,16 @@ def _get_order_lock(key: str) -> asyncio.Lock:
     return _ORDER_LOCKS[key]
 
 
+def _mask_account(account: str | None) -> str:
+    """Mask a brokerage account number for logs — show only the last 4 digits.
+    Account numbers are sensitive financial identifiers and must not appear in
+    plaintext logs. '262502469' → '•••••2469'; short/empty → '••••'."""
+    s = "" if account is None else str(account).strip()
+    if len(s) <= 4:
+        return "••••"
+    return "•" * (len(s) - 4) + s[-4:]
+
+
 def _validate_account_number(account: str | None) -> str | None:
     """Fidelity account numbers are numeric, 8-12 digits. Reject anything else."""
     if account is None:
@@ -1193,7 +1203,7 @@ async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(requi
                     await page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
                     await asyncio.sleep(1)
                 except Exception:
-                    log.warning("Could not select account %s — using default", account)
+                    log.warning("Could not select account %s — using default", _mask_account(account))
 
             try:
                 sym = page.locator('#eq-ticket-dest-symbol')
@@ -1812,7 +1822,7 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
                     await page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
                     await asyncio.sleep(1)
                 except Exception:
-                    log.warning("Could not select account %s — using default", account)
+                    log.warning("Could not select account %s — using default", _mask_account(account))
 
             # Symbol
             sym_input = page.locator('#eq-ticket-dest-symbol')
@@ -2222,7 +2232,7 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
                     await exit_page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
                     await asyncio.sleep(1)
                 except Exception:
-                    log.warning("Could not select account %s — using default", account)
+                    log.warning("Could not select account %s — using default", _mask_account(account))
 
             sym_input = exit_page.locator('#eq-ticket-dest-symbol')
             await sym_input.wait_for(state="visible", timeout=20000)  # ticket form loads slowly
