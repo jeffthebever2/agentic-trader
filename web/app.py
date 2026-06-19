@@ -35,6 +35,7 @@ from web.api.ml import router as ml_router
 from web.api.rl import router as rl_router
 from web.api.webull_portfolio import router as webull_router
 from web.api.fidelity import router as fidelity_router
+from web.api.holdings_brain import router as holdings_brain_router
 from web.api.scanner import router as scanner_router
 from web.api.market import router as market_router
 from web.api.auth_routes import router as auth_router
@@ -305,6 +306,7 @@ app.include_router(ml_router, prefix="/api")
 app.include_router(rl_router, prefix="/api")
 app.include_router(webull_router, prefix="/api")
 app.include_router(fidelity_router, prefix="/api")
+app.include_router(holdings_brain_router, prefix="/api")
 app.include_router(scanner_router, prefix="/api")
 app.include_router(market_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
@@ -500,16 +502,21 @@ async def deep_health_check():
 
 
 async def _fidelity_keepalive_loop():
-    """Every 20 min, navigate to Fidelity summary for each live session to prevent cookie expiry."""
+    """Every 10 min, navigate to Fidelity summary for each live session to prevent cookie expiry.
+
+    10 min beats Fidelity's ~15-20 min idle timeout so a session that's only
+    touched by background keepalive (no user activity) stays warm.
+    """
     _log = logging.getLogger("fidelity_keepalive")
     await asyncio.sleep(30)  # let server warm up
-    _INTERVAL = 20 * 60  # 20 minutes
+    _INTERVAL = 10 * 60  # 10 minutes
     while True:
         try:
             import hashlib as _hl
             from pathlib import Path as _Path
             from web.api.fidelity import (
                 _ensure_browser, _save_storage, _set_session_cache, SUMMARY_URL,
+                _auto_relogin, _is_authenticated_url, _ORDER_IN_FLIGHT, _user_key,
             )
             root = _Path(__file__).parent.parent
 
@@ -532,6 +539,8 @@ async def _fidelity_keepalive_loop():
                 parts = sf.stem.rsplit("_", 1)
                 digest = parts[-1] if len(parts) == 2 else ""
                 email = digest_to_email.get(digest, digest)  # use email if known
+                if _user_key(email) in _ORDER_IN_FLIGHT:
+                    continue  # don't touch the browser while an order is placing
                 try:
                     ctx = await _ensure_browser(email)
                     page = await ctx.new_page()
@@ -539,14 +548,20 @@ async def _fidelity_keepalive_loop():
                         await page.goto(SUMMARY_URL, wait_until="domcontentloaded", timeout=25_000)
                         await asyncio.sleep(3)
                         url = page.url.lower()
-                        connected = "login" not in url and "digital.fidelity" in url
+                        connected = _is_authenticated_url(url)
                         if connected:
                             await _save_storage(email)
                             _set_session_cache(email, True)
                             _log.debug("Session kept alive: %s", email[:20])
                         else:
                             _set_session_cache(email, False)
-                            _log.info("Session expired (keepalive check): %s", email[:20])
+                            _log.info("Session expired (keepalive check): %s — attempting silent re-login", email[:20])
+                            # Stored creds + trusted device → reconnect with no user action.
+                            try:
+                                if await _auto_relogin(email):
+                                    _log.info("Keepalive silent re-login succeeded: %s", email[:20])
+                            except Exception as _re:
+                                _log.warning("Keepalive re-login error %s: %s", email[:20], _re)
                     finally:
                         try:
                             await page.close()
@@ -603,6 +618,116 @@ async def _fd_janitor_loop():
             pass
 
 
+def _brain_market_open() -> bool:
+    """True during US regular trading hours (ET, Mon-Fri 9:30-16:00)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("America/New_York"))
+    if now.weekday() >= 5:
+        return False
+    o = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    c = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return o <= now <= c
+
+
+def _fidelity_sessioned_emails() -> list[str]:
+    """Emails with a live Fidelity session file (reuses the keepalive digest map)."""
+    import hashlib as _hl
+    import json as _j
+    root = Path(__file__).parent.parent
+    digest_to_email: dict[str, str] = {}
+    try:
+        users_file = root / "tmp" / "users.json"
+        if users_file.exists():
+            for email in _j.loads(users_file.read_text()):
+                e = str(email).strip().lower()
+                if e:
+                    digest_to_email[_hl.sha256(e.encode()).hexdigest()[:16]] = e
+    except Exception:
+        pass
+    emails: list[str] = []
+    for sf in root.glob(".fidelity_session_*.json"):
+        parts = sf.stem.rsplit("_", 1)
+        digest = parts[-1] if len(parts) == 2 else ""
+        emails.append(digest_to_email.get(digest, digest))
+    return emails
+
+
+async def _holdings_brain_loop():
+    """Full AI assessment of real holdings → HIL proposals. Gated HOLDINGS_BRAIN_ENABLED.
+
+    Never places an order. Runs in market hours on the slower cadence
+    (HOLDINGS_BRAIN_INTERVAL_MIN, default 240 min)."""
+    _log = logging.getLogger("holdings_brain_loop")
+    await asyncio.sleep(90)  # let server + sessions warm up
+    while True:
+        try:
+            if os.getenv("HOLDINGS_BRAIN_ENABLED", "false").lower() == "true" and _brain_market_open():
+                from web.api.holdings_brain import run_brain_cycle
+                for email in _fidelity_sessioned_emails():
+                    try:
+                        summary = await run_brain_cycle(email, broker="fidelity", use_ai=True)
+                        _log.info("brain cycle %s: %s", email[:16], summary)
+                    except Exception as e:
+                        _log.warning("brain cycle failed for %s: %s", email[:16], e)
+        except Exception as e:
+            _log.warning("loop error: %s", e)
+        interval = max(15, int(float(os.getenv("HOLDINGS_BRAIN_INTERVAL_MIN", "240")))) * 60
+        await asyncio.sleep(interval)
+
+
+async def _exit_guard_loop():
+    """Fast stop/target guard on managed real holdings → priority EXIT proposals.
+
+    Gated HOLDINGS_BRAIN_ENABLED. Never auto-fires (human approves with step-up
+    2FA). Runs every EXIT_GUARD_INTERVAL_MIN (default 15) during market hours."""
+    _log = logging.getLogger("exit_guard_loop")
+    await asyncio.sleep(120)
+    while True:
+        try:
+            if os.getenv("HOLDINGS_BRAIN_ENABLED", "false").lower() == "true" and _brain_market_open():
+                from web.api.holdings_brain import run_exit_guard
+                for email in _fidelity_sessioned_emails():
+                    try:
+                        breaches = await run_exit_guard(email, broker="fidelity")
+                        if breaches:
+                            _log.warning("EXIT-GUARD %s: %d breach(es) → proposals raised: %s",
+                                         email[:16], len(breaches),
+                                         ", ".join(f"{b['ticker']}:{b['reason']}" for b in breaches))
+                    except Exception as e:
+                        _log.warning("exit guard failed for %s: %s", email[:16], e)
+        except Exception as e:
+            _log.warning("loop error: %s", e)
+        interval = max(2, int(float(os.getenv("EXIT_GUARD_INTERVAL_MIN", "15")))) * 60
+        await asyncio.sleep(interval)
+
+
+async def _thematic_exit_loop():
+    """Fast stop/target/trailing enforcement on the THEMATIC PAPER book, decoupled
+    from the 4-hour scan loop (audit #1: stops were otherwise checked <=6x/day, and
+    not at all if the scan froze).
+
+    PAPER-ONLY: _check_thematic_exits(execute=True) writes the paper book and exit
+    log — it does NOT place or exit any live broker order. The live Fidelity book
+    is mirrored into paper for tracking, so the exit signals it computes surface as
+    HIL exit proposals; live execution still requires human + step-up 2FA. Gated by
+    THEMATIC_EXIT_LOOP (default off); interval THEMATIC_EXIT_INTERVAL_MIN (default 15)."""
+    _log = logging.getLogger("thematic_exit_loop")
+    await asyncio.sleep(150)  # let the server warm up
+    while True:
+        try:
+            if os.getenv("THEMATIC_EXIT_LOOP", "false").lower() == "true" and _brain_market_open():
+                from web.api.thematic_auto import _check_thematic_exits
+                exits = await _check_thematic_exits(execute=True)  # paper-only
+                if exits:
+                    _log.info("thematic exits (paper) %d: %s", len(exits),
+                              ", ".join(f"{e.get('ticker')}:{e.get('reason')}" for e in exits))
+        except Exception as e:
+            _log.warning("loop error: %s", e)
+        interval = max(2, int(float(os.getenv("THEMATIC_EXIT_INTERVAL_MIN", "15")))) * 60
+        await asyncio.sleep(interval)
+
+
 _background_tasks: list[asyncio.Task] = []
 
 
@@ -612,6 +737,9 @@ async def _startup():
     _background_tasks.append(asyncio.create_task(_thematic_scan_loop()))
     _background_tasks.append(asyncio.create_task(_fidelity_keepalive_loop()))
     _background_tasks.append(asyncio.create_task(_fd_janitor_loop()))
+    _background_tasks.append(asyncio.create_task(_holdings_brain_loop()))
+    _background_tasks.append(asyncio.create_task(_exit_guard_loop()))
+    _background_tasks.append(asyncio.create_task(_thematic_exit_loop()))
 
 
 @app.on_event("shutdown")
