@@ -794,6 +794,17 @@ async def _yahoo_movers(client: httpx.AsyncClient) -> dict[str, int]:
 
 # ── Merge + rank ──────────────────────────────────────────────────────────────
 
+def _norm_ticker(raw: object) -> str:
+    """Canonical ticker key for cross-source merging: upper-case, stripped of
+    whitespace and a leading cashtag '$'. Ensures 'nvda', 'NVDA' and '$NVDA' from
+    different sources collapse to one entry so the multi-source confirmation bonus
+    actually fires and a name's score isn't fragmented across case variants."""
+    t = str(raw or "").strip().upper()
+    if t.startswith("$"):
+        t = t[1:]
+    return t.strip()
+
+
 async def _merge_signals(
     reddit: dict[str, int],
     ddg: dict[str, int],
@@ -822,6 +833,9 @@ async def _merge_signals(
     source_presence: dict[str, set] = {}  # ticker → set of source names
 
     def _add(ticker: str, source: str, pts: float) -> None:
+        ticker = _norm_ticker(ticker)
+        if not ticker:
+            return
         scores[ticker] = scores.get(ticker, 0.0) + pts
         breakdown.setdefault(ticker, {})[source] = breakdown.get(ticker, {}).get(source, 0.0) + pts
         source_presence.setdefault(ticker, set()).add(source)
