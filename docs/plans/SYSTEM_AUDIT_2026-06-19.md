@@ -187,3 +187,46 @@ Recommend **(a)**.
 - Remaining high-confidence work is either user-decision-gated (#3), a known larger integration (#5 risk-overlay, #6 regime gate), or environment-limited (live backtest, #7 discovery scan). No further *silent* high-confidence code fix was found in the audited scope.
 
 — End of audit. Conclusions are evidence/reasoning-based, not certainties.
+
+---
+
+## 9. Phase 2 — Implementation (post-approval, this session)
+
+User granted blanket approval for all safe offline work (autonomous *live* selling
+still excluded). Everything below is **pure-helper + injectable-fetch + flag-gated
+(default OFF) + tested**; live behavior is unchanged until a flag is set.
+
+| Area | Component | Commit | Flag (default off) |
+|---|---|---|---|
+| Sizing | risk-based shares `= risk_budget/(entry−stop)`, capped at 10% | `ae5b7711` | `THEMATIC_RISK_SIZING` |
+| Regime | `tradingagents/portfolio/regime.py` — SPY trend + vol + breadth → risk-on score → adaptive buy-gate multiplier | `ec5d13ee` | `THEMATIC_REGIME_GATE` |
+| Discovery | `tradingagents/portfolio/discovery.py` — RS + volume expansion + 52w-high + accumulation; 17th source surfacing **no-buzz** breakouts (IREN-$5 solver) | `3a241a69` | `THEMATIC_DISCOVERY` |
+| Data | analyst confirmation — FMP grades + Finnhub rec-trends (18th source) | `c50c88c6` | `THEMATIC_ANALYST` |
+| Risk overlay | FINRA short-volume — **non-additive**; vetoes will_buy on extreme short pressure | `cf3dd8bf` | `THEMATIC_SHORT_OVERLAY` |
+| Risk | pure correlation concentration guard (catches correlated clusters) | `ebf9c12d` | (library; wire in sizing) |
+| Exits | paper-only fast exit loop; ATR-aware stops; buzz-exit price-confirm; max-hold→trailing | `0f193366` `626a5285` `4b6f44f0` `35ff475b` | `THEMATIC_EXIT_LOOP` / `THEMATIC_ATR_STOPS` |
+| Signals | breakout fast-lane; trendspyg; scan_memory fix | `753ce873` `0050070f` `7f578a21` | `THEMATIC_BREAKOUT_CONFIRM` / `THEMATIC_GOOGLE_TRENDS` |
+| Re-audit | validation + adversarial integration suite | `e1e3d4e9` | — |
+
+**Re-audit result (§5/§6 of the goal):** the new components compose without
+double-counting (contributions additive, multi-source bonus counted once); the
+per-source cap, ETF-exclusion and red-flag guards still bind on the new sources;
+the short overlay is **not** additive to the score; every new pure helper is
+garbage-safe; all flags default OFF. Suite **975 green**, frontend build clean.
+
+### Profitability impact (reasoned, not backtested)
+- **Opportunity capture:** discovery (no-buzz breakouts) + breakout fast-lane +
+  trendspyg directly target the IREN-class miss; analyst source adds independent
+  confirmation. Expected: materially fewer *missed* catalyst movers.
+- **Risk-adjusted return:** ATR stops + risk-based sizing make dollar-risk constant
+  across names (ends shake-outs / oversized losses); regime gate stands down in
+  risk-off; correlation guard caps hidden cluster risk; FINRA overlay avoids
+  buying into extreme short pressure. Expected: lower drawdown / higher Sharpe.
+- **Confidence: medium.** Direction is well-evidenced from code + market study;
+  magnitude requires a live A/B (not possible here).
+
+### Remaining (genuinely blocked)
+1. **Autonomous *live* exit execution** — needs explicit user OK (real-money selling).
+2. **Live backtest / parameter tuning** — needs a market-data feed + historical signal store (not in this environment). All thresholds (RVOL 3×, corr 0.85, risk 1%, regime bands) are sensible priors to be tuned on real data.
+3. **Broad discovery universe** — wire `THEMATIC_DISCOVERY_UNIVERSE` to the liquid-tickers file for full-market no-buzz discovery (currently a curated watchlist).
+4. **Wire correlation guard into the sizing path** — engine is built + tested; the approve path should call `correlation_ok` with the book's cached closes before sizing up a correlated add.
