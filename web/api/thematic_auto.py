@@ -1054,6 +1054,59 @@ def _validate_pick(pick: Any) -> dict | None:
     }
 
 
+_VALID_THEMES = frozenset({
+    "ai_leaders", "ai_infrastructure", "optical_network", "memory_hbm",
+    "datacenter_power", "nuclear_energy", "space_defense", "quantum_future",
+    "critical_minerals", "reshoring", "fintech_consumer", "future_tech",
+})
+
+
+def _clamp_num(val, lo, default, hi, *, as_int=False):
+    """Coerce val to a finite number clamped to [lo, hi]; default on garbage."""
+    import math as _m
+    try:
+        x = float(val)
+    except (TypeError, ValueError):
+        x = float(default)
+    if not _m.isfinite(x):
+        x = float(default)
+    x = max(lo, min(hi, x))
+    return int(round(x)) if as_int else x
+
+
+def _sanitize_picks(picks: object, allowed_tickers: set[str]) -> list[dict[str, Any]]:
+    """Clamp LLM pick output back to documented guardrails and drop hallucinations.
+
+    The model is free to return out-of-range numbers or invent a ticker that was
+    never in the trending list — either would seed a false-positive trade. So we:
+      * drop any pick whose (normalized) ticker is not in the trending input,
+      * clamp conviction[1-10], sentiment[-1,1], target_pct[15-300],
+        stop_pct[5-15], hold_days[3-30] to their documented ranges,
+      * coerce an unknown theme to 'future_tech'.
+    Pure + deterministic — the safety floor on the LLM, mirroring holdings_brain.
+    """
+    if not isinstance(picks, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for p in picks:
+        if not isinstance(p, dict):
+            continue
+        tk = _norm_ticker(p.get("ticker"))
+        if not tk or (allowed_tickers and tk not in allowed_tickers):
+            continue  # hallucinated / off-list ticker
+        q = dict(p)
+        q["ticker"]     = tk
+        q["conviction"] = _clamp_num(p.get("conviction"), 1, 5, 10, as_int=True)
+        q["sentiment"]  = _clamp_num(p.get("sentiment"), -1.0, 0.0, 1.0)
+        q["target_pct"] = _clamp_num(p.get("target_pct"), 15, 60, 300)
+        q["stop_pct"]   = _clamp_num(p.get("stop_pct"), 5, 10, 15)
+        q["hold_days"]  = _clamp_num(p.get("hold_days"), 3, 10, 30, as_int=True)
+        if q.get("theme") not in _VALID_THEMES:
+            q["theme"] = "future_tech"
+        out.append(q)
+    return out
+
+
 async def _ai_pick(tickers_ranked: list[tuple[str, float]], news_blobs: list[str]) -> list[dict[str, Any]]:
     """Call Cloudflare AI (free) to analyze trending tickers and output conviction picks."""
     account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
@@ -1146,9 +1199,9 @@ stop_pct: 5-15, hold_days: 3-30"""
         if m:
             content = m.group(0)
         picks = json.loads(content)
-        if not isinstance(picks, list):
-            picks = []
-        log.info("CF AI returned %d picks", len(picks))
+        allowed = {_norm_ticker(t) for t, _ in tickers_ranked}
+        picks = _sanitize_picks(picks, allowed)
+        log.info("CF AI returned %d picks (post-sanitize)", len(picks))
         return picks
     except Exception as e:
         log.error("CF AI pick failed: %s", e)
@@ -1174,7 +1227,8 @@ async def _ai_pick_openrouter(tickers_ranked: list[tuple[str, float]], news_blob
         content = re.sub(r"^```[a-z]*\n?", "", content); content = re.sub(r"\n?```$", "", content)
         m = re.search(r"\[.*\]", content, re.DOTALL)
         picks = json.loads(m.group(0) if m else content)
-        return picks if isinstance(picks, list) else []
+        allowed = {_norm_ticker(t) for t, _ in tickers_ranked}
+        return _sanitize_picks(picks, allowed)
     except Exception as e:
         log.error("OpenRouter fallback failed: %s", e)
         return []
