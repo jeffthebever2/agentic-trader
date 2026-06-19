@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from web.auth import get_current_user, require_admin
@@ -40,7 +40,9 @@ ROOT   = Path(__file__).parent.parent.parent
 TMP    = ROOT / "tmp"
 SIGNALS_FILE   = TMP / "thematic_signals.json"
 STATUS_FILE    = TMP / "thematic_scan_status.json"
-PAPER_STATE_FILE = ROOT / "tmp" / "paper_trading_today" / "unified_brain" / "state.json"
+# Dedicated thematic paper book (isolated from the 15-portfolio competition book).
+# Keep this path in sync with web.api.thematic_portfolio.PAPER_STATE_FILE.
+PAPER_STATE_FILE = ROOT / "tmp" / "thematic_paper" / "state.json"
 
 router = APIRouter()
 
@@ -1002,20 +1004,25 @@ def _validate_pick(pick: Any) -> dict | None:
     except (TypeError, ValueError):
         conviction = 7
     try:
-        target_pct = float(pick.get("target_pct", 20))
-        target_pct = max(5.0, min(100.0, target_pct))
+        # Cap at 300% — let winners run; the AI is told real plays run 50-200%+.
+        target_pct = float(pick.get("target_pct", 40))
+        target_pct = max(5.0, min(300.0, target_pct))
     except (TypeError, ValueError):
-        target_pct = 20.0
+        target_pct = 40.0
     try:
-        stop_pct = float(pick.get("stop_pct", 7))
+        stop_pct = float(pick.get("stop_pct", 8))
         stop_pct = max(2.0, min(25.0, stop_pct))
     except (TypeError, ValueError):
-        stop_pct = 6.0
+        stop_pct = 8.0
     try:
-        hold_days = int(float(pick.get("hold_days", 5)))
-        hold_days = max(1, min(30, hold_days))
+        hold_days = int(float(pick.get("hold_days", 7)))
+        hold_days = max(1, min(45, hold_days))
     except (TypeError, ValueError):
-        hold_days = 5
+        hold_days = 7
+    try:
+        sentiment = max(-1.0, min(1.0, float(pick.get("sentiment", 0.0))))
+    except (TypeError, ValueError):
+        sentiment = 0.0
     return {
         "ticker":     ticker,
         "name":       str(pick.get("name", ticker))[:80],
@@ -1025,6 +1032,8 @@ def _validate_pick(pick: Any) -> dict | None:
         "catalyst":   str(pick.get("catalyst", ""))[:300],
         "bull_case":  str(pick.get("bull_case", ""))[:300],
         "bear_case":  str(pick.get("bear_case", ""))[:300],
+        "sentiment":  sentiment,
+        "crowd_view": str(pick.get("crowd_view", ""))[:240],
         "target_pct": target_pct,
         "stop_pct":   stop_pct,
         "hold_days":  hold_days,
@@ -1054,8 +1063,10 @@ Recent news headlines:
 {news_text}
 
 Analyze the social momentum, news catalysts, insider buying patterns, and sector themes.
-Stocks with BOTH social momentum AND insider cluster buying get highest conviction.
-Pick the TOP 6 highest-conviction plays from the trending list.
+READ WHAT THE CROWD IS ACTUALLY SAYING in the headlines — are people bullish (buy/squeeze/
+breakout/moon) or bearish (sell/dump/short/crash/overvalued)? A heavily-discussed stock the
+crowd is BEARISH on is NOT a buy. Stocks with BOTH social momentum AND insider cluster buying
+get highest conviction. Pick the TOP 6 highest-conviction LONG plays from the trending list.
 
 Respond ONLY with a JSON array (no markdown, no explanation):
 [
@@ -1068,14 +1079,20 @@ Respond ONLY with a JSON array (no markdown, no explanation):
     "catalyst": "Specific upcoming catalyst or current momentum driver",
     "bull_case": "What sends it higher",
     "bear_case": "What kills the trade",
-    "target_pct": 25,
-    "stop_pct": 8,
-    "hold_days": 7
+    "sentiment": 0.7,
+    "crowd_view": "What people are actually saying — quote the vibe (e.g. 'Reddit calling breakout, some warn overbought')",
+    "target_pct": 60,
+    "stop_pct": 10,
+    "hold_days": 10
   }}
 ]
 
 theme must be one of: ai_leaders, ai_infrastructure, optical_network, memory_hbm, datacenter_power, nuclear_energy, space_defense, quantum_future, critical_minerals, reshoring, fintech_consumer, future_tech
-conviction: 1-10, target_pct: 10-100 (be aggressive — momentum plays can run 20-50%+), stop_pct: 5-15, hold_days: 3-21"""
+conviction: 1-10
+sentiment: -1.0 (crowd says SELL/crash) to +1.0 (crowd euphoric/buying) — your read of the actual crowd polarity
+crowd_view: one short sentence on what people are posting, including any 'sell' / bearish takes
+target_pct: 15-300 — LET WINNERS RUN. Real momentum/social plays routinely run 50-200%+, not 20%. Set the target where the move realistically tops, not a timid 20%. High conviction + strong catalyst → aim 80-200%.
+stop_pct: 5-15, hold_days: 3-30"""
 
     try:
         if gateway_url:
@@ -1131,7 +1148,7 @@ async def _ai_pick_openrouter(tickers_ranked: list[tuple[str, float]], news_blob
         return []
     news_text  = "\n".join(news_blobs[:30])[:3000]
     ticker_str = ", ".join(f"{t}({s:.0f})" for t, s in tickers_ranked[:20])
-    prompt = f"Trending tickers: {ticker_str}\nNews: {news_text}\nPick TOP 6 momentum plays. Return JSON array only with fields: ticker, conviction(1-10), theme, name, thesis, catalyst, bull_case, bear_case, target_pct, stop_pct, hold_days."
+    prompt = f"Trending tickers: {ticker_str}\nNews: {news_text}\nPick TOP 6 momentum LONG plays. Read the crowd: skip names people are bearish on (sell/dump/crash). Let winners run — set realistic high targets (momentum plays run 50-200%+, not 20%). Return JSON array only with fields: ticker, conviction(1-10), theme, name, thesis, catalyst, bull_case, bear_case, sentiment(-1.0 sell..+1.0 buy), crowd_view(what people say), target_pct(15-300), stop_pct(5-15), hold_days(3-30)."
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post(
@@ -1162,14 +1179,47 @@ SCORE_HISTORY_FILE = TMP / "thematic_score_history.jsonl"
 _SCORE_HISTORY_MAX = 500  # max lines before pruning
 
 # Portfolio brain caps
-PORTFOLIO_MAX_POSITIONS = 15
 PORTFOLIO_MAX_PER_THEME = 3
 PORTFOLIO_MAX_SPECULATIVE = 8
+
+
+def _portfolio_max_positions() -> int:
+    """Default portfolio capacity (env THEMATIC_MAX_POSITIONS, clamped 10–20)."""
+    try:
+        return max(10, min(20, int(float(os.getenv("THEMATIC_MAX_POSITIONS", "") or 10))))
+    except Exception:
+        return 10
+
+
+# Back-compat alias for legacy references (now config-driven, default 10 not 15).
+PORTFOLIO_MAX_POSITIONS = _portfolio_max_positions()
+
+
+def _thematic_primary_email() -> str:
+    """The account whose real portfolio the thematic policy reconciles against in
+    the global 4h scan. Prefers an explicit override, else the admin who has live
+    Fidelity routing armed (thematic trades land there), else the bootstrap admin.
+    Empty string ⇒ thematic-book-only (no broker read)."""
+    e = os.getenv("THEMATIC_PRIMARY_EMAIL", "").strip().lower()
+    if e:
+        return e
+    try:
+        from web import users as _u
+        for rec in _u.list_users():
+            if rec.get("role") == "admin" and _u.get_thematic_hil(rec).get("fidelity_trade"):
+                return str(rec.get("email", "")).strip().lower()
+    except Exception:
+        pass
+    boot = [x.strip().lower() for x in os.getenv("CF_ACCESS_BOOTSTRAP_ADMIN", "").split(",") if x.strip()]
+    return boot[0] if boot else ""
 
 # Minimum raw buzz score for a signal to be considered a real buy candidate.
 # Raw scores are unbounded (NVDA at 100 Reddit mentions alone = 200pts).
 # Typical qualifying signal: 40-150. Strong signal: 150+. Very strong: 300+.
-MIN_SIGNAL_SCORE: float = 40.0
+# Raised 40→48 (2026-06-19): require more social confirmation before a name is
+# tradeable — a single-source 40-pt blip no longer clears the buy gate, cutting
+# false positives from thin one-off mentions.
+MIN_SIGNAL_SCORE: float = 48.0
 
 # Buzz decay threshold: if current scan score drops to < this fraction of
 # the score at entry, trigger a buzz_decay exit (even if stop/target not hit).
@@ -1183,6 +1233,31 @@ def _buzz_tier(score: float) -> str:
     if score >= 80:  return "Moderate"
     if score >= 40:  return "Weak"
     return "Low"
+
+
+def composite_score(conviction: int, raw_score: float, sentiment: float = 0.0) -> int:
+    """ONE 0-100 signal score (replaces the dual 'conviction X/10 · buzz Y pts').
+
+    Conviction (1-10, the analyst's considered call factoring news/insider/buzz)
+    is the backbone and contributes up to 85; live social-momentum strength
+    (unbounded raw buzz) nudges the last 15 via a saturating curve so a huge buzz
+    number can't dominate a weak thesis.
+
+    ``sentiment`` ∈ [-1, +1] is crowd POLARITY (are people bullish or saying
+    "sell/dump/crash"?). It scales the score ±25%: a heavily-shorted, "everyone's
+    bearish" name scores LOW even with huge buzz, and deep-bearish (< -0.5) is hard
+    capped so it can never clear an auto-trade gate. Range 0-100.
+    """
+    c = max(1, min(10, int(conviction or 0)))
+    rs = max(0.0, float(raw_score or 0.0))
+    s = max(-1.0, min(1.0, float(sentiment or 0.0)))
+    base = c * 8.5                                   # conv10 → 85
+    buzz_pts = 15.0 * (rs / (rs + 200.0))            # 200→7.5, 600→11.25, →15 asymptote
+    sent_mult = 1.0 + 0.25 * s                       # -1 → 0.75×, 0 → 1.0×, +1 → 1.25×
+    score = (base + buzz_pts) * sent_mult
+    if s <= -0.5:                                    # crowd says sell → never auto-tradeable
+        score = min(score, 45.0)
+    return int(round(max(0.0, min(100.0, score))))
 
 
 def _atomic_write(path: Path, data: dict) -> None:
@@ -1231,6 +1306,28 @@ def _set_status(status: str, detail: str = "") -> None:
     })
 
 
+def _scan_status_stale(status: dict, now: float | None = None) -> bool:
+    """True if a 'running' status is older than the max plausible scan time —
+    i.e. left over from a scan that crashed or was killed (process restart),
+    which would otherwise block every future scan ('already running') forever.
+
+    A non-running status is never stale. Threshold env THEMATIC_SCAN_STALE_SECONDS
+    (default 300s); a healthy scan now self-bounds well under this via per-source
+    timeouts, so >5min 'running' reliably means a dead scan.
+    """
+    if (status or {}).get("status") != "running":
+        return False
+    try:
+        age = (now if now is not None else time.time()) - float(status.get("ts", 0) or 0)
+    except Exception:
+        return True
+    try:
+        stale_after = float(os.getenv("THEMATIC_SCAN_STALE_SECONDS", "300") or 300)
+    except Exception:
+        stale_after = 300.0
+    return age >= stale_after
+
+
 def _get_historical_scores(n_scans: int = 5) -> dict[str, float]:
     """Return {ticker: decayed_avg_score} across last n_scans scan history.
 
@@ -1268,6 +1365,32 @@ def _get_historical_scores(n_scans: int = 5) -> dict[str, float]:
         return {t: round(v / max_raw * 30.0, 1) for t, v in raw.items()}
     except Exception:
         return {}
+
+
+def _brain_held_tickers(tmp_dir: Path | None = None) -> set[str]:
+    """Tickers the Holdings-Brain holds or is managing (store + pending proposals),
+    read from cheap JSON files (no broker scrape). The thematic scanner must never
+    propose BUYING these — otherwise it buys what the brain is trimming/exiting."""
+    tmp_dir = tmp_dir or TMP
+    held: set[str] = set()
+    try:
+        for bf in tmp_dir.glob("holdings_brain_*.json"):
+            try:
+                bd = json.loads(bf.read_text())
+            except Exception:
+                continue
+            if isinstance(bd, dict) and "proposals" in bd:
+                for p in bd.get("proposals", []):
+                    t = str(p.get("ticker", "")).upper().strip()
+                    if t:
+                        held.add(t)
+            elif isinstance(bd, dict):  # managed store: ticker → plan
+                for t, plan in bd.items():
+                    if isinstance(plan, dict) and str(plan.get("status")) in ("managed", "adopted"):
+                        held.add(str(t).upper().strip())
+    except Exception as e:
+        log.warning("_brain_held_tickers read failed: %s", e)
+    return held
 
 
 def _get_scan_consistency(n_scans: int = 5) -> dict[str, dict]:
@@ -1332,8 +1455,36 @@ def _get_latest_scan_scores() -> dict[str, float]:
 EXIT_LOG_FILE = TMP / "thematic_exit_log.jsonl"
 
 
+def _in_sms_quiet_hours(now: "datetime.datetime | None" = None) -> bool:
+    """True when local time is inside the thematic-SMS quiet window — so dense
+    overnight scans don't fire trade-request texts at 2-5am. Signals still
+    accumulate as pending; texts resume after the window.
+
+    Env ``THEMATIC_SMS_QUIET_HOURS='START-END'`` (24h local, wraps midnight),
+    default ``'22-8'`` (10pm-8am). Empty string disables (always text).
+    """
+    import datetime as _dt
+    spec = os.getenv("THEMATIC_SMS_QUIET_HOURS", "22-8").strip()
+    if not spec:
+        return False
+    try:
+        a, b = spec.split("-")
+        start, end = int(a), int(b)
+    except Exception:
+        return False
+    if start == end:
+        return False
+    h = (now or _dt.datetime.now()).hour
+    if start < end:
+        return start <= h < end
+    return h >= start or h < end          # window wraps midnight
+
+
 async def _notify_thematic_hil_pending(count: int) -> None:
     """Send SMS to all users who have thematic HIL + sms_notify enabled."""
+    if _in_sms_quiet_hours():
+        log.info("Thematic pending-SMS suppressed (quiet hours): %d pending", count)
+        return
     try:
         from web import users as user_store
         from scripts.sms_alerts import send_sms
@@ -1444,11 +1595,33 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
             except Exception:
                 pass
 
+        # ── Let winners run: at the target, DON'T sell — switch to a trailing stop
+        # so the position can capture the +50-200% moves these plays actually make,
+        # while still locking in the gain if it rolls over. ──────────────────────
+        trail_pct = float(pos.get("trail_pct", 20) or 20)
+        if not pos.get("trailing") and target < 999999 and price >= target:
+            pos["trailing"] = True
+            pos["peak_price"] = price
+            modified = True
+            log.info("%s hit target %.2f at %.2f — trailing %.0f%% to let it run",
+                     ticker, target, price, trail_pct)
+        if pos.get("trailing"):
+            peak = max(float(pos.get("peak_price", price) or price), price)
+            if peak != pos.get("peak_price"):
+                pos["peak_price"] = peak
+                modified = True
+            trail_stop = peak * (1 - trail_pct / 100.0)
+
         reason = None
-        if stop > 0 and price <= stop:
+        if pos.get("trailing"):
+            # Once trailing, the ONLY exit is the trailing stop (or a hard stop
+            # breach) — max-hold and buzz no longer force a sale on a live runner.
+            if stop > 0 and price <= stop:
+                reason = "stop_hit"
+            elif price <= peak * (1 - trail_pct / 100.0):
+                reason = "trailing_stop"
+        elif stop > 0 and price <= stop:
             reason = "stop_hit"
-        elif price >= target:
-            reason = "target_hit"
         elif age_days >= hold_days:
             reason = "max_hold_exceeded"
         elif age_days >= 2 and latest_scores and ticker not in latest_scores:
@@ -1551,35 +1724,99 @@ def _append_score_history(scan_ts: str, ranked: list[tuple[str, float]], breakdo
         log.warning("Score history write: %s", e)
 
 
+def _sig_score(sig: dict) -> float:
+    """Unified 0-100 score for a signal (recompute if not stamped)."""
+    s = sig.get("score")
+    if s is not None:
+        try:
+            return float(s)
+        except (TypeError, ValueError):
+            pass
+    return float(composite_score(sig.get("conviction", 7),
+                                 float(sig.get("raw_score", 0) or 0),
+                                 float(sig.get("sentiment", 0) or 0)))
+
+
+async def _notify_thematic_trade_request(email: str, sig: dict, score: float) -> None:
+    """Text a per-signal trade request + approve deep link (seamless HIL flow)."""
+    try:
+        from web import users as user_store
+        from scripts.sms_alerts import send_sms
+        rec = user_store.get_user(email) or {}
+        if user_store.get_thematic_hil(rec).get("sms_notify") is False:
+            return
+        if _in_sms_quiet_hours():
+            log.info("Thematic trade-request SMS suppressed (quiet hours): %s %s", email[:20], sig.get("ticker"))
+            return
+        phone = (rec.get("phone_number") or os.getenv("PAPER_SMS_NUMBER", "")).strip()
+        if not phone:
+            return
+        base = os.getenv("PUBLIC_DASHBOARD_URL", "https://app.agentictrader.org").rstrip("/")
+        crowd = (sig.get("crowd_view") or "").strip()
+        msg = (
+            f"Agentic Trader — trade request: {sig.get('ticker')} score {score:.0f}/100, "
+            f"target +{sig.get('target_pct', '?')}%. "
+            + (f"Crowd: {crowd[:90]}. " if crowd else "")
+            + f"Approve: {base}/app/hil?tab=approvals"
+        )
+        await asyncio.to_thread(send_sms, phone, msg)
+        log.info("Thematic trade-request SMS sent to %s (%s, score %.0f)", email[:20], sig.get("ticker"), score)
+    except Exception as e:
+        log.warning("_notify_thematic_trade_request failed: %s", e)
+
+
 async def _auto_execute_confirmed_signals(signals: list[dict]) -> None:
-    """For each user with auto_trade_paper=True, auto-approve confirmed signals above MIN_SIGNAL_SCORE."""
+    """Per user: auto-trade confirmed signals at/above their auto_trade_score.
+
+    Paper leg auto-executes when auto_trade_paper is on. The live leg never
+    auto-fires (compliance/step-up) — instead a per-signal trade-request SMS with
+    an approve link is sent so the user one-taps it through. Both gated on the
+    unified 0-100 composite score (sentiment-adjusted), not raw buzz.
+    """
     try:
         from web import users as user_store
         all_users = user_store.list_users() if hasattr(user_store, "list_users") else []
         for rec in all_users:
             hil = user_store.get_thematic_hil(rec)
-            if not hil.get("auto_trade_paper"):
+            auto_paper = bool(hil.get("auto_trade_paper"))
+            sms_on = hil.get("sms_notify") is not False
+            if not (auto_paper or sms_on):
                 continue
             email = (rec.get("email") or "").strip()
             if not email:
                 continue
-            dollar_amount = float(hil.get("dollar_amount", 500.0))
+            threshold = float(hil.get("auto_trade_score", 75.0))
             user_mock = {"email": email}
             for sig in signals:
                 if not sig.get("confirmed"):
                     continue
-                if float(sig.get("raw_score", 0) or 0) < MIN_SIGNAL_SCORE:
+                score = _sig_score(sig)
+                if score < threshold:
                     continue
-                try:
-                    body = ApproveBody(dollar_amount=dollar_amount)
-                    await approve_signal(sig["id"], body, user_mock)
-                    log.info("Auto-trade paper: approved %s for %s ($%.0f)", sig["ticker"], email, dollar_amount)
-                except HTTPException as he:
-                    log.info("Auto-trade paper skip %s for %s: %s", sig["ticker"], email, he.detail)
-                except Exception as e:
-                    log.warning("Auto-trade paper error %s for %s: %s", sig["ticker"], email, e)
+                # Paper auto-execute (adaptive sizing happens inside approve_signal).
+                if auto_paper:
+                    try:
+                        await approve_signal(sig["id"], ApproveBody(), user_mock)
+                        log.info("Auto-trade paper: approved %s for %s (score %.0f ≥ %.0f)",
+                                 sig["ticker"], email, score, threshold)
+                    except HTTPException as he:
+                        log.info("Auto-trade paper skip %s for %s: %s", sig["ticker"], email, he.detail)
+                    except Exception as e:
+                        log.warning("Auto-trade paper error %s for %s: %s", sig["ticker"], email, e)
+                # Live leg: text a trade request the user approves with one tap.
+                if sms_on:
+                    await _notify_thematic_trade_request(email, sig, score)
     except Exception as e:
         log.warning("_auto_execute_confirmed_signals: %s", e)
+
+
+def _scan_source_timeout() -> float:
+    """Per-source hard cap (s) for scan scrapers so one hung/rate-limited source
+    can't stall the whole scan. Env THEMATIC_SOURCE_TIMEOUT, default 25, floor 5."""
+    try:
+        return max(5.0, float(os.getenv("THEMATIC_SOURCE_TIMEOUT", "25") or 25))
+    except Exception:
+        return 25.0
 
 
 async def _run_scan() -> None:
@@ -1590,23 +1827,29 @@ async def _run_scan() -> None:
             source_label += " · Marketaux"
         _set_status("running", f"Scraping {source_label}...")
         try:
-            async with httpx.AsyncClient() as client:
+            _st = _scan_source_timeout()
+            def _b(coro):
+                # Bound each source: a hung/rate-limited scraper times out to a
+                # captured exception (return_exceptions=True → _safe default) instead
+                # of stalling the whole gather forever.
+                return asyncio.wait_for(coro, _st)
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
                 gather_results = await asyncio.gather(
-                    _reddit_tickers(client),          # 0
-                    _ddg_tickers(client),              # 1
-                    _yahoo_trending(client),           # 2
-                    _google_news_tickers(client),      # 3
-                    _seeking_alpha_tickers(client),    # 4
-                    _stockanalysis_trending(client),   # 5
-                    _marketaux_tickers(client),        # 6
-                    _insider_tickers(client),          # 7
-                    _trusted_twitter_tickers(client),  # 8
-                    _stocktwits_trending(client),      # 9
-                    _finviz_tickers(client),           # 10
-                    _rss_tickers(client),              # 11
-                    _alphavantage_movers(client),      # 12
-                    _yahoo_movers(client),             # 13
-                    _brave_tickers(client),            # 14
+                    _b(_reddit_tickers(client)),          # 0
+                    _b(_ddg_tickers(client)),              # 1
+                    _b(_yahoo_trending(client)),           # 2
+                    _b(_google_news_tickers(client)),      # 3
+                    _b(_seeking_alpha_tickers(client)),    # 4
+                    _b(_stockanalysis_trending(client)),   # 5
+                    _b(_marketaux_tickers(client)),        # 6
+                    _b(_insider_tickers(client)),          # 7
+                    _b(_trusted_twitter_tickers(client)),  # 8
+                    _b(_stocktwits_trending(client)),      # 9
+                    _b(_finviz_tickers(client)),           # 10
+                    _b(_rss_tickers(client)),              # 11
+                    _b(_alphavantage_movers(client)),      # 12
+                    _b(_yahoo_movers(client)),             # 13
+                    _b(_brave_tickers(client)),            # 14
                     return_exceptions=True,
                 )
 
@@ -1648,23 +1891,35 @@ async def _run_scan() -> None:
                 _set_status("done", "No tickers found")
                 return
 
-            # Collect news blobs for AI context (use fresh variable, NOT gather_results)
+            # Collect news blobs for AI context. DDGS is SYNCHRONOUS and can hang /
+            # rate-limit; calling it directly on the event loop froze scans on
+            # "Scraping..." indefinitely. Run it off-loop in a thread with a hard
+            # timeout so it can never stall the scan.
             news_blobs: list[str] = []
-            try:
+            def _collect_news(rk: list) -> list[str]:
+                out: list[str] = []
                 try:
-                    from ddgs import DDGS
-                except ImportError:
-                    from duckduckgo_search import DDGS
-                with DDGS() as ddg_inst:
-                    for ticker, _ in ranked[:10]:
-                        try:
-                            nr = list(ddg_inst.news(f"{ticker} stock news", max_results=3))
-                            for item in nr:
-                                news_blobs.append(item.get("title", ""))
-                        except Exception:
-                            pass
+                    try:
+                        from ddgs import DDGS
+                    except ImportError:
+                        from duckduckgo_search import DDGS
+                    with DDGS() as ddg_inst:
+                        for ticker, _ in rk[:10]:
+                            try:
+                                nr = list(ddg_inst.news(f"{ticker} stock news", max_results=3))
+                                for item in nr:
+                                    out.append(item.get("title", ""))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                return out
+            try:
+                news_blobs = await asyncio.wait_for(
+                    asyncio.to_thread(_collect_news, ranked), _scan_source_timeout()
+                )
             except Exception:
-                pass
+                news_blobs = []
 
             _set_status("running", "AI analyzing picks...")
             raw_picks = await _ai_pick(ranked, news_blobs)
@@ -1703,6 +1958,12 @@ async def _run_scan() -> None:
             except Exception:
                 pass
 
+            # CRITICAL: never propose BUYING a name the Holdings-Brain already holds
+            # or is managing — otherwise the scan buys what the brain is trimming/
+            # exiting (contradiction). Cheap file reads (no broker scrape), so this
+            # holds even when the live positions scrape fails.
+            _existing_portfolio |= _brain_held_tickers()
+
             # Replace all pending signals with fresh results from this scan
             data = _load_signals()
             _already_pending = {s["ticker"] for s in data["signals"] if s.get("status") == "pending"}
@@ -1710,6 +1971,43 @@ async def _run_scan() -> None:
             now = time.time()
             score_dict = dict(ranked)
             seen: set[str] = set()
+
+            # ── Portfolio-manager policy: manage-first, capacity, top-N ──────────
+            # Reconcile fresh picks against the UNIFIED portfolio (real Fidelity
+            # holdings + open thematic positions). Suppresses new generation when
+            # the book is full or strong positions are still progressing, and caps
+            # output to the top few actionable ideas. Must never break scanning →
+            # any failure falls back to the legacy "all validated picks" flow.
+            from tradingagents.portfolio import portfolio_policy as _pol
+            policy_by_ticker: dict | None = {}
+            policy_summary: dict = {}
+            try:
+                from web.api.holdings_brain import get_unified_existing
+                primary = _thematic_primary_email()
+                _unified, _acct_val = await get_unified_existing(primary)
+                _held = {p.ticker.upper() for p in _unified}
+                _cands = [
+                    _pol.Candidate(
+                        ticker=p["ticker"].upper(),
+                        conviction=int(p.get("conviction", 5)),
+                        expected_return=float(p.get("target_pct", 0) or 0),
+                        confirmed=bool(consistency.get(p["ticker"], {}).get("confirmed", False)),
+                        raw_score=float(score_dict.get(p["ticker"], 0) or 0),
+                    )
+                    for p in picks
+                    if p["ticker"].upper() not in _held and p["ticker"] not in _already_pending
+                ]
+                _result = _pol.evaluate(_unified, _cands, _pol.PolicyConfig.from_env())
+                policy_summary = {**_result.to_dict(), "account_value": _acct_val, "primary_email": primary}
+                for d in _result.decisions:
+                    if d.kind in (_pol.KIND_NEW, _pol.KIND_REPLACE):
+                        policy_by_ticker[d.ticker.upper()] = d.to_dict()
+                if _result.suppress_generation:
+                    log.info("Thematic policy: suppress new signals — %s", _result.reason)
+            except Exception as _pe:
+                log.warning("Thematic policy skipped (%s) — legacy signal flow", _pe)
+                policy_by_ticker = None  # sentinel: policy unavailable → allow all picks
+
             for pick in picks:
                 t = pick["ticker"]
                 if t in seen:
@@ -1726,6 +2024,13 @@ async def _run_scan() -> None:
                     log.debug("Signal skip: %s already pending approval", t)
                     continue
 
+                # Policy gate: when active, only the top actionable tickers pass
+                # (suppress_generation ⇒ empty dict ⇒ nothing passes this cycle).
+                if policy_by_ticker is not None and t.upper() not in policy_by_ticker:
+                    log.debug("Signal skip: %s not in policy top-N", t)
+                    continue
+                _pd = (policy_by_ticker or {}).get(t.upper(), {})
+
                 c = consistency.get(t, {})
                 is_spike = c.get("is_spike", True)   # default True = treat new as spike
                 appearances = c.get("appearances", 1)
@@ -1741,6 +2046,8 @@ async def _run_scan() -> None:
                     "catalyst":     pick["catalyst"],
                     "bull_case":    pick["bull_case"],
                     "bear_case":    pick["bear_case"],
+                    "sentiment":    pick.get("sentiment", 0.0),
+                    "crowd_view":   pick.get("crowd_view", ""),
                     "target_pct":   pick["target_pct"],
                     "stop_pct":     pick["stop_pct"],
                     "hold_days":    pick["hold_days"],
@@ -1748,10 +2055,17 @@ async def _run_scan() -> None:
                     "source":       "auto_scan",
                     "ts":           scan_ts,
                     "raw_score":    score_dict.get(t, 0),
+                    "score":        composite_score(pick["conviction"], score_dict.get(t, 0), pick.get("sentiment", 0.0)),
                     "source_breakdown": source_breakdown.get(t, {}),
                     "is_spike":     is_spike,
                     "confirmed":    confirmed,
                     "scan_appearances": appearances,
+                    # Portfolio-policy tags (NEW / REPLACE + capacity context)
+                    "policy_kind":    _pd.get("kind", "NEW"),
+                    "replace_target": _pd.get("replace_target"),
+                    "size_factor":    _pd.get("size_factor", 1.0),
+                    "capacity_note":  _pd.get("capacity_note", ""),
+                    "policy_reason":  _pd.get("reason", ""),
                 })
 
             # Trim old non-pending signals (keep last 50)
@@ -1759,6 +2073,7 @@ async def _run_scan() -> None:
             history   = [s for s in data["signals"] if s.get("status") != "pending"][-50:]
             data["signals"] = pending + history
             data["last_scan"] = scan_ts
+            data["policy"] = policy_summary
             _save_signals(data)
 
             # SMS notify users who have thematic HIL enabled + sms_notify=True
@@ -1806,8 +2121,10 @@ async def trigger_scan(
             status = json.loads(STATUS_FILE.read_text())
         except Exception:
             pass
-    if status.get("status") == "running":
+    if status.get("status") == "running" and not _scan_status_stale(status):
         return {"ok": True, "message": "Scan already running", "status": "running"}
+    if _scan_status_stale(status):
+        log.warning("Thematic scan status stale (ts=%s) — overriding, starting fresh scan", status.get("ts"))
     background_tasks.add_task(_run_scan)
     return {"ok": True, "message": "Scan started", "status": "running"}
 
@@ -1837,6 +2154,7 @@ async def get_signals(_user: dict = Depends(get_current_user)):
         sig["will_buy"]        = (rs >= MIN_SIGNAL_SCORE) and (not is_spike)
         sig["score_threshold"] = MIN_SIGNAL_SCORE
         sig["buzz_tier"]       = _buzz_tier(rs)
+        sig["score"]           = composite_score(sig.get("conviction", 7), rs, sig.get("sentiment", 0.0))  # unified 0-100
         sig["is_spike"]        = is_spike
         sig["confirmed"]       = confirmed
         sig["scan_appearances"]= appearances
@@ -1844,6 +2162,7 @@ async def get_signals(_user: dict = Depends(get_current_user)):
         "ok": True,
         "signals": pending,
         "last_scan": data.get("last_scan"),
+        "policy": data.get("policy") or {},
     }
 
 
@@ -1851,6 +2170,48 @@ def _conviction_dollar(base: float, conviction: int) -> float:
     """Scale position size by conviction: 10=1.5×, 8=1.2×, 6=1.0×, 4=0.7×, 1=0.4×."""
     scale = 0.4 + (conviction - 1) / 9.0 * 1.1  # linear 0.4→1.5
     return round(base * scale, 2)
+
+
+def _thematic_account_value(email: str) -> float:
+    """Reference portfolio value for adaptive sizing — the thematic paper book's
+    cash + deployed value (no network). Fund this book to mirror your real account
+    and sizing scales to it. 0 if unavailable (caller falls back to flat base)."""
+    try:
+        from web.api.thematic_portfolio import PAPER_STATE_FILE
+        st = json.loads(PAPER_STATE_FILE.read_text()) if PAPER_STATE_FILE.exists() else {}
+    except Exception:
+        return 0.0
+    cash = float(st.get("cash", 0) or 0)
+    deployed = sum(
+        float(p.get("entry_price", 0) or 0) * float(p.get("shares", 0) or 0)
+        for p in (st.get("positions", {}) or {}).values()
+    )
+    return round(cash + deployed, 2)
+
+
+def _adaptive_dollar(account_value: float, score: float, target_pct: float, hil: dict) -> float:
+    """Position size adaptive to portfolio AND signal quality.
+
+    dollar = account_value × base_pct × score_multiplier × target_boost, clamped to
+    [min_dollar, MAX_POSITION_PCT_OF_ACCOUNT% of account]. A high-score / high-target
+    conviction play gets a bigger slice; a marginal one gets a small probe. Replaces
+    the flat $1,000-for-everything sizing.
+    """
+    if account_value <= 0:
+        return 0.0
+    base_pct = float(hil.get("base_position_pct", 4.0)) / 100.0
+    # score 50→0.6×, 70→1.12×, 85→1.5×, 100→1.9× (clamped 0.4–2.0)
+    score_mult = max(0.4, min(2.0, 0.6 + (float(score) - 50.0) / 50.0 * 1.3))
+    # let conviction in a big runner add a little extra (target ≥80% → up to +20%)
+    target_boost = 1.0 + min(0.2, max(0.0, (float(target_pct) - 40.0) / 300.0))
+    dollar = account_value * base_pct * score_mult * target_boost
+    try:
+        from tradingagents.compliance import MAX_POSITION_PCT_OF_ACCOUNT as _CAP
+    except Exception:
+        _CAP = 10.0
+    cap = account_value * (float(_CAP) / 100.0)
+    floor = float(hil.get("min_dollar", 25.0))
+    return round(max(floor, min(dollar, cap)), 2)
 
 
 def _real_atr(ticker: str, price: float) -> float:
@@ -1916,7 +2277,7 @@ def _check_portfolio_circuit_breakers(state: dict, hil: dict, base_dollar: float
 
 
 class ApproveBody(BaseModel):
-    dollar_amount: float = 500.0
+    dollar_amount: float | None = None  # None ⇒ auto-size from HIL base × conviction
     stop_pct: float | None = None
     target_pct: float | None = None
     fidelity_trade: bool = False   # if True, also route to Fidelity live trading
@@ -1937,10 +2298,11 @@ def _fidelity_request_kwargs_from_approval(
     *,
     stop_pct: float,
     target_pct: float,
+    dollar_amount: float,
 ) -> dict:
     return {
         "ticker": ticker,
-        "dollar_amount": body.dollar_amount,
+        "dollar_amount": dollar_amount,
         "stop_pct": stop_pct,
         "target_pct": target_pct,
         "also_paper_trade": False,
@@ -1959,6 +2321,7 @@ def _fidelity_request_kwargs_from_approval(
 async def approve_signal(
     signal_id: str,
     body: ApproveBody,
+    request: Request,
     user: dict = Depends(require_admin),
 ):
     """Approve a signal: add to thematic portfolio + inject paper trade.
@@ -1980,6 +2343,35 @@ async def approve_signal(
     _urec = _us.get_user(user["email"]) or {}
     hil_settings = _us.get_thematic_hil(_urec)
     min_rr = float(hil_settings.get("min_rr", 1.5))
+    # Auto-size: use the explicit amount if supplied, else the user's HIL base
+    # (conviction scaling applied below). Lets the UI approve with one click.
+    base_dollar = (
+        float(body.dollar_amount)
+        if (body.dollar_amount and body.dollar_amount > 0)
+        else float(hil_settings.get("dollar_amount", 500.0))
+    )
+    # ── Policy sizing ──────────────────────────────────────────────────────────
+    # The scan stamped a size_factor (conviction × concentration-room against the
+    # unified portfolio). Honor it as the single allocation for BOTH the paper and
+    # the real-Fidelity leg; fall back to plain conviction scaling for legacy /
+    # un-stamped signals. An explicit user-supplied dollar_amount is taken as-is.
+    use_conviction_scale = bool(hil_settings.get("conviction_scale", True))
+    _explicit_dollar = bool(body.dollar_amount and body.dollar_amount > 0)
+    _size_factor = float(sig.get("size_factor") or 0)
+    _adaptive = bool(hil_settings.get("adaptive_sizing", True))
+    _sig_score = float(sig.get("score") or composite_score(conviction, float(sig.get("raw_score", 0) or 0), float(sig.get("sentiment", 0) or 0)))
+    _acct_val = _thematic_account_value(user["email"]) if _adaptive else 0.0
+    if _explicit_dollar or not use_conviction_scale:
+        policy_alloc = base_dollar
+    elif _adaptive and _acct_val > 0:
+        # Adaptive: size to the portfolio × signal score × target ambition.
+        policy_alloc = _adaptive_dollar(_acct_val, _sig_score, target_pct, hil_settings)
+        log.info("Adaptive size %s: acct=$%.0f score=%.0f target=%.0f%% → $%.0f",
+                 ticker, _acct_val, _sig_score, target_pct, policy_alloc)
+    elif _size_factor > 0:
+        policy_alloc = round(base_dollar * _size_factor, 2)
+    else:
+        policy_alloc = _conviction_dollar(base_dollar, conviction)
     rr = target_pct / stop_pct if stop_pct > 0 else 0
     rr_warning = None
     if rr < min_rr:
@@ -2019,6 +2411,15 @@ async def approve_signal(
             )
         spike_warning = "One-scan spike — force override active"
 
+    # ── Step-up 2FA gate for the live-Fidelity leg ────────────────────────────
+    # Paper-only approvals stay frictionless (require_admin). When this approval
+    # will place a REAL order, require the same fresh X-Step-Up-Token as every
+    # other live order endpoint — enforced BEFORE any paper/portfolio write so a
+    # missing/expired token aborts cleanly with nothing booked.
+    if body.fidelity_trade and body.execute_fidelity:
+        from web.auth import enforce_step_up
+        await enforce_step_up(request, user)
+
     # 1. Add to thematic portfolio
     from web.api.thematic_portfolio import _load, _save, _fetch_prices, DEFAULT_THEMES
     import datetime as _dt
@@ -2047,15 +2448,15 @@ async def approve_signal(
     # 2. Paper trade injection
     from web.api.thematic_portfolio import (
         PAPER_STATE_FILE, THEMATIC_TRADES_FILE, _fetch_prices as _fp,
+        _ensure_thematic_paper_state, THEMATIC_PAPER_START_CASH,
     )
     prices = _fp([ticker])
     price  = prices.get(ticker)
     result = {"portfolio_added": True, "paper_trade": None}
-    if price and body.dollar_amount > 0:
-        # Conviction-scaled position size
-        use_conviction_scale = hil_settings.get("conviction_scale", True)
-        alloc = (_conviction_dollar(body.dollar_amount, conviction)
-                 if use_conviction_scale else body.dollar_amount)
+    if price and base_dollar > 0:
+        # Conviction-scaled position size (auto-sized from HIL base when caller omits)
+        # Policy-sized allocation (conviction × concentration), computed above.
+        alloc = policy_alloc
 
         shares  = int(alloc / price)
         cost    = round(price * shares, 2)
@@ -2073,13 +2474,14 @@ async def approve_signal(
         # concurrent approvals/auto-scans can't clobber each other.
         async with _paper_state_lock:
             PAPER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _ensure_thematic_paper_state()
             state: dict = {}
             if PAPER_STATE_FILE.exists():
                 try:
                     state = json.loads(PAPER_STATE_FILE.read_text())
                 except Exception:
                     pass
-            cash    = float(state.get("cash", 10000))
+            cash    = float(state.get("cash", THEMATIC_PAPER_START_CASH))
             settled = float(state.get("settled_cash", cash))
 
             # ── Portfolio brain cap checks ────────────────────────────────────
@@ -2107,6 +2509,7 @@ async def approve_signal(
                     "signal_date": today, "score": float(conviction) * 10,
                     "alpha_tier": alpha_tier, "atr": atr,
                     "breakeven_moved": False, "peak_price": price, "scans_held": 0,
+                    "trailing": False, "trail_pct": float(hil_settings.get("trail_pct", 20.0)),
                     "partial_sold": False, "defensive_trimmed": False, "scaled_in": False,
                     "sector": "thematic", "theme": sig.get("theme", "future_tech"),
                     "entry_date": today,
@@ -2159,6 +2562,7 @@ async def approve_signal(
                         body,
                         stop_pct=stop_pct,
                         target_pct=target_pct,
+                        dollar_amount=policy_alloc,
                     )
                 )
                 fid_account = _validate_account_number(None)
@@ -2171,10 +2575,23 @@ async def approve_signal(
                         _ORDER_LOCKS_META[lock_key] = __import__("time").time()
                         fid_result = await _fidelity_thematic_trade_inner(fid_body, user, ticker, fid_account)
                     result["fidelity_trade"] = fid_result
-                    log.info("Thematic HIL Fidelity trade executed: %s $%.0f", ticker, body.dollar_amount)
+                    log.info("Thematic HIL Fidelity trade executed: %s $%.0f", ticker, policy_alloc)
             except Exception as fid_err:
                 log.warning("Thematic HIL Fidelity trade failed for %s: %s", ticker, fid_err)
                 result["fidelity_trade"] = {"error": str(fid_err)}
+
+    # Surface a REPLACE suggestion (propose-only — never auto-exits). The weakest
+    # holding the policy flagged is offered as a separate, human-approved exit
+    # through the compliance-gated Holdings Brain; approving this entry does NOT
+    # close it.
+    if sig.get("replace_target"):
+        result["replace_suggestion"] = {
+            "exit_ticker": sig["replace_target"],
+            "note": (
+                f"Policy suggests freeing capacity by exiting {sig['replace_target']}. "
+                f"Approve that exit separately in the Holdings Brain tab — it was NOT closed."
+            ),
+        }
 
     # Mark signal approved
     sig["status"] = "approved"
