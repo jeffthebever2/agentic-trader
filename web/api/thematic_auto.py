@@ -806,7 +806,7 @@ _MAX_PER_SOURCE_PTS: float = 60.0
 _QUALITY_SOURCES = frozenset({
     "trusted_twitter", "reddit", "seeking_alpha", "google_news",
     "insider", "marketaux", "twitter", "ddg", "brave", "scan_memory",
-    "google_trends", "discovery",
+    "google_trends", "discovery", "analyst",
 })
 
 
@@ -853,6 +853,7 @@ async def _merge_signals(
     brave: dict[str, int] | None = None,
     google_trends: dict[str, int] | None = None,
     discovery: dict[str, int] | None = None,
+    analyst: dict[str, int] | None = None,
 ) -> tuple[list[tuple[str, float]], dict[str, dict[str, float]]]:
     """Combine all sources into ranked list + per-source breakdown.
 
@@ -918,6 +919,8 @@ async def _merge_signals(
         _add(t, "google_trends", n * 2.0)  # rising Google-search interest (leading attention)
     for t, n in (discovery or {}).items():
         _add(t, "discovery", n * 3.0)      # price/volume breakout (no buzz needed)
+    for t, n in (analyst or {}).items():
+        _add(t, "analyst", n * 2.5)        # fresh analyst upgrade / bullish rec skew
 
     # Multi-source confirmation bonus: +3 per QUALITY source beyond the first
     # (max +15). Confirmation must come from real conviction feeds — two screener
@@ -2237,6 +2240,7 @@ async def _run_scan() -> None:
                     _b(_brave_tickers(client)),            # 14
                     _b(_google_trends_tickers(client)),    # 15
                     _b(_discovery_tickers()),              # 16
+                    _b(_analyst_tickers()),                # 17
                     return_exceptions=True,
                 )
 
@@ -2260,12 +2264,13 @@ async def _run_scan() -> None:
             brave_res       = _safe(gather_results[14], {})
             google_trends_res = _safe(gather_results[15], {})
             discovery_res   = _safe(gather_results[16], {})
+            analyst_res     = _safe(gather_results[17], {})
             twitter: dict[str, int] = {}
 
             _SOURCE_NAMES = ["reddit","ddg","yahoo","google_news","seeking_alpha",
                              "stockanalysis","marketaux","insider","trusted_twitter",
                              "stocktwits","finviz","rss_news","av_movers","yahoo_movers","brave",
-                             "google_trends","discovery"]
+                             "google_trends","discovery","analyst"]
             for i, name in enumerate(_SOURCE_NAMES):
                 if isinstance(gather_results[i], Exception):
                     log.warning("Source %s exception: %s", name, gather_results[i])
@@ -2276,6 +2281,7 @@ async def _run_scan() -> None:
                 google_news, seeking_alpha, stockanalysis, marketaux_res, insider_res,
                 trusted_twitter, stocktwits_res, finviz_res, rss_res, av_res, yahoo_movers_res,
                 brave_res, google_trends=google_trends_res, discovery=discovery_res,
+                analyst=analyst_res,
             )
             if not ranked:
                 _set_status("done", "No tickers found")
@@ -2738,6 +2744,105 @@ def _ticker_breakout(ticker: str, *, fetch=None) -> bool:
 
 def _atr_stops_enabled() -> bool:
     return os.getenv("THEMATIC_ATR_STOPS", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── Analyst signals (FMP grade changes + Finnhub recommendation trends) ──────
+# Fresh analyst upgrades and a bullish recommendation skew are real, orthogonal
+# CONFIRMATION of a thesis (Wall-Street agreeing with the crowd). Keys are
+# already configured. Pure weight helpers = testable; the live fetch is gated.
+
+def _fmp_grade_weight(actions: "list[dict]") -> int:
+    """Net recent FMP grade actions → bullish weight 0..6. Upgrades add, downgrades
+    subtract (a downgraded name is not confirmation). Pure."""
+    up = down = 0
+    for a in actions or []:
+        if not isinstance(a, dict):
+            continue
+        act = str(a.get("action", a.get("gradeAction", ""))).lower()
+        if "up" in act:        # upgrade / up
+            up += 1
+        elif "down" in act:    # downgrade / down
+            down += 1
+    return max(0, min((up - down) * 2, 6))
+
+
+def _recommendation_weight(trend: "dict") -> int:
+    """Finnhub recommendation bucket {strongBuy,buy,hold,sell,strongSell} → bullish
+    weight 0..6 from the net buy-vs-sell skew. Pure."""
+    if not isinstance(trend, dict):
+        return 0
+    def _g(k):
+        try:
+            return max(0.0, float(trend.get(k, 0) or 0))
+        except (TypeError, ValueError):
+            return 0.0
+    sb, b, h, s, ss = _g("strongBuy"), _g("buy"), _g("hold"), _g("sell"), _g("strongSell")
+    total = sb + b + h + s + ss
+    if total <= 0:
+        return 0
+    net_frac = ((2 * sb + b) - (2 * ss + s)) / (2 * total)   # ~[-1, 1]
+    return max(0, min(int(round(net_frac * 6)), 6))
+
+
+def _analyst_enabled() -> bool:
+    return os.getenv("THEMATIC_ANALYST", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _fetch_fmp_grades(ticker: str) -> "list[dict]":
+    """Recent FMP analyst grade actions for a ticker. [] on any failure / no key."""
+    key = os.getenv("FMP_API_KEY", "").strip()
+    if not key:
+        return []
+    try:
+        r = httpx.get(f"https://financialmodelingprep.com/api/v3/grade/{ticker}",
+                      params={"apikey": key}, timeout=10.0)
+        data = r.json()
+        return data[:10] if isinstance(data, list) else []
+    except Exception as e:
+        log.debug("fmp grades %s: %s", ticker, e)
+        return []
+
+
+def _fetch_finnhub_recs(ticker: str) -> "dict":
+    """Latest Finnhub recommendation-trend bucket for a ticker. {} on failure."""
+    key = os.getenv("FINNHUB_API_KEY", "").strip()
+    if not key:
+        return {}
+    try:
+        r = httpx.get("https://finnhub.io/api/v1/stock/recommendation",
+                      params={"symbol": ticker, "token": key}, timeout=10.0)
+        data = r.json()
+        return data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+    except Exception as e:
+        log.debug("finnhub recs %s: %s", ticker, e)
+        return {}
+
+
+async def _analyst_tickers(*, universe=None, fetch_grades=None, fetch_recs=None) -> "dict[str, int]":
+    """Source: bullish analyst confirmation as {ticker: weight} = FMP-grade +
+    Finnhub-rec weight. Disabled unless THEMATIC_ANALYST. Fetchers default to the
+    live endpoints (graceful []/{} without keys); injected in tests."""
+    if not _analyst_enabled():
+        return {}
+    fetch_grades = fetch_grades or _fetch_fmp_grades
+    fetch_recs = fetch_recs or _fetch_finnhub_recs
+    universe = universe if universe is not None else _discovery_universe()
+    out: dict[str, int] = {}
+    for tk in universe:
+        w = 0
+        try:
+            w += _fmp_grade_weight(await asyncio.to_thread(fetch_grades, tk) or [])
+        except Exception:
+            pass
+        try:
+            w += _recommendation_weight(await asyncio.to_thread(fetch_recs, tk) or {})
+        except Exception:
+            pass
+        if w > 0:
+            norm = _norm_ticker(tk)
+            if norm:
+                out[norm] = min(w, 8)
+    return out
 
 
 # ── Discovery scanner (no-buzz price/volume breakouts — the IREN-$5 solver) ───
