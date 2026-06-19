@@ -1471,9 +1471,26 @@ def _size_fidelity_position(
       - Minimum 1 share
     """
     from tradingagents.compliance import MAX_POSITION_PCT_OF_ACCOUNT
+    import math
+
+    # Fail closed on any non-finite / non-positive core input. A NaN slips past
+    # 'price <= 0' (NaN compares False) and would reach int(alloc/price) →
+    # int(NaN) → ValueError, crashing the real-money sizer. No trade on garbage.
+    def _finite(x) -> float | None:
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return v if math.isfinite(v) else None
+
+    av, cash, px = _finite(account_value), _finite(available_cash), _finite(price)
+    if av is None or cash is None or px is None or av <= 0 or cash <= 0 or px <= 0:
+        return 0, 0.0
+    account_value, available_cash, price = av, cash, px
+
     max_alloc = account_value * MAX_POSITION_PCT_OF_ACCOUNT / 100
 
-    if dollar_amount and dollar_amount > 0:
+    if dollar_amount and dollar_amount > 0 and math.isfinite(dollar_amount):
         alloc = dollar_amount
     elif pct_of_account and pct_of_account > 0:
         alloc = account_value * pct_of_account / 100
