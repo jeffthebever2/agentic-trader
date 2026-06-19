@@ -1116,11 +1116,33 @@ def _validate_pick(pick: Any) -> dict | None:
     }
 
 
-_VALID_THEMES = frozenset({
-    "ai_leaders", "ai_infrastructure", "optical_network", "memory_hbm",
-    "datacenter_power", "nuclear_energy", "space_defense", "quantum_future",
-    "critical_minerals", "reshoring", "fintech_consumer", "future_tech",
-})
+# Common LLM theme variants → the canonical THEMES_MAP key, so a mis-labelled
+# theme keeps its real sector (which drives the per-theme concentration cap)
+# instead of collapsing into 'future_tech'. Unmapped/unknown still → future_tech.
+_THEME_ALIASES = {
+    "ai": "ai_leaders", "artificial_intelligence": "ai_leaders", "ai_stocks": "ai_leaders",
+    "semis": "ai_infrastructure", "semiconductors": "ai_infrastructure", "chips": "ai_infrastructure",
+    "semiconductor": "ai_infrastructure", "gpu": "ai_infrastructure",
+    "optical": "optical_network", "networking": "optical_network",
+    "memory": "memory_hbm", "hbm": "memory_hbm", "dram": "memory_hbm",
+    "datacenter": "datacenter_power", "data_center": "datacenter_power", "power": "datacenter_power",
+    "nuclear": "nuclear_energy", "uranium": "nuclear_energy", "smr": "nuclear_energy",
+    "defense": "space_defense", "space": "space_defense", "aerospace": "space_defense",
+    "quantum": "quantum_future", "quantum_computing": "quantum_future",
+    "minerals": "critical_minerals", "rare_earth": "critical_minerals", "rare_earths": "critical_minerals",
+    "lithium": "critical_minerals", "mining": "critical_minerals",
+    "reshoring": "reshoring", "onshoring": "reshoring", "manufacturing": "reshoring",
+    "fintech": "fintech_consumer", "consumer": "fintech_consumer", "payments": "fintech_consumer",
+}
+
+
+def _canonical_theme(theme: object) -> str:
+    """Fold an LLM-supplied theme to a canonical THEMES_MAP key, via alias map;
+    unknown → 'future_tech'."""
+    t = str(theme or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if t in _VALID_THEMES:
+        return t
+    return _THEME_ALIASES.get(t, "future_tech")
 
 
 # Hard negative-catalyst terms. If a pick's OWN crowd_view/catalyst/thesis text
@@ -1199,8 +1221,7 @@ def _sanitize_picks(picks: object, allowed_tickers: set[str]) -> list[dict[str, 
         q["target_pct"] = _clamp_num(p.get("target_pct"), 15, 60, 300)
         q["stop_pct"]   = _clamp_num(p.get("stop_pct"), 5, 10, 15)
         q["hold_days"]  = _clamp_num(p.get("hold_days"), 3, 10, 30, as_int=True)
-        if q.get("theme") not in _VALID_THEMES:
-            q["theme"] = "future_tech"
+        q["theme"] = _canonical_theme(q.get("theme"))
         # Weak-catalyst cap: a pick with no concrete catalyst (generic filler) is
         # momentum-on-hope — cap conviction at 6 so it can't size up like a real
         # thesis. Deterministic enforcement of the prompt's catalyst rule.
