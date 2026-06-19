@@ -2725,6 +2725,28 @@ def _ticker_breakout(ticker: str, *, fetch=None) -> bool:
     return bool(sig.get("is_breakout"))
 
 
+def _atr_stops_enabled() -> bool:
+    return os.getenv("THEMATIC_ATR_STOPS", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _atr_stop_pct(price: float, atr: float, base_pct: float, *,
+                  k: float = 2.0, floor_pct: float = 4.0, cap_pct: float = 15.0) -> float:
+    """Volatility-aware stop distance (%). A flat % stop is simultaneously too
+    tight on a high-ATR small-cap (shaken out of a winner) and too wide on a
+    low-ATR mega-cap (oversized loss). Size the stop to k×ATR, clamped to
+    [floor_pct, cap_pct]. Falls back to base_pct when ATR/price are unusable, so a
+    missing ATR never changes behavior. Pure + testable."""
+    import math as _m
+    try:
+        p, a = float(price), float(atr)
+    except (TypeError, ValueError):
+        return base_pct
+    if not (_m.isfinite(p) and _m.isfinite(a)) or p <= 0 or a <= 0:
+        return base_pct
+    atr_pct = (k * a / p) * 100.0
+    return max(floor_pct, min(atr_pct, cap_pct))
+
+
 def _real_atr(ticker: str, price: float) -> float:
     """Compute approximate 14-day ATR from yfinance. Falls back to 2% of price.
 
@@ -3008,14 +3030,15 @@ async def approve_signal(
 
         shares  = int(alloc / price)
         cost    = round(price * shares, 2)
-        stop    = round(price * (1 - stop_pct / 100), 4)
-        target  = round(price * (1 + target_pct / 100), 4)
-        now_iso = _dt.datetime.now().isoformat(timespec="seconds")
-        today   = _dt.date.today().isoformat()
-
         # Fetch ATR before acquiring lock (IO-bound, no state dependency)
         loop = asyncio.get_running_loop()
         atr = await loop.run_in_executor(None, _real_atr, ticker, price)
+        # Volatility-aware stop (env THEMATIC_ATR_STOPS, default off → flat %).
+        _eff_stop_pct = _atr_stop_pct(price, atr, stop_pct) if _atr_stops_enabled() else stop_pct
+        stop    = round(price * (1 - _eff_stop_pct / 100), 4)
+        target  = round(price * (1 + target_pct / 100), 4)
+        now_iso = _dt.datetime.now().isoformat(timespec="seconds")
+        today   = _dt.date.today().isoformat()
         alpha_tier = "A+" if conviction >= 9 else "A" if conviction >= 7 else "B" if conviction >= 5 else "C"
 
         # A11/P8: hold lock for entire read-modify-write of paper state so
