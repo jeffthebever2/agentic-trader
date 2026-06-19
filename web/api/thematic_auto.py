@@ -1541,16 +1541,26 @@ def _get_historical_scores(n_scans: int = 5) -> dict[str, float]:
         for weight, line in zip(weights, recent_lines):
             try:
                 rec = json.loads(line)
-                for t, s in rec.get("ranked", []):
-                    ticker_scores.setdefault(t, []).append(s * weight)
             except Exception:
-                continue
+                continue  # torn / non-JSON line → skip
+            for entry in rec.get("ranked", []) or []:
+                try:
+                    sym, raw_s = entry[0], entry[1]
+                    val = float(raw_s) * weight
+                except (TypeError, ValueError, IndexError, KeyError):
+                    continue  # skip the bad ENTRY, keep good ones on this line
+                if sym:
+                    ticker_scores.setdefault(str(sym), []).append(val)
 
         # Weighted average, normalized so max historical score ≈ 30pt bonus cap
         if not ticker_scores:
             return {}
         raw = {t: sum(scores) / n for t, scores in ticker_scores.items()}
-        max_raw = max(raw.values()) if raw else 1.0
+        max_raw = max(raw.values()) if raw else 0.0
+        # All-zero history (every ranked score 0) → no bonus, and avoid a
+        # divide-by-zero rather than relying on the outer except to mask it.
+        if max_raw <= 0:
+            return {}
         # Scale so the strongest historically-trending ticker gets ~30pts bonus
         return {t: round(v / max_raw * 30.0, 1) for t, v in raw.items()}
     except Exception:
