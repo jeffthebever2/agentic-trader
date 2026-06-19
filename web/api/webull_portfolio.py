@@ -9,7 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from tradingagents.compliance import (
     LIVE_TRADING_HARD_BLOCKED,
     live_trading_enabled,
@@ -109,6 +109,30 @@ class PlaceOrderRequest(BaseModel):
     bid: Optional[float] = None
     ask: Optional[float] = None
     market_open: Optional[bool] = None
+
+    # Input bounds (real money). Compliance (validate_live_order) also rejects
+    # qty<=0 and market BUYs, but reject obvious garbage at the model boundary too.
+    @field_validator("action")
+    @classmethod
+    def _action_valid(cls, v: str) -> str:
+        norm = v.strip().upper()
+        if norm not in ("BUY", "SELL"):
+            raise ValueError("action must be BUY or SELL")
+        return norm
+
+    @field_validator("qty")
+    @classmethod
+    def _qty_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("qty must be > 0")
+        return v
+
+    @field_validator("price")
+    @classmethod
+    def _price_positive(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0:
+            raise ValueError("price must be > 0 when provided")
+        return v
 
 
 def _webull_compliance_order(req: PlaceOrderRequest) -> dict:
