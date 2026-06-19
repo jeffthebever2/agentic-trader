@@ -2402,17 +2402,32 @@ def _thematic_account_value(email: str) -> float:
     """Reference portfolio value for adaptive sizing — the thematic paper book's
     cash + deployed value (no network). Fund this book to mirror your real account
     and sizing scales to it. 0 if unavailable (caller falls back to flat base)."""
+    import math as _m
     try:
         from web.api.thematic_portfolio import PAPER_STATE_FILE
         st = json.loads(PAPER_STATE_FILE.read_text()) if PAPER_STATE_FILE.exists() else {}
     except Exception:
         return 0.0
-    cash = float(st.get("cash", 0) or 0)
-    deployed = sum(
-        float(p.get("entry_price", 0) or 0) * float(p.get("shares", 0) or 0)
-        for p in (st.get("positions", {}) or {}).values()
-    )
-    return round(cash + deployed, 2)
+
+    def _f(x) -> float:
+        # Garbage/non-finite values in state must not crash money sizing — treat
+        # them as 0 (caller falls back to the flat base size).
+        try:
+            v = float(x or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return v if _m.isfinite(v) else 0.0
+
+    try:
+        cash = _f(st.get("cash", 0))
+        deployed = sum(
+            _f(p.get("entry_price", 0)) * _f(p.get("shares", 0))
+            for p in (st.get("positions", {}) or {}).values()
+        )
+    except Exception:
+        return 0.0
+    val = round(cash + deployed, 2)
+    return val if (_m.isfinite(val) and val >= 0) else 0.0
 
 
 def _adaptive_dollar(account_value: float, score: float, target_pct: float, hil: dict) -> float:
