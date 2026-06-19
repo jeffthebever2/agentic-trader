@@ -1236,6 +1236,12 @@ def _sanitize_picks(picks: object, allowed_tickers: set[str]) -> list[dict[str, 
             q["sentiment"] = min(float(q["sentiment"]), -0.5)
             q["conviction"] = min(int(q["conviction"]), 4)
             q["red_flag"] = True
+        # Coerce/bound free-text so a malformed (non-str / huge) field can't bloat
+        # a proposal or break downstream rendering/serialization.
+        q["name"] = str(q.get("name", tk) or tk)[:80]
+        for _f in ("thesis", "catalyst", "bull_case", "bear_case", "crowd_view"):
+            if _f in q:
+                q[_f] = str(q[_f])[:500]
         out.append(q)
     # De-duplicate by ticker: the model sometimes lists the same name twice, which
     # would seed two proposals/trades for one ticker. Keep the highest-conviction
