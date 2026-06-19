@@ -794,6 +794,13 @@ async def _yahoo_movers(client: httpx.AsyncClient) -> dict[str, int]:
 
 # ── Merge + rank ──────────────────────────────────────────────────────────────
 
+# Max points any single source may contribute to one ticker's raw score. Bounds
+# single-feed spikes so confirmation breadth, not one source's volume, drives the
+# score. Multi-source / scan-memory / combo bonuses are added separately and are
+# intentionally exempt from this cap.
+_MAX_PER_SOURCE_PTS: float = 60.0
+
+
 def _norm_ticker(raw: object) -> str:
     """Canonical ticker key for cross-source merging: upper-case, stripped of
     whitespace and a leading cashtag '$'. Ensures 'nvda', 'NVDA' and '$NVDA' from
@@ -836,8 +843,18 @@ async def _merge_signals(
         ticker = _norm_ticker(ticker)
         if not ticker:
             return
-        scores[ticker] = scores.get(ticker, 0.0) + pts
-        breakdown.setdefault(ticker, {})[source] = breakdown.get(ticker, {}).get(source, 0.0) + pts
+        # Cap each source's TOTAL per-ticker contribution. One viral feed (a Reddit
+        # thread spamming a ticker 500×) would otherwise dominate the raw score and
+        # clear the buy gate on a single source's volume. Capping makes breadth
+        # (confirmation across many sources) win over one source's raw count.
+        pts = max(0.0, float(pts or 0))
+        prev = breakdown.get(ticker, {}).get(source, 0.0)
+        new_total = min(prev + pts, _MAX_PER_SOURCE_PTS)
+        delta = new_total - prev
+        if delta <= 0:
+            return
+        scores[ticker] = scores.get(ticker, 0.0) + delta
+        breakdown.setdefault(ticker, {})[source] = new_total
         source_presence.setdefault(ticker, set()).add(source)
 
     for t, n in reddit.items():
