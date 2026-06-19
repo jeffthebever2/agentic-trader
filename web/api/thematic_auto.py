@@ -2501,9 +2501,22 @@ async def get_signals(_user: dict = Depends(get_current_user)):
         is_spike  = sig.get("is_spike", True)
         confirmed = sig.get("confirmed", False)
         appearances = sig.get("scan_appearances", 1)
-        # will_buy: must clear score threshold AND be confirmed (2+ scans)
+        # Breakout fast-lane (IREN-class): a genuine new-high-on-volume breakout is
+        # a real-time PRICE confirmation, so it releases a spike's BUY immediately
+        # instead of waiting ~8h for a 2nd scan — only when enabled
+        # (THEMATIC_BREAKOUT_CONFIRM, default off). Still HIL-approved; this only
+        # flips will_buy on a name that already clears the score gate.
+        breakout_ok = False
+        if is_spike and rs >= MIN_SIGNAL_SCORE and _breakout_confirm_enabled():
+            try:
+                breakout_ok = _ticker_breakout(str(sig.get("ticker", "")))
+            except Exception:
+                breakout_ok = False
+        if breakout_ok:
+            sig["breakout_confirmed"] = True
+        # will_buy: clear score threshold AND (confirmed by 2+ scans OR a price breakout)
         # Spike-only signals are shown but flagged — user can still approve manually
-        sig["will_buy"]        = (rs >= MIN_SIGNAL_SCORE) and (not is_spike)
+        sig["will_buy"]        = (rs >= MIN_SIGNAL_SCORE) and (not is_spike or breakout_ok)
         sig["score_threshold"] = MIN_SIGNAL_SCORE
         sig["buzz_tier"]       = _buzz_tier(rs)
         sig["score"]           = composite_score(sig.get("conviction", 7), rs, sig.get("sentiment", 0.0))  # unified 0-100
@@ -2601,6 +2614,82 @@ def _adaptive_dollar(account_value: float, score: float, target_pct: float, hil:
     cap = account_value * (float(_CAP) / 100.0)
     floor = float(hil.get("min_dollar", 25.0))
     return round(max(floor, min(dollar, cap)), 2)
+
+
+# ── Breakout confirmation (IREN-class catalyst-mover fast-lane) ──────────────
+# Missed-trade analysis: the multi-scan (is_spike) gate enters catalyst-gap
+# movers ~8h late, near the top of the first leg, and never finds the cheap,
+# no-buzz base. A genuine price breakout (new high on heavy relative volume) is a
+# real-time confirmation the move is happening — a *price* substitute for the
+# *social* confirmation gate, orthogonal to buzz. Used to optionally release a
+# spike's BUY immediately (still HIL-approved). Pure helper = testable offline.
+
+def _breakout_signal(
+    highs: "list[float]",
+    closes: "list[float]",
+    volumes: "list[float]",
+    *,
+    rvol_min: float = 3.0,
+    lookback: int = 20,
+) -> dict:
+    """Detect a volume breakout to a new high from recent daily bars (oldest →
+    newest, today last). Returns {is_breakout, rvol, new_high}. A breakout needs
+    BOTH a new `lookback`-day high close AND relative volume >= rvol_min, so a
+    quiet drift to a high (no volume) and a high-volume churn that isn't a new
+    high are both rejected (keeps the RGTI-style froth out)."""
+    import math as _m
+
+    def _clean(xs):
+        return [float(x) for x in (xs or [])
+                if isinstance(x, (int, float)) and _m.isfinite(float(x))]
+
+    h, c, v = _clean(highs), _clean(closes), _clean(volumes)
+    if min(len(h), len(c), len(v)) < lookback + 1:
+        return {"is_breakout": False, "rvol": 0.0, "new_high": False}
+    today_close, today_vol = c[-1], v[-1]
+    prior_vol = v[-(lookback + 1):-1]
+    avg_vol = sum(prior_vol) / len(prior_vol) if prior_vol else 0.0
+    rvol = (today_vol / avg_vol) if avg_vol > 0 else 0.0
+    prior_high = max(h[-(lookback + 1):-1])
+    new_high = bool(prior_high > 0 and today_close >= prior_high)
+    is_breakout = bool(rvol >= rvol_min and new_high)
+    return {"is_breakout": is_breakout, "rvol": round(rvol, 2), "new_high": new_high}
+
+
+def _breakout_confirm_enabled() -> bool:
+    return os.getenv("THEMATIC_BREAKOUT_CONFIRM", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _fetch_daily_bars(ticker: str, period: str = "3mo") -> dict:
+    """Best-effort daily OHLCV for breakout detection. {} on any failure so the
+    caller degrades to the normal social gate. Isolated + injectable for tests."""
+    try:
+        import yfinance as yf
+        df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+        if df is None or df.empty:
+            return {}
+        return {
+            "highs": [float(x) for x in df["High"].squeeze().tolist()],
+            "closes": [float(x) for x in df["Close"].squeeze().tolist()],
+            "volumes": [float(x) for x in df["Volume"].squeeze().tolist()],
+        }
+    except Exception as e:
+        log.debug("breakout bars fetch failed for %s: %s", ticker, e)
+        return {}
+
+
+def _ticker_breakout(ticker: str, *, fetch=None) -> bool:
+    """True if `ticker` is currently breaking out (new high on heavy volume).
+    Disabled unless THEMATIC_BREAKOUT_CONFIRM. Network-isolated via `fetch`."""
+    if not _breakout_confirm_enabled():
+        return False
+    fetch = fetch or _fetch_daily_bars
+    try:
+        bars = fetch(ticker) or {}
+    except Exception:
+        return False
+    sig = _breakout_signal(bars.get("highs", []), bars.get("closes", []), bars.get("volumes", []))
+    return bool(sig.get("is_breakout"))
 
 
 def _real_atr(ticker: str, price: float) -> float:
