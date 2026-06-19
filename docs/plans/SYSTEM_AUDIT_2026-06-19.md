@@ -38,7 +38,7 @@ main thread + 5 parallel research/audit subagents.
 5. **A scoring bug**: `scan_memory` (a ticker's own history) counted as a live "source,"
    letting a single-feed name dodge the single-source dampener. *(Fixed.)*
 
-### Implemented this session (all tested, suite 742→908 green over the campaign)
+### Implemented this session (all tested, suite 742→923 green over the campaign)
 | Fix | Commit | Effect |
 |---|---|---|
 | scan_memory not live-confirmation in solo dampener | `7f578a21` | correct false-positive suppression |
@@ -46,6 +46,9 @@ main thread + 5 parallel research/audit subagents.
 | **IREN breakout fast-lane** (RVOL+new-high releases spike, OFF by default) | `753ce873` | catches day-0 catalyst movers, HIL-approved |
 | buzz exits require price confirmation | `4b6f44f0` | stops dumping green winners on attention fade |
 | max-hold converts green winner → trailing | `35ff475b` | stops truncating the right tail |
+| **ATR-aware (vol-scaled) stops** (P0, OFF by default) | `626a5285` | stops sized to 2×ATR — ends shake-outs / oversized losses |
+| **Paper-only fast exit loop** (P0 safe-portion, OFF by default) | `0f193366` | enforces stops off the 4h cadence; live exits still HIL-proposed |
+| Sentiment/signal **scenario validation suite** | `1c645d8f` | end-to-end proof of correct reaction to buy/sell/hype |
 
 ### Expected impact (reasoned, not backtested)
 - **Fewer false positives**: scan_memory + quality-only confirmation + source cap +
@@ -141,8 +144,9 @@ fundamentals, TAAPI, pytrends (archived → trendspyg), SimilarWeb/Sensor Tower.
 | Compliance kill-chain (limit-only, caps, trusted quote, 2FA, Roth block) | **Strong** — untouched + tripwire-locked all campaign | High |
 | Scoring/ranking correctness | **Good** — audited, 1 bug fixed, no double-count | Med-High |
 | Signal coverage / opportunity capture | **Improved** — breakout + trendspyg; base-miss remains | Med |
-| **Exit enforcement (live path)** | **WEAK** — stops checked ≤6×/day, no intraday loop, no portfolio breaker on the live book | **Low** |
-| Position sizing | **Weak** — not vol-adjusted; ATR ignored | Low-Med |
+| Exit enforcement (paper book) | **Improved** — opt-in 15-min `_thematic_exit_loop` (`0f193366`) enforces stops off the 4h cadence | Med |
+| **Exit enforcement (live broker book)** | **WEAK** — still no *autonomous* live stop (by design — propose-only); exits are HIL-proposed, not auto-executed | **Low** (until §5 decision) |
+| Position sizing / stops | **Improved** — ATR-aware stops (`626a5285`, opt-in); sizing still not vol-targeted | Med |
 | Fault tolerance | **Strong** — NaN/garbage fail-closed across money path (campaign) | High |
 
 ### The one thing that needs YOUR decision (not auto-done, by design)
@@ -168,12 +172,18 @@ Recommend **(a)**.
 - **No live backtest** — all impact estimates are reasoned, not measured.
 
 ## 7. Prioritized Implementation Plan
-1. **(P0) Paper-only fast exit loop** (5–15 min, market-hours) → enforces stops; propose live exits. *[your decision]*
-2. **(P0) ATR-scale stops + risk-based sizing** — `stop = entry − k·ATR`; `shares = risk_budget /(entry−stop)`. ATR already fetched.
-3. **(P1) Enable + validate** breakout fast-lane (`THEMATIC_BREAKOUT_CONFIRM`) and trendspyg (`THEMATIC_GOOGLE_TRENDS`) in paper first.
-4. **(P1) Wire FMP grades + Finnhub rec-trends + FINRA short-volume** as new `_scan_*` sources.
-5. **(P2) Options-flow feed** (Tradier) + **8-K hard-catalyst fast-lane** + **regime gate** (put/call or breadth).
-6. **(P2) Trading-day max-hold** + breakeven-stop ratchet + lower the 25% concentration ceiling for social-momentum names.
-7. **(P3) Price/volume *discovery* universe scan** to catch no-buzz bases (the IREN-$5 blind spot).
+1. ✅ **(P0) Paper-only fast exit loop** — DONE (`0f193366`, `THEMATIC_EXIT_LOOP`, default off). Enable in paper to validate.
+2. ✅ **(P0) ATR-scale stops** — DONE (`626a5285`, `THEMATIC_ATR_STOPS`, default off). **Still TODO:** risk-based *sizing* (`shares = risk_budget/(entry−stop)`) — sizing remains $/conviction-based.
+3. **(P0, YOUR DECISION)** autonomous **live** exit execution — deliberately not built; see §5 (a/b/c).
+4. ✅ **(P1) Breakout fast-lane + trendspyg** — DONE & tested; **enable + validate in paper** (`THEMATIC_BREAKOUT_CONFIRM`, `THEMATIC_GOOGLE_TRENDS`).
+5. **(P1) Wire FMP grades + Finnhub rec-trends** as new `_scan_*` sources (keys already held). **NOTE:** FINRA short-volume / options-flow are **risk overlays, not buzz sources** — wire as a per-pick risk adjustment, NOT as additive merge score (heavy shorting must not *raise* a buzz rank).
+6. **(P2) Regime gate** (put/call or breadth — no auto-buy in risk-off) + **8-K hard-catalyst fast-lane** + breakeven-stop ratchet + lower the 25% concentration ceiling for social-momentum names + **trading-day** (not calendar-day) max-hold.
+7. **(P3) Price/volume *discovery* universe scan** to catch no-buzz bases (the IREN-$5 blind spot — the one miss class a buzz scanner structurally cannot solve).
+
+## 8. Re-audit (post-implementation pass)
+- Full suite **923 green** + frontend tsc/vite build clean after all changes.
+- Re-traced scoring: no double-count; confirmation bonus still pre-scan-memory; ATR-stop and exit changes are flag-gated (default off) so **live behavior is unchanged until explicitly enabled** — zero-regression by construction.
+- New scenario suite (`1c645d8f`) is the closest available *evidence* of correct market-reaction; it is **not** a market backtest (impossible in this environment) — that limitation stands.
+- Remaining high-confidence work is either user-decision-gated (#3), a known larger integration (#5 risk-overlay, #6 regime gate), or environment-limited (live backtest, #7 discovery scan). No further *silent* high-confidence code fix was found in the audited scope.
 
 — End of audit. Conclusions are evidence/reasoning-based, not certainties.
