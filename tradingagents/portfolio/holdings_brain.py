@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import re
 import tempfile
@@ -145,7 +146,15 @@ def _min_stop_distance_pct(conviction: int) -> float:
         base = float(os.getenv("HOLDINGS_BRAIN_MIN_STOP_PCT", "8"))
     except ValueError:
         base = 8.0
-    c = max(1, min(10, int(conviction)))
+    if not math.isfinite(base) or base < 0:
+        base = 8.0
+    # Conviction may arrive malformed (None / NaN / "n/a") — coerce to [1,10]
+    # rather than crashing stop-setting and leaving a holding unprotected.
+    try:
+        c = int(conviction)
+    except (TypeError, ValueError):
+        c = 1
+    c = max(1, min(10, c))
     return round(base + max(0, c - 5) * 1.6, 2)  # conv5→base, conv10→base+8
 
 

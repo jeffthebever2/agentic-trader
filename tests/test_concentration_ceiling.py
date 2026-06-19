@@ -3,7 +3,10 @@ and fail safe on malformed input rather than crashing the trim decision (a bad
 LLM conviction would otherwise blow up the whole holdings-brain cycle)."""
 import math
 
-from tradingagents.portfolio.holdings_brain import _concentration_ceiling as cc
+from tradingagents.portfolio.holdings_brain import (
+    _concentration_ceiling as cc,
+    _min_stop_distance_pct as msd,
+)
 
 
 def test_low_conviction_returns_base():
@@ -36,3 +39,20 @@ def test_malformed_base_cap_fails_safe():
     for bad in (None, float("inf"), float("nan")):
         out = cc(8, bad)
         assert math.isfinite(out) and out >= 0
+
+
+# ── _min_stop_distance_pct — same conviction-coercion contract ───────────────
+def test_min_stop_distance_scales_with_conviction(monkeypatch):
+    monkeypatch.setenv("HOLDINGS_BRAIN_MIN_STOP_PCT", "8")
+    assert msd(5) == 8.0          # base at conv ≤ 5
+    assert msd(10) == 16.0        # base + 8 at conv 10
+    assert msd(1) == 8.0
+
+
+def test_min_stop_distance_clamps_and_fails_safe(monkeypatch):
+    monkeypatch.setenv("HOLDINGS_BRAIN_MIN_STOP_PCT", "8")
+    assert msd(99) == msd(10)
+    # malformed conviction must not raise — falls back to base (conv 1)
+    for bad in (None, float("nan"), "n/a", object()):
+        out = msd(bad)
+        assert math.isfinite(out) and out == 8.0
