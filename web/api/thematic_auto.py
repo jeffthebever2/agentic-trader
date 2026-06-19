@@ -2447,16 +2447,38 @@ def _real_atr(ticker: str, price: float) -> float:
 
 
 def _check_portfolio_circuit_breakers(state: dict, hil: dict, base_dollar: float) -> tuple[bool, str]:
-    """Return (allowed, reason). Blocks trade if circuit breakers tripped."""
-    cash       = float(state.get("cash", 10000))
-    settled    = float(state.get("settled_cash", cash))
-    positions  = state.get("positions", {})
+    """Return (allowed, reason). Blocks trade if circuit breakers tripped.
 
-    # Portfolio heat: total deployed value vs total cash
-    total_value = sum(
-        float(p.get("entry_price", 0)) * float(p.get("shares", 0))
-        for p in positions.values()
-    )
+    FAILS CLOSED: if core account state is non-finite/unreadable, block the trade
+    rather than silently skipping the breakers. A NaN would make 'account_value
+    > 0' / 'start_cash > 0' evaluate False (NaN compares False) and disable the
+    heat and daily-loss breakers — the wrong direction for a safety gate."""
+    import math as _m
+
+    def _f(x, default=None):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return default
+        return v if _m.isfinite(v) else default
+
+    cash = _f(state.get("cash", 10000))
+    if cash is None:
+        return False, "Circuit breaker: account cash is unreadable — blocking entry"
+    settled = _f(state.get("settled_cash", cash))
+    if settled is None:
+        return False, "Circuit breaker: settled cash is unreadable — blocking entry"
+    positions = state.get("positions", {}) or {}
+
+    # Portfolio heat: total deployed value vs total cash. A single non-finite
+    # position value fails closed rather than silently disabling the heat gate.
+    total_value = 0.0
+    for p in positions.values():
+        ep = _f(p.get("entry_price", 0), default=None)
+        sh = _f(p.get("shares", 0), default=None)
+        if ep is None or sh is None:
+            return False, "Circuit breaker: a position has unreadable price/shares — blocking entry"
+        total_value += ep * sh
     account_value = cash + total_value
     if account_value > 0:
         heat_pct = total_value / account_value * 100
@@ -2469,12 +2491,14 @@ def _check_portfolio_circuit_breakers(state: dict, hil: dict, base_dollar: float
     # Closed trades live in state["trades"] keyed by exit_time/pnl. Read from there.
     import datetime as _dtcb
     today = _dtcb.date.today().isoformat()
-    start_cash = float(state.get("starting_cash", 10000))
-    realized_today = sum(
-        float(t.get("pnl", 0))
-        for t in state.get("trades", [])
-        if str(t.get("exit_time", t.get("close_date", "")))[:10] == today
-    )
+    start_cash = _f(state.get("starting_cash", 10000))
+    if start_cash is None:
+        return False, "Circuit breaker: starting cash is unreadable — blocking entry"
+    realized_today = 0.0
+    for t in state.get("trades", []) or []:
+        if str(t.get("exit_time", t.get("close_date", "")))[:10] == today:
+            pnl = _f(t.get("pnl", 0), default=0.0)  # a single bad pnl row → treat as 0, not NaN
+            realized_today += pnl
     daily_loss_limit = float(hil.get("daily_loss_limit_pct", 3.0))
     if start_cash > 0 and realized_today < 0:
         loss_pct = abs(realized_today) / start_cash * 100
