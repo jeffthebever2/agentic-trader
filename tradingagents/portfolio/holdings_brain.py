@@ -723,6 +723,10 @@ def _parse_llm_action(text: str, holding: Holding, rule_action: Action) -> Optio
         frac = float(data.get("fraction", 0) or 0)
     except Exception:
         frac = 0.0
+    # float("nan") does NOT raise, and max/min won't clamp a NaN — it would carry
+    # through to an Action.fraction (a NaN trim size). Coerce non-finite to 0.
+    if not math.isfinite(frac):
+        frac = 0.0
     frac = max(0.0, min(1.0, frac))
     if kind == ACTION_TRIM:
         frac = min(frac or 0.33, MAX_TRIM_FRACTION)
