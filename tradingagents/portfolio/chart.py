@@ -97,21 +97,84 @@ def render_trade_chart(
 
         mav = tuple(m for m in (50, 200) if len(df) >= m) or ()
         has_vol = "Volume" in df.columns
+        last = float(df["Close"].iloc[-1])
 
         style = mpf.make_mpf_style(
             base_mpf_style="yahoo",
-            facecolor="#eef3fb", edgecolor="#cbd5e1", gridcolor="#dbe3ef",
-            rc={"axes.labelsize": 9, "font.size": 9},
+            facecolor="#f4f7fc", edgecolor="#cbd5e1", gridcolor="#e6ecf5",
+            rc={"font.size": 12, "ytick.labelsize": 12, "xtick.labelsize": 10},
         )
         kw = dict(
             type="candle", style=style, mav=mav, volume=has_vol,
-            title=f"\n{ticker}  ({levels.get('last') if levels else ''})",
-            ylabel="", ylabel_lower="", figratio=(16, 9), figscale=1.1,
-            tight_layout=True, savefig=dict(fname=out_path, dpi=110, bbox_inches="tight"),
+            ylabel="", ylabel_lower="", figratio=(16, 9), figscale=1.35,
+            tight_layout=True, returnfig=True,
         )
         if hlines:
-            kw["hlines"] = dict(hlines=hlines, colors=colors, linewidths=1.1, linestyle="-")
-        mpf.plot(df, **kw)
+            kw["hlines"] = dict(hlines=hlines, colors=colors, linewidths=1.4, linestyle="-")
+        fig, axlist = mpf.plot(df, **kw)
+        ax = axlist[0]  # price panel
+
+        n = len(df)
+        future = max(20, int(n * 0.35))
+        x_now = n - 1
+        label_x = n + future
+        ax.set_xlim(-1, label_x + future * 0.30)   # room for right-edge labels
+
+        # ── Expected-path arrow: a shallow dip to the buy zone, then up to target
+        # (the 'down then up' pattern). Always resolves to the target for a long. ──
+        tgt = float(target) if (target and math.isfinite(float(target)) and float(target) > 0) else last * 1.25
+
+        # Expand the y-axis so the TARGET (often far above the recent range) and the
+        # full projection arrow are visible — like the reference charts' headroom.
+        try:
+            _lo = min(float(df["Low"].min()), float(stop) if stop else last, tgt)
+            _hi = max(float(df["High"].max()), tgt)
+            _pad = (_hi - _lo) * 0.06 or 1.0
+            ax.set_ylim(_lo - _pad, _hi + _pad)
+        except Exception:
+            pass
+        # Dip to a SHALLOW buy zone (~3-4% pullback), never down to the stop and
+        # never above current — a minor pullback before the run, not a stop-out.
+        _stop_floor = float(stop) if (stop and math.isfinite(float(stop)) and 0 < float(stop) < last) else 0.0
+        dip = max(last * 0.965, _stop_floor + (last - _stop_floor) * 0.35 if _stop_floor else last * 0.965)
+        dip = min(dip, last * 0.995)               # always slightly below current
+        dip_x, top_x = x_now + future * 0.28, x_now + future * 0.92
+        ax.plot([x_now, dip_x], [last, dip], color="#0f172a", lw=3.2,
+                solid_capstyle="round", zorder=12)                       # leg 1: dip
+        ax.annotate("", xy=(top_x, tgt), xytext=(dip_x, dip),
+                    arrowprops=dict(arrowstyle="-|>", color="#0f172a", lw=3.2,
+                                    mutation_scale=30), zorder=12)        # leg 2: up to target
+
+        # ── Big, plain right-edge labels ──
+        def _label(y, text, color):
+            try:
+                v = float(y)
+            except (TypeError, ValueError):
+                return
+            if math.isfinite(v) and v > 0:
+                ax.annotate(f"  {text} ${v:,.2f}", xy=(label_x, v), va="center", ha="left",
+                            fontsize=13, fontweight="bold", color=color, annotation_clip=False)
+        _label(tgt, "TARGET", "#2563eb")
+        _label(entry, "ENTRY", "#16a34a")
+        _label(stop, "STOP", "#ef4444")
+
+        # ── Clear title + one-line plain-language summary ──
+        gain = f"   →  +{(tgt / last - 1) * 100:.0f}% to target" if last > 0 else ""
+        ax.set_title(f"{ticker}    ${last:,.2f}{gain}", fontsize=17, fontweight="bold",
+                     loc="left", pad=16, color="#0f172a")
+        bits = []
+        if entry: bits.append(f"Entry ${float(entry):,.2f}")
+        if stop:  bits.append(f"Stop ${float(stop):,.2f}")
+        if target: bits.append(f"Target ${float(target):,.2f}")
+        if bits:
+            fig.text(0.5, 0.94, "   •   ".join(bits), ha="center", fontsize=12, color="#334155")
+
+        fig.savefig(out_path, dpi=120, bbox_inches="tight", facecolor=fig.get_facecolor())
+        try:
+            import matplotlib.pyplot as _plt
+            _plt.close(fig)
+        except Exception:
+            pass
         return out_path
     except Exception:
         return None

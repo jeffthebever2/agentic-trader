@@ -24,6 +24,7 @@ def test_chart_disabled_by_default(monkeypatch):
 
 def test_chart_generates_public_url(monkeypatch, tmp_path):
     monkeypatch.setenv("THEMATIC_CHART_SMS", "true")
+    monkeypatch.delenv("THEMATIC_CHART_UPLOAD", raising=False)  # want the tunnel URL path
     monkeypatch.setenv("PUBLIC_DASHBOARD_URL", "https://example.test")
     monkeypatch.setattr(t, "_CHART_DIR", tmp_path)
     url = asyncio.run(t._generate_signal_chart("MSFT", {"stop_pct": 8, "target_pct": 30},
