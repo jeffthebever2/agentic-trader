@@ -25,6 +25,7 @@ def test_normalizes_ticker_then_matches():
 def test_clamps_numeric_ranges():
     out = t._sanitize_picks([{
         "ticker": "AMD",
+        "catalyst": "MI400 launch + Q4 earnings",  # concrete → no weak-catalyst cap
         "conviction": 99,      # → 10
         "sentiment": 5.0,      # → 1.0
         "target_pct": 9999,    # → 300
@@ -69,9 +70,9 @@ def test_non_list_and_non_dict_safe():
 # ── De-duplication (added run 7) ────────────────────────────────────────────
 def test_duplicate_ticker_deduped_keep_highest_conviction():
     picks = [
-        {"ticker": "NVDA", "conviction": 6, "thesis": "first"},
-        {"ticker": "nvda", "conviction": 9, "thesis": "second"},   # same name, higher conv
-        {"ticker": "AMD", "conviction": 7},
+        {"ticker": "NVDA", "conviction": 6, "thesis": "first", "catalyst": "GTC keynote"},
+        {"ticker": "nvda", "conviction": 9, "thesis": "second", "catalyst": "Q4 earnings"},
+        {"ticker": "AMD", "conviction": 7, "catalyst": "MI400 launch"},
     ]
     out = t._sanitize_picks(picks, {"NVDA", "AMD"})
     by = {p["ticker"]: p for p in out}

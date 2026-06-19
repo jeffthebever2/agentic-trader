@@ -1122,6 +1122,21 @@ def _has_red_flag(pick: dict) -> bool:
     return any(term in text for term in _RED_FLAG_TERMS)
 
 
+# A pick with no concrete, dated catalyst is momentum-on-hope, not a thesis. These
+# generic fillers count as "no catalyst" → conviction is capped (mirrors the
+# prompt rule the LLM is asked to follow, enforced deterministically).
+_GENERIC_CATALYSTS = frozenset({
+    "", "momentum", "social momentum", "buzz", "social buzz", "hype", "n/a",
+    "na", "none", "trending", "volume", "unknown", "social media", "interest",
+    "attention", "chatter", "tbd",
+})
+
+
+def _weak_catalyst(pick: dict) -> bool:
+    cat = str(pick.get("catalyst", "")).strip().lower().rstrip(".")
+    return cat in _GENERIC_CATALYSTS
+
+
 def _clamp_num(val, lo, default, hi, *, as_int=False):
     """Coerce val to a finite number clamped to [lo, hi]; default on garbage."""
     import math as _m
@@ -1164,6 +1179,12 @@ def _sanitize_picks(picks: object, allowed_tickers: set[str]) -> list[dict[str, 
         q["hold_days"]  = _clamp_num(p.get("hold_days"), 3, 10, 30, as_int=True)
         if q.get("theme") not in _VALID_THEMES:
             q["theme"] = "future_tech"
+        # Weak-catalyst cap: a pick with no concrete catalyst (generic filler) is
+        # momentum-on-hope — cap conviction at 6 so it can't size up like a real
+        # thesis. Deterministic enforcement of the prompt's catalyst rule.
+        if _weak_catalyst(q):
+            q["conviction"] = min(int(q["conviction"]), 6)
+            q["weak_catalyst"] = True
         # Red-flag veto: a pick whose own narrative cites a hard negative catalyst
         # cannot be bullish, no matter the number the model returned. Force deep
         # bearish (composite_score hard-caps ≤ -0.5 to ≤45 → never auto-tradeable)
