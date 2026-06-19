@@ -2167,9 +2167,26 @@ async def get_signals(_user: dict = Depends(get_current_user)):
 
 
 def _conviction_dollar(base: float, conviction: int) -> float:
-    """Scale position size by conviction: 10=1.5×, 8=1.2×, 6=1.0×, 4=0.7×, 1=0.4×."""
-    scale = 0.4 + (conviction - 1) / 9.0 * 1.1  # linear 0.4→1.5
-    return round(base * scale, 2)
+    """Scale position size by conviction: 10=1.5×, 8=1.2×, 6=1.0×, 4=0.7×, 1=0.4×.
+
+    Conviction is clamped to [1, 10] (matching composite_score) so a malformed
+    signal (conviction 0/15/NaN) can never inflate or zero out a position size;
+    a non-finite/negative base collapses to 0. Money-sizing — fail closed.
+    """
+    import math
+    try:
+        b = float(base)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(b) or b <= 0:
+        return 0.0
+    try:
+        c = int(conviction or 0)
+    except (TypeError, ValueError):
+        c = 0
+    c = max(1, min(10, c))
+    scale = 0.4 + (c - 1) / 9.0 * 1.1  # linear 0.4→1.5
+    return round(b * scale, 2)
 
 
 def _thematic_account_value(email: str) -> float:
@@ -2197,13 +2214,18 @@ def _adaptive_dollar(account_value: float, score: float, target_pct: float, hil:
     conviction play gets a bigger slice; a marginal one gets a small probe. Replaces
     the flat $1,000-for-everything sizing.
     """
-    if account_value <= 0:
+    import math
+    if not math.isfinite(float(account_value or 0)) or account_value <= 0:
         return 0.0
+    # Non-finite score/target must not poison the multiplier (NaN propagates
+    # through min/max and would yield a NaN dollar size). Coerce to safe values.
+    _score = float(score) if math.isfinite(float(score or 0)) else 0.0
+    _target = float(target_pct) if math.isfinite(float(target_pct or 0)) else 0.0
     base_pct = float(hil.get("base_position_pct", 4.0)) / 100.0
     # score 50→0.6×, 70→1.12×, 85→1.5×, 100→1.9× (clamped 0.4–2.0)
-    score_mult = max(0.4, min(2.0, 0.6 + (float(score) - 50.0) / 50.0 * 1.3))
+    score_mult = max(0.4, min(2.0, 0.6 + (_score - 50.0) / 50.0 * 1.3))
     # let conviction in a big runner add a little extra (target ≥80% → up to +20%)
-    target_boost = 1.0 + min(0.2, max(0.0, (float(target_pct) - 40.0) / 300.0))
+    target_boost = 1.0 + min(0.2, max(0.0, (_target - 40.0) / 300.0))
     dollar = account_value * base_pct * score_mult * target_boost
     try:
         from tradingagents.compliance import MAX_POSITION_PCT_OF_ACCOUNT as _CAP
