@@ -48,3 +48,39 @@ def test_send_sms_carries_media_url(monkeypatch):
     monkeypatch.setattr(sa, "send_sendblue", _fake_sb)
     sa.send_sms("+1555", "hi", None, "https://example.test/charts/x.png")
     assert captured["media_url"] == "https://example.test/charts/x.png"
+
+
+# ── public upload delivery (CF-Access workaround) ────────────────────────────
+def test_chart_uses_tunnel_url_when_upload_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("THEMATIC_CHART_SMS", "true")
+    monkeypatch.delenv("THEMATIC_CHART_UPLOAD", raising=False)
+    monkeypatch.setenv("PUBLIC_DASHBOARD_URL", "https://app.example")
+    monkeypatch.setattr(t, "_CHART_DIR", tmp_path)
+    url = asyncio.run(t._generate_signal_chart("MSFT", {"stop_pct": 8, "target_pct": 30},
+                                               fetch=lambda tk, period="1y": _df()))
+    assert url.startswith("https://app.example/charts/")   # tunnel URL
+
+
+def test_chart_uses_public_upload_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("THEMATIC_CHART_SMS", "true")
+    monkeypatch.setenv("THEMATIC_CHART_UPLOAD", "true")
+    monkeypatch.setattr(t, "_CHART_DIR", tmp_path)
+    url = asyncio.run(t._generate_signal_chart(
+        "MSFT", {"stop_pct": 8, "target_pct": 30},
+        fetch=lambda tk, period="1y": _df(),
+        uploader=lambda path: "https://files.host/abc.png",
+    ))
+    assert url == "https://files.host/abc.png"
+
+
+def test_chart_upload_failure_falls_back_to_tunnel(monkeypatch, tmp_path):
+    monkeypatch.setenv("THEMATIC_CHART_SMS", "true")
+    monkeypatch.setenv("THEMATIC_CHART_UPLOAD", "true")
+    monkeypatch.setenv("PUBLIC_DASHBOARD_URL", "https://app.example")
+    monkeypatch.setattr(t, "_CHART_DIR", tmp_path)
+    url = asyncio.run(t._generate_signal_chart(
+        "MSFT", {"stop_pct": 8, "target_pct": 30},
+        fetch=lambda tk, period="1y": _df(),
+        uploader=lambda path: None,          # upload fails
+    ))
+    assert url.startswith("https://app.example/charts/")   # graceful fallback

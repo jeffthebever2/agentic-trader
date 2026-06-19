@@ -2819,7 +2819,31 @@ def _fetch_ohlcv_df(ticker: str, period: str = "1y"):
         return None
 
 
-async def _generate_signal_chart(ticker: str, sig: dict, *, fetch=None) -> "str | None":
+def _chart_upload_enabled() -> bool:
+    return os.getenv("THEMATIC_CHART_UPLOAD", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _upload_chart_public(path: str) -> "str | None":
+    """Upload a chart PNG to a public no-auth host so an external SMS provider can
+    fetch it (the tunnel /charts is behind Cloudflare Access). Returns the public
+    URL or None. Used only when THEMATIC_CHART_UPLOAD is set; otherwise the helper
+    returns the (CF-gated) tunnel URL, which works once a CF Access bypass exists
+    for /charts/*. Host is overridable via THEMATIC_CHART_UPLOAD_URL."""
+    endpoint = os.getenv("THEMATIC_CHART_UPLOAD_URL", "https://catbox.moe/user/api.php")
+    try:
+        with open(path, "rb") as fh:
+            r = httpx.post(endpoint,
+                           data={"reqtype": "fileupload"},
+                           files={"fileToUpload": (os.path.basename(path), fh, "image/png")},
+                           timeout=20.0)
+        url = (r.text or "").strip()
+        return url if url.startswith("http") else None
+    except Exception as e:
+        log.debug("chart public upload failed: %s", e)
+        return None
+
+
+async def _generate_signal_chart(ticker: str, sig: dict, *, fetch=None, uploader=None) -> "str | None":
     """Render a trade chart for a signal and return its PUBLIC url (None if
     disabled / on any failure → the SMS still sends, just without an image).
     entry = last close; stop/target from the signal's stop_pct/target_pct."""
@@ -2847,6 +2871,15 @@ async def _generate_signal_chart(ticker: str, sig: dict, *, fetch=None) -> "str 
         )
         if not res:
             return None
+        # Public delivery. The tunnel /charts is behind Cloudflare Access, so an
+        # external SMS provider can't fetch it; when THEMATIC_CHART_UPLOAD is set we
+        # push to a public host instead. Else return the tunnel URL (works once a
+        # CF Access bypass for /charts/* exists).
+        if _chart_upload_enabled():
+            up = await asyncio.to_thread(uploader or _upload_chart_public, out)
+            if up:
+                return up
+            # upload failed → fall through to the tunnel URL
         base = os.getenv("PUBLIC_DASHBOARD_URL", "https://app.agentictrader.org").rstrip("/")
         return f"{base}/charts/{fname}"
     except Exception as e:
