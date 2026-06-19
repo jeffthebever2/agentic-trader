@@ -806,7 +806,7 @@ _MAX_PER_SOURCE_PTS: float = 60.0
 _QUALITY_SOURCES = frozenset({
     "trusted_twitter", "reddit", "seeking_alpha", "google_news",
     "insider", "marketaux", "twitter", "ddg", "brave", "scan_memory",
-    "google_trends",
+    "google_trends", "discovery",
 })
 
 
@@ -852,6 +852,7 @@ async def _merge_signals(
     yahoo_movers: dict[str, int] | None = None,
     brave: dict[str, int] | None = None,
     google_trends: dict[str, int] | None = None,
+    discovery: dict[str, int] | None = None,
 ) -> tuple[list[tuple[str, float]], dict[str, dict[str, float]]]:
     """Combine all sources into ranked list + per-source breakdown.
 
@@ -915,6 +916,8 @@ async def _merge_signals(
         _add(t, "brave", n * 2.0)          # brave news search (same weight as DDG)
     for t, n in (google_trends or {}).items():
         _add(t, "google_trends", n * 2.0)  # rising Google-search interest (leading attention)
+    for t, n in (discovery or {}).items():
+        _add(t, "discovery", n * 3.0)      # price/volume breakout (no buzz needed)
 
     # Multi-source confirmation bonus: +3 per QUALITY source beyond the first
     # (max +15). Confirmation must come from real conviction feeds — two screener
@@ -989,7 +992,7 @@ async def _merge_signals(
     # has to clear the buy gate on real strength, not one noisy feed. High-trust
     # solo sources (insider cluster buys, vetted-trader/press-release feeds) are
     # exempt — a single one of those is genuine signal on its own.
-    _HIGH_TRUST_SOLO = {"insider", "trusted_twitter", "press_releases", "marketaux"}
+    _HIGH_TRUST_SOLO = {"insider", "trusted_twitter", "press_releases", "marketaux", "discovery"}
     _SOLO_DAMPEN = 0.7
     for t in list(scores.keys()):
         srcs = source_presence.get(t, set())
@@ -2233,6 +2236,7 @@ async def _run_scan() -> None:
                     _b(_yahoo_movers(client)),             # 13
                     _b(_brave_tickers(client)),            # 14
                     _b(_google_trends_tickers(client)),    # 15
+                    _b(_discovery_tickers()),              # 16
                     return_exceptions=True,
                 )
 
@@ -2255,12 +2259,13 @@ async def _run_scan() -> None:
             yahoo_movers_res= _safe(gather_results[13], {})
             brave_res       = _safe(gather_results[14], {})
             google_trends_res = _safe(gather_results[15], {})
+            discovery_res   = _safe(gather_results[16], {})
             twitter: dict[str, int] = {}
 
             _SOURCE_NAMES = ["reddit","ddg","yahoo","google_news","seeking_alpha",
                              "stockanalysis","marketaux","insider","trusted_twitter",
                              "stocktwits","finviz","rss_news","av_movers","yahoo_movers","brave",
-                             "google_trends"]
+                             "google_trends","discovery"]
             for i, name in enumerate(_SOURCE_NAMES):
                 if isinstance(gather_results[i], Exception):
                     log.warning("Source %s exception: %s", name, gather_results[i])
@@ -2270,7 +2275,7 @@ async def _run_scan() -> None:
                 reddit, ddg, yahoo, twitter,
                 google_news, seeking_alpha, stockanalysis, marketaux_res, insider_res,
                 trusted_twitter, stocktwits_res, finviz_res, rss_res, av_res, yahoo_movers_res,
-                brave_res, google_trends=google_trends_res,
+                brave_res, google_trends=google_trends_res, discovery=discovery_res,
             )
             if not ranked:
                 _set_status("done", "No tickers found")
@@ -2733,6 +2738,58 @@ def _ticker_breakout(ticker: str, *, fetch=None) -> bool:
 
 def _atr_stops_enabled() -> bool:
     return os.getenv("THEMATIC_ATR_STOPS", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── Discovery scanner (no-buzz price/volume breakouts — the IREN-$5 solver) ───
+def _discovery_enabled() -> bool:
+    return os.getenv("THEMATIC_DISCOVERY", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _discovery_universe() -> "list[str]":
+    """Tickers to price/volume-scan for breakouts independent of buzz. Env
+    THEMATIC_DISCOVERY_UNIVERSE (comma list) else a curated catalyst-theme set.
+    A broad universe (e.g. a liquid-tickers file) is the right production input."""
+    raw = [x.strip().upper() for x in os.getenv("THEMATIC_DISCOVERY_UNIVERSE", "").split(",") if x.strip()]
+    return raw or [
+        "IREN", "CIFR", "WULF", "APLD", "CORZ", "OKLO", "SMR", "NNE", "RGTI",
+        "IONQ", "QBTS", "RCAT", "ONDS", "AVAV", "KTOS", "VRT", "MU", "ALAB",
+    ]
+
+
+async def _discovery_tickers(*, fetch_bars=None, fetch_bench=None, universe=None) -> "dict[str, int]":
+    """Source scraper: names breaking out on price+volume (no buzz needed) as
+    {ticker: weight}. Disabled unless THEMATIC_DISCOVERY. Bars/bench injected for
+    tests; bounded by the caller's per-source timeout."""
+    if not _discovery_enabled():
+        return {}
+    fetch_bars = fetch_bars or _fetch_daily_bars
+    if fetch_bench is None:
+        def fetch_bench():
+            return (_fetch_daily_bars("SPY") or {}).get("closes", [])
+    universe = universe if universe is not None else _discovery_universe()
+    try:
+        from tradingagents.portfolio.discovery import is_discovery_candidate
+    except Exception:
+        return {}
+    try:
+        bench = await asyncio.to_thread(fetch_bench)
+    except Exception:
+        bench = []
+    out: dict[str, int] = {}
+    for tk in universe:
+        try:
+            bars = await asyncio.to_thread(fetch_bars, tk) or {}
+            res = is_discovery_candidate(bars, bench)
+            if res.get("qualifies"):
+                # score 60→3 … 100→8: a real, price-confirmed standalone signal
+                w = max(3, min(int((float(res["score"]) - 50) / 7), 8))
+                norm = _norm_ticker(tk)
+                if norm:
+                    out[norm] = w
+        except Exception as e:
+            log.debug("discovery %s: %s", tk, e)
+            continue
+    return out
 
 
 def _atr_stop_pct(price: float, atr: float, base_pct: float, *,
