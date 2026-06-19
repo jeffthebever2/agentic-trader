@@ -931,6 +931,20 @@ async def _merge_signals(
     scores = filtered_by_quality
     breakdown = {t: v for t, v in breakdown.items() if t in scores}
 
+    # ── Single-source confirmation dampener ───────────────────────────────────
+    # A name carried by exactly ONE source with no cross-confirmation is a classic
+    # false positive (a single Reddit pump, one DDG hit). Dampen it 0.7× so it
+    # has to clear the buy gate on real strength, not one noisy feed. High-trust
+    # solo sources (insider cluster buys, vetted-trader/press-release feeds) are
+    # exempt — a single one of those is genuine signal on its own.
+    _HIGH_TRUST_SOLO = {"insider", "trusted_twitter", "press_releases", "marketaux"}
+    _SOLO_DAMPEN = 0.7
+    for t in list(scores.keys()):
+        srcs = source_presence.get(t, set())
+        if len(srcs) == 1 and not (srcs & _HIGH_TRUST_SOLO):
+            scores[t] = round(scores[t] * _SOLO_DAMPEN, 1)
+            breakdown.setdefault(t, {})["single_source_dampener"] = _SOLO_DAMPEN
+
     valid = await _validate_tickers(list(scores.keys()))
     filtered_scores = {t: s for t, s in scores.items() if t in valid}
     filtered_breakdown = {t: v for t, v in breakdown.items() if t in filtered_scores}
