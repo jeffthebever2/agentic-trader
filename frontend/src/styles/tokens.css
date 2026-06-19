@@ -16,9 +16,28 @@
   --accent:         #D63A00;
   --accent-hover:   #B83100;
   --accent-subtle:  rgba(214,58,0,.09);
+  /* Calm tonal companion for gradients/rails — a restrained ember, not a bright
+     amber. Bloomberg-meets-Linear: keep accents in one hue family, low drama. */
+  --accent-2:       #BC551B;
 
   --font-sans: "Geist", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", monospace;
+
+  /* ── Type scale (modular, data-dashboard tuned) ───────────────────────────
+     One scale every page reads from. Numbers default to tabular for alignment. */
+  --text-2xs:  10px;
+  --text-xs:   11px;
+  --text-sm:   12.5px;
+  --text-base: 13.5px;
+  --text-md:   15px;
+  --text-lg:   18px;
+  --text-xl:   22px;
+  --text-2xl:  28px;
+  --text-3xl:  36px;
+  --tracking-label: .11em;   /* uppercase eyebrows / labels */
+  --tracking-tight: -.025em; /* large numerals / display */
+  --leading-tight:  1.15;
+  --leading-body:   1.55;
 
   --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
@@ -53,6 +72,7 @@ body.theme-dark {
   --accent:         #E24312;
   --accent-hover:   #F04A18;
   --accent-subtle:  rgba(226,67,18,.14);
+  --accent-2:       #E0763A;
   --shadow-card:    none;
   --shadow-1:       0 1px 2px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.5);
   --shadow-2:       0 2px 6px rgba(0,0,0,.45), 0 8px 20px rgba(0,0,0,.55);
@@ -75,30 +95,22 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Subtle film grain — kills digital flatness without touching DOM */
+/* Subtle film grain — kills digital flatness without touching DOM. Kept very
+   faint; a premium dark surface wants texture you sense, not see. */
 body::after {
   content: "";
   position: fixed;
   inset: 0;
   z-index: 9999;
   pointer-events: none;
-  opacity: .025;
+  opacity: .018;
   mix-blend-mode: multiply;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
 }
-body.theme-dark::after { mix-blend-mode: screen; opacity: .035; }
+body.theme-dark::after { mix-blend-mode: screen; opacity: .022; }
 
-/* CRT scanline — dark mode only */
-body.theme-dark main::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 9998;
-  pointer-events: none;
-  opacity: .35;
-  mix-blend-mode: overlay;
-  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.10) 2px, rgba(0,0,0,.10) 3px);
-}
+/* CRT scanline removed — a literal screen-door over the whole app read as noise
+   and fought the calm, layered surfaces this direction is built on. */
 
 #root { height: 100%; }
 
@@ -388,6 +400,30 @@ body.theme-dark .input:focus { border-color: var(--accent); }
 
 @media (max-width: 640px) {
   #current-datetime { display: none !important; }
+}
+
+/* ── Broker (Fidelity) panel: stack holdings above chart on narrow screens ──
+   Otherwise the fixed 288px holdings "side menu" crowds the chart and clips
+   position data on narrow / split-screen windows. */
+@media (max-width: 860px) {
+  /* Let every flex descendant shrink to the viewport (kills min-content overflow
+     that otherwise pushed the panel wider than the screen and clipped both edges). */
+  #panel-broker, #panel-broker * { min-width: 0 !important; }
+  .fidelity-body {
+    flex-direction: column !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+  }
+  .fidelity-holdings {
+    width: 100% !important;
+    max-width: 100% !important;
+    border-right: none !important;
+    border-bottom: 1px solid var(--surface-rule);
+    max-height: 50vh;
+    flex-shrink: 0;
+  }
+  .fidelity-chart { width: 100% !important; max-width: 100% !important; min-height: 70vh; flex-shrink: 0; overflow-x: hidden; }
+  .fidelity-statsbar { flex-wrap: wrap; row-gap: 8px; }
 }
 
 /* ── Analyst pills (Analyze page) ────────────────────────────────────────── */
@@ -932,7 +968,7 @@ body.theme-dark .card:hover {
 /* ── Gradient text utility (hero numbers / brand moments) ────────────────── */
 @supports (background-clip: text) and (color: color-mix(in srgb, red 50%, blue)) {
   .text-gradient-accent {
-    background: linear-gradient(120deg, var(--accent) 0%, #f59e0b 120%);
+    background: linear-gradient(120deg, var(--accent) 0%, var(--accent-2) 120%);
     -webkit-background-clip: text;
     background-clip: text;
     -webkit-text-fill-color: transparent;
@@ -996,7 +1032,7 @@ body.theme-dark .input:focus {
   bottom: 6px;
   width: 3px;
   border-radius: 99px;
-  background: linear-gradient(180deg, var(--accent), #f59e0b);
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
 }
 body.theme-dark .nav-item.active {
   box-shadow: inset 0 0 0 1px rgba(226,67,18,.22), 0 0 16px -6px rgba(226,67,18,.35);
@@ -1012,7 +1048,7 @@ body.theme-dark .nav-item.active::before {
   position: absolute;
   left: 0; right: 0; top: 0;
   height: 2px;
-  background: linear-gradient(90deg, var(--accent), #f59e0b);
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
   opacity: 0;
   transition: opacity .2s var(--ease-out);
   pointer-events: none;
@@ -1107,3 +1143,62 @@ body.theme-dark #ta-sidebar {
   background-image: radial-gradient(color-mix(in srgb, var(--ink-faint) 28%, transparent) 1px, transparent 1px);
   background-size: 14px 14px;
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PREMIUM DARK — type scale, tighter data tables, calmer surfaces
+   Bloomberg-meets-Linear: data is the hero, chrome stays quiet.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* Eyebrow / section label — one consistent treatment off the scale tokens. */
+.eyebrow {
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* Display numeral — hero stats, balances. Tabular so digits never jitter. */
+.numeral {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-tight);
+  font-feature-settings: "tnum" 1, "cv01" 1;
+}
+
+/* ── Data table: dense, hairline-ruled, numerals aligned ──────────────────────
+   Opt-in via <table class="data-table">. Header is a quiet uppercase rule, rows
+   are tight with a single hairline, numbers right-align and tabular. */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+  text-align: left;
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--surface-rule);
+  white-space: nowrap;
+}
+.data-table tbody td {
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--surface-rule) 55%, transparent);
+  color: var(--ink-muted);
+  vertical-align: middle;
+}
+.data-table tbody tr:last-child td { border-bottom: none; }
+.data-table tbody tr { transition: background .12s var(--ease-out), box-shadow .12s var(--ease-out); }
+.data-table tbody tr:hover { background: var(--surface-soft); box-shadow: inset 2px 0 0 var(--accent); }
+/* Numeric columns: right-align + tabular, the Bloomberg ledger read. */
+.data-table .num, .data-table td.num, .data-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.data-table .sym { font-weight: 700; color: var(--ink); }
+body.theme-dark .data-table thead th { background: var(--surface); }
