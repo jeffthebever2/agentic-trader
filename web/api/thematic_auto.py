@@ -484,9 +484,15 @@ async def _marketaux_tickers(client: httpx.AsyncClient) -> dict[str, int]:
 
 # ── Trusted Twitter RSS feeds (via rss.app) ──────────────────────────────────
 
+# Updated 2026-06-19 (live-validated). Replaced the stale 1cNg7qq…/lYyMa8F…
+# feeds with the user's current rss.app feeds. bHJyaHDmDjopM3kM.xml was dropped
+# because it returned HTTP 404 at validation time.
 TRUSTED_TWITTER_FEEDS = [
-    "https://rss.app/feeds/1cNg7qqGww0N3h0c.xml",
-    "https://rss.app/feeds/lYyMa8FTax9n3NC4.xml",
+    "https://rss.app/feeds/G7CYzS3IpdS7XAgR.xml",
+    "https://rss.app/feeds/aDBakalosRFgiYkN.xml",
+    "https://rss.app/feeds/2jNBRuvbe4QpbI3S.xml",
+    "https://rss.app/feeds/4f8bdh1Ic9bv0D5P.xml",
+    "https://rss.app/feeds/rcG2hWdIPifEJymJ.xml",
 ]
 
 async def _trusted_twitter_tickers(client: httpx.AsyncClient) -> dict[str, int]:
