@@ -812,7 +812,7 @@ _MAX_PER_SOURCE_PTS: float = 60.0
 _QUALITY_SOURCES = frozenset({
     "trusted_twitter", "reddit", "seeking_alpha", "google_news",
     "insider", "marketaux", "twitter", "ddg", "brave", "scan_memory",
-    "google_trends", "discovery", "analyst",
+    "google_trends", "discovery", "analyst", "options_flow",
 })
 
 
@@ -860,6 +860,7 @@ async def _merge_signals(
     google_trends: dict[str, int] | None = None,
     discovery: dict[str, int] | None = None,
     analyst: dict[str, int] | None = None,
+    options_flow: dict[str, int] | None = None,
 ) -> tuple[list[tuple[str, float]], dict[str, dict[str, float]]]:
     """Combine all sources into ranked list + per-source breakdown.
 
@@ -927,6 +928,8 @@ async def _merge_signals(
         _add(t, "discovery", n * 3.0)      # price/volume breakout (no buzz needed)
     for t, n in (analyst or {}).items():
         _add(t, "analyst", n * 2.5)        # fresh analyst upgrade / bullish rec skew
+    for t, n in (options_flow or {}).items():
+        _add(t, "options_flow", n * 3.0)   # unusual call flow / call-skew confirmation
 
     # Multi-source confirmation bonus: +3 per QUALITY source beyond the first
     # (max +15). Confirmation must come from real conviction feeds — two screener
@@ -1001,7 +1004,7 @@ async def _merge_signals(
     # has to clear the buy gate on real strength, not one noisy feed. High-trust
     # solo sources (insider cluster buys, vetted-trader/press-release feeds) are
     # exempt — a single one of those is genuine signal on its own.
-    _HIGH_TRUST_SOLO = {"insider", "trusted_twitter", "press_releases", "marketaux", "discovery"}
+    _HIGH_TRUST_SOLO = {"insider", "trusted_twitter", "press_releases", "marketaux", "discovery", "options_flow"}
     _SOLO_DAMPEN = 0.7
     for t in list(scores.keys()):
         srcs = source_presence.get(t, set())
@@ -2049,8 +2052,16 @@ async def _notify_thematic_trade_request(email: str, sig: dict, score: float) ->
             + (f"Crowd: {crowd[:90]}. " if crowd else "")
             + f"Approve: {base}/app/hil?tab=approvals"
         )
-        await asyncio.to_thread(send_sms, phone, msg)
-        log.info("Thematic trade-request SMS sent to %s (%s, score %.0f)", email[:20], sig.get("ticker"), score)
+        # Attach a TradingView-style chart when enabled (best-effort; failure just
+        # sends the text without an image).
+        media_url = None
+        try:
+            media_url = await _generate_signal_chart(str(sig.get("ticker", "")), sig)
+        except Exception as ce:
+            log.debug("trade-request chart skipped: %s", ce)
+        await asyncio.to_thread(send_sms, phone, msg, None, media_url)
+        log.info("Thematic trade-request SMS sent to %s (%s, score %.0f, chart=%s)",
+                 email[:20], sig.get("ticker"), score, bool(media_url))
     except Exception as e:
         log.warning("_notify_thematic_trade_request failed: %s", e)
 
@@ -2078,15 +2089,27 @@ async def _auto_execute_confirmed_signals(signals: list[dict]) -> None:
             threshold = float(hil.get("auto_trade_score", 75.0))
             user_mock = {"email": email}
             for sig in signals:
-                if not sig.get("confirmed"):
-                    continue
                 score = _sig_score(sig)
                 if score < threshold:
+                    continue
+                confirmed = bool(sig.get("confirmed"))
+                breakout_ok = False
+                if not confirmed and sig.get("is_spike"):
+                    raw_score = float(sig.get("raw_score", 0) or 0)
+                    eff_min = MIN_SIGNAL_SCORE * _regime_threshold_multiplier()
+                    if raw_score >= eff_min and _breakout_confirm_enabled():
+                        try:
+                            breakout_ok = _ticker_breakout(str(sig.get("ticker", "")))
+                        except Exception:
+                            breakout_ok = False
+                        if breakout_ok:
+                            sig["breakout_confirmed"] = True
+                if not (confirmed or breakout_ok):
                     continue
                 # Paper auto-execute (adaptive sizing happens inside approve_signal).
                 if auto_paper:
                     try:
-                        await approve_signal(sig["id"], ApproveBody(), user_mock)
+                        await approve_signal(sig["id"], ApproveBody(), None, user_mock)
                         log.info("Auto-trade paper: approved %s for %s (score %.0f ≥ %.0f)",
                                  sig["ticker"], email, score, threshold)
                     except HTTPException as he:
@@ -2247,6 +2270,7 @@ async def _run_scan() -> None:
                     _b(_google_trends_tickers(client)),    # 15
                     _b(_discovery_tickers()),              # 16
                     _b(_analyst_tickers()),                # 17
+                    _b(_options_flow_tickers()),           # 18
                     return_exceptions=True,
                 )
 
@@ -2271,12 +2295,13 @@ async def _run_scan() -> None:
             google_trends_res = _safe(gather_results[15], {})
             discovery_res   = _safe(gather_results[16], {})
             analyst_res     = _safe(gather_results[17], {})
+            options_flow_res= _safe(gather_results[18], {})
             twitter: dict[str, int] = {}
 
             _SOURCE_NAMES = ["reddit","ddg","yahoo","google_news","seeking_alpha",
                              "stockanalysis","marketaux","insider","trusted_twitter",
                              "stocktwits","finviz","rss_news","av_movers","yahoo_movers","brave",
-                             "google_trends","discovery","analyst"]
+                             "google_trends","discovery","analyst","options_flow"]
             for i, name in enumerate(_SOURCE_NAMES):
                 if isinstance(gather_results[i], Exception):
                     log.warning("Source %s exception: %s", name, gather_results[i])
@@ -2287,7 +2312,7 @@ async def _run_scan() -> None:
                 google_news, seeking_alpha, stockanalysis, marketaux_res, insider_res,
                 trusted_twitter, stocktwits_res, finviz_res, rss_res, av_res, yahoo_movers_res,
                 brave_res, google_trends=google_trends_res, discovery=discovery_res,
-                analyst=analyst_res,
+                analyst=analyst_res, options_flow=options_flow_res,
             )
             if not ranked:
                 _set_status("done", "No tickers found")
@@ -2551,6 +2576,7 @@ async def get_signals(_user: dict = Depends(get_current_user)):
     _eff_min = MIN_SIGNAL_SCORE * _regime_mult
     # Short-pressure risk overlay (env THEMATIC_SHORT_OVERLAY, default off → {}).
     _short_map = _finra_short_map()
+    _true_short_map = _true_short_interest_map(universe=[s.get("ticker", "") for s in pending])
     # Annotate each signal with buy eligibility, spike status, and scan history
     for sig in pending:
         rs = float(sig.get("raw_score", 0) or 0)
@@ -2581,6 +2607,12 @@ async def get_signals(_user: dict = Depends(get_current_user)):
             if _lvl in ("high", "extreme"):
                 sig["short_pressure"] = _lvl
             if _lvl == "extreme":
+                _wb = False
+        if _true_short_map:
+            _slvl = _true_short_map.get(str(sig.get("ticker", "")).upper(), "unknown")
+            if _slvl in ("high", "extreme"):
+                sig["short_interest_pressure"] = _slvl
+            if _slvl == "extreme":
                 _wb = False
         sig["will_buy"]        = _wb
         sig["score_threshold"] = round(_eff_min, 1)
@@ -2764,6 +2796,64 @@ def _atr_stops_enabled() -> bool:
     return os.getenv("THEMATIC_ATR_STOPS", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
+# ── Trade-request chart (TradingView-style PNG attached to the SMS) ───────────
+_CHART_DIR = Path(__file__).resolve().parent.parent / "static" / "charts"
+
+
+def _chart_sms_enabled() -> bool:
+    return os.getenv("THEMATIC_CHART_SMS", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _fetch_ohlcv_df(ticker: str, period: str = "1y"):
+    """Daily OHLCV DataFrame for charting (MultiIndex columns flattened). None on
+    failure. Isolated + injectable for tests."""
+    try:
+        import yfinance as yf
+        df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
+        if df is None or df.empty:
+            return None
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        return df
+    except Exception as e:
+        log.debug("ohlcv fetch %s: %s", ticker, e)
+        return None
+
+
+async def _generate_signal_chart(ticker: str, sig: dict, *, fetch=None) -> "str | None":
+    """Render a trade chart for a signal and return its PUBLIC url (None if
+    disabled / on any failure → the SMS still sends, just without an image).
+    entry = last close; stop/target from the signal's stop_pct/target_pct."""
+    if not _chart_sms_enabled():
+        return None
+    fetch = fetch or _fetch_ohlcv_df
+    df = await asyncio.to_thread(fetch, ticker)
+    if df is None or len(df) < 20 or "Close" not in getattr(df, "columns", []):
+        return None
+    try:
+        from tradingagents.portfolio.chart import compute_levels, render_trade_chart
+        last = float(df["Close"].iloc[-1])
+        sp = float(sig.get("stop_pct", 8) or 8)
+        tp = float(sig.get("target_pct", 30) or 30)
+        entry = round(last, 2)
+        stop = round(last * (1 - sp / 100.0), 2)
+        target = round(last * (1 + tp / 100.0), 2)
+        levels = compute_levels(df["High"].tolist(), df["Low"].tolist(), df["Close"].tolist())
+        _CHART_DIR.mkdir(parents=True, exist_ok=True)
+        fname = f"{_norm_ticker(ticker) or 'X'}_{int(time.time())}.png"
+        out = str(_CHART_DIR / fname)
+        res = await asyncio.to_thread(
+            render_trade_chart, ticker, df,
+            entry=entry, stop=stop, target=target, out_path=out, levels=levels,
+        )
+        if not res:
+            return None
+        base = os.getenv("PUBLIC_DASHBOARD_URL", "https://app.agentictrader.org").rstrip("/")
+        return f"{base}/charts/{fname}"
+    except Exception as e:
+        log.debug("signal chart %s: %s", ticker, e)
+        return None
+
+
 # ── FINRA short-volume RISK OVERLAY (NOT a buzz source) ──────────────────────
 # Heavy short volume pressing into a long is a RISK, not a bullish signal — so it
 # must never be additive to the buzz score (that would wrongly rank UP shorted
@@ -2774,6 +2864,10 @@ _finra_short_cache: dict = {"day": "", "map": {}}
 
 def _short_overlay_enabled() -> bool:
     return os.getenv("THEMATIC_SHORT_OVERLAY", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _true_short_interest_enabled() -> bool:
+    return os.getenv("THEMATIC_TRUE_SHORT_INTEREST", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _parse_finra_short_volume(text: str) -> "dict[str, float]":
@@ -2821,6 +2915,37 @@ def _short_pressure_level(ratio: "float | None") -> str:
     return "normal"
 
 
+def _short_interest_level(row: "dict | None") -> str:
+    """True short-interest / borrow pressure level from vendor fields such as
+    shortPercentOfFloat, shortFloat, daysToCover, borrowFee. FINRA short-volume is
+    intraday pressure; this is structural crowding."""
+    if not isinstance(row, dict):
+        return "unknown"
+
+    def _num(*keys):
+        for k in keys:
+            try:
+                v = float(row.get(k))
+            except (TypeError, ValueError):
+                continue
+            if v >= 0:
+                return v
+        return None
+
+    sf = _num("shortPercentOfFloat", "shortFloat", "short_float", "shortPercent")
+    dtc = _num("daysToCover", "shortRatio", "days_to_cover")
+    fee = _num("borrowFee", "borrow_fee", "fee")
+    if sf is not None and sf > 1.0:
+        sf = sf / 100.0
+    extreme = (sf is not None and sf >= 0.25) or (dtc is not None and dtc >= 7.0) or (fee is not None and fee >= 50.0)
+    high = (sf is not None and sf >= 0.15) or (dtc is not None and dtc >= 4.0) or (fee is not None and fee >= 20.0)
+    if extreme:
+        return "extreme"
+    if high:
+        return "high"
+    return "normal"
+
+
 def _fetch_finra_short_file() -> str:
     """Today's FINRA consolidated short-volume file (no-auth CDN). '' on failure."""
     import datetime as _d
@@ -2850,6 +2975,58 @@ def _finra_short_map(*, fetch=None, day=None) -> "dict[str, float]":
     if m:
         _finra_short_cache["day"], _finra_short_cache["map"] = today, m
     return m
+
+
+_true_short_cache: dict = {"day": "", "map": {}}
+
+
+def _fetch_fmp_short_interest(ticker: str) -> "dict":
+    """Best-effort true short-interest payload. FMP endpoint names have varied
+    across versions, so try stable and legacy paths. {} on any failure/no key."""
+    key = os.getenv("FMP_API_KEY", "").strip()
+    if not key:
+        return {}
+    endpoints = (
+        ("https://financialmodelingprep.com/stable/short-interest", {"symbol": ticker, "apikey": key}),
+        ("https://financialmodelingprep.com/stable/short-interest-ratio", {"symbol": ticker, "apikey": key}),
+        ("https://financialmodelingprep.com/api/v4/short-interest", {"symbol": ticker, "apikey": key}),
+    )
+    for url, params in endpoints:
+        try:
+            r = httpx.get(url, params=params, timeout=10.0)
+            data = r.json()
+            if isinstance(data, list) and data:
+                return data[0] if isinstance(data[0], dict) else {}
+            if isinstance(data, dict) and data:
+                return data
+        except Exception:
+            continue
+    return {}
+
+
+def _true_short_interest_map(*, universe=None, fetch=None, day=None) -> "dict[str, str]":
+    """{ticker: level}. Disabled unless THEMATIC_TRUE_SHORT_INTEREST. Non-additive."""
+    if not _true_short_interest_enabled():
+        return {}
+    import datetime as _d
+    today = day or _d.date.today().isoformat()
+    if universe is None and _true_short_cache.get("day") == today and _true_short_cache.get("map"):
+        return _true_short_cache["map"]
+    fetch = fetch or _fetch_fmp_short_interest
+    universe = universe if universe is not None else _discovery_universe()
+    out: dict[str, str] = {}
+    for tk in universe:
+        try:
+            level = _short_interest_level(fetch(tk) or {})
+        except Exception:
+            level = "unknown"
+        if level in ("high", "extreme"):
+            norm = _norm_ticker(tk)
+            if norm:
+                out[norm] = level
+    if out and universe is None:
+        _true_short_cache["day"], _true_short_cache["map"] = today, out
+    return out
 
 
 # ── Analyst signals (FMP grade changes + Finnhub recommendation trends) ──────
@@ -2890,6 +3067,62 @@ def _recommendation_weight(trend: "dict") -> int:
     return max(0, min(int(round(net_frac * 6)), 6))
 
 
+def _earnings_surprise_weight(rows: "list[dict]") -> int:
+    """Recent positive earnings surprise / beat weight 0..6. Accepts FMP-style
+    records with surprisePercentage or actual/estimated EPS fields."""
+    best = 0.0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        pct = row.get("surprisePercentage", row.get("surprise_percent", row.get("surprise")))
+        try:
+            pct_v = float(pct)
+        except (TypeError, ValueError):
+            try:
+                actual = float(row.get("actualEarningResult", row.get("epsActual", row.get("actual"))))
+                estimate = float(row.get("estimatedEarning", row.get("epsEstimated", row.get("estimate"))))
+                pct_v = ((actual - estimate) / abs(estimate) * 100.0) if estimate else 0.0
+            except (TypeError, ValueError):
+                pct_v = 0.0
+        best = max(best, pct_v)
+    if best <= 0:
+        return 0
+    return max(1, min(int(round(best / 3.0)), 6))
+
+
+def _price_target_weight(targets: "dict | list[dict]", price: "float | None" = None) -> int:
+    """Consensus target upside weight 0..6. Needs current price; if FMP returns a
+    target-only payload without price, caller can inject the quote separately."""
+    row = targets[0] if isinstance(targets, list) and targets else targets
+    if not isinstance(row, dict):
+        return 0
+
+    def _num(*keys):
+        for k in keys:
+            try:
+                v = float(row.get(k))
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                return v
+        return None
+
+    target = _num("targetConsensus", "target_consensus", "consensus", "priceTarget", "targetMedian", "target")
+    px = price
+    if px is None:
+        px = _num("price", "lastPrice", "currentPrice")
+    try:
+        px = float(px)
+    except (TypeError, ValueError):
+        px = 0.0
+    if not target or px <= 0:
+        return 0
+    upside = (target / px - 1.0) * 100.0
+    if upside < 10:
+        return 0
+    return max(1, min(int(round(upside / 10.0)), 6))
+
+
 def _analyst_enabled() -> bool:
     return os.getenv("THEMATIC_ANALYST", "false").strip().lower() in ("1", "true", "yes", "on")
 
@@ -2924,7 +3157,64 @@ def _fetch_finnhub_recs(ticker: str) -> "dict":
         return {}
 
 
-async def _analyst_tickers(*, universe=None, fetch_grades=None, fetch_recs=None) -> "dict[str, int]":
+def _fetch_fmp_earnings_surprises(ticker: str) -> "list[dict]":
+    key = os.getenv("FMP_API_KEY", "").strip()
+    if not key:
+        return []
+    endpoints = (
+        ("https://financialmodelingprep.com/stable/earnings-surprises", {"symbol": ticker, "limit": 4, "apikey": key}),
+        ("https://financialmodelingprep.com/api/v3/earnings-surprises/" + ticker, {"apikey": key}),
+    )
+    for url, params in endpoints:
+        try:
+            r = httpx.get(url, params=params, timeout=10.0)
+            data = r.json()
+            if isinstance(data, list):
+                return data[:4]
+        except Exception:
+            continue
+    return []
+
+
+def _fetch_fmp_price_targets(ticker: str) -> "dict | list[dict]":
+    key = os.getenv("FMP_API_KEY", "").strip()
+    if not key:
+        return {}
+    endpoints = (
+        ("https://financialmodelingprep.com/stable/price-target-consensus", {"symbol": ticker, "apikey": key}),
+        ("https://financialmodelingprep.com/stable/price-target-summary", {"symbol": ticker, "apikey": key}),
+        ("https://financialmodelingprep.com/api/v4/price-target-consensus", {"symbol": ticker, "apikey": key}),
+    )
+    for url, params in endpoints:
+        try:
+            r = httpx.get(url, params=params, timeout=10.0)
+            data = r.json()
+            if data:
+                return data
+        except Exception:
+            continue
+    return {}
+
+
+def _fetch_quote_price(ticker: str) -> "float | None":
+    try:
+        from tradingagents.data.quote_gateway import get_gateway
+        gw = get_gateway()
+        q = gw.get_quote(ticker) if gw else None
+        return q.best.reference_price() if q else None
+    except Exception:
+        return None
+
+
+async def _analyst_tickers(
+    *,
+    universe=None,
+    fetch_grades=None,
+    fetch_recs=None,
+    fetch_earnings=None,
+    fetch_targets=None,
+    fetch_price=None,
+) -> "dict[str, int]":
     """Source: bullish analyst confirmation as {ticker: weight} = FMP-grade +
     Finnhub-rec weight. Disabled unless THEMATIC_ANALYST. Fetchers default to the
     live endpoints (graceful []/{} without keys); injected in tests."""
@@ -2932,6 +3222,9 @@ async def _analyst_tickers(*, universe=None, fetch_grades=None, fetch_recs=None)
         return {}
     fetch_grades = fetch_grades or _fetch_fmp_grades
     fetch_recs = fetch_recs or _fetch_finnhub_recs
+    fetch_earnings = fetch_earnings or _fetch_fmp_earnings_surprises
+    fetch_targets = fetch_targets or _fetch_fmp_price_targets
+    fetch_price = fetch_price or _fetch_quote_price
     universe = universe if universe is not None else _discovery_universe()
     out: dict[str, int] = {}
     for tk in universe:
@@ -2944,10 +3237,127 @@ async def _analyst_tickers(*, universe=None, fetch_grades=None, fetch_recs=None)
             w += _recommendation_weight(await asyncio.to_thread(fetch_recs, tk) or {})
         except Exception:
             pass
+        try:
+            w += _earnings_surprise_weight(await asyncio.to_thread(fetch_earnings, tk) or [])
+        except Exception:
+            pass
+        try:
+            price = await asyncio.to_thread(fetch_price, tk)
+            w += _price_target_weight(await asyncio.to_thread(fetch_targets, tk) or {}, price)
+        except Exception:
+            pass
         if w > 0:
             norm = _norm_ticker(tk)
             if norm:
-                out[norm] = min(w, 8)
+                out[norm] = min(w, 12)
+    return out
+
+
+# ── Unusual options-flow confirmation (optional Tradier chain) ───────────────
+def _options_flow_enabled() -> bool:
+    return os.getenv("THEMATIC_OPTIONS_FLOW", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _options_flow_weight(options: "list[dict]") -> int:
+    """Bullish unusual-call-flow weight 0..8 from option-chain rows. This is not
+    order flow tape; it is a conservative proxy using call volume, OI, and put/call
+    skew from a current chain."""
+    call_vol = put_vol = call_oi = put_oi = 0.0
+    unusual = 0
+    for opt in options or []:
+        if not isinstance(opt, dict):
+            continue
+        typ = str(opt.get("option_type", opt.get("type", ""))).lower()
+        try:
+            vol = max(0.0, float(opt.get("volume", 0) or 0))
+            oi = max(0.0, float(opt.get("open_interest", opt.get("openInterest", 0)) or 0))
+        except (TypeError, ValueError):
+            continue
+        if typ == "call":
+            call_vol += vol
+            call_oi += oi
+            if vol >= 500 and (oi <= 0 or vol / max(oi, 1.0) >= 0.75):
+                unusual += 1
+        elif typ == "put":
+            put_vol += vol
+            put_oi += oi
+    total_vol = call_vol + put_vol
+    if total_vol <= 0 or call_vol < 500:
+        return 0
+    call_share = call_vol / total_vol
+    oi_skew = call_oi / max(call_oi + put_oi, 1.0)
+    score = 0
+    if call_share >= 0.65:
+        score += 3
+    if call_share >= 0.80:
+        score += 2
+    if oi_skew >= 0.60:
+        score += 1
+    score += min(unusual, 2)
+    return max(0, min(score, 8))
+
+
+def _fetch_tradier_expirations(ticker: str) -> "list[str]":
+    token = os.getenv("TRADIER_API_TOKEN", "").strip()
+    if not token:
+        return []
+    base = os.getenv("TRADIER_API_BASE", "https://api.tradier.com/v1").rstrip("/")
+    try:
+        r = httpx.get(
+            f"{base}/markets/options/expirations",
+            params={"symbol": ticker, "includeAllRoots": "true"},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=10.0,
+        )
+        data = r.json()
+        dates = ((data.get("expirations") or {}).get("date") if isinstance(data, dict) else []) or []
+        return dates if isinstance(dates, list) else [dates]
+    except Exception as e:
+        log.debug("tradier expirations %s: %s", ticker, e)
+        return []
+
+
+def _fetch_tradier_chain(ticker: str) -> "list[dict]":
+    token = os.getenv("TRADIER_API_TOKEN", "").strip()
+    if not token:
+        return []
+    expiration = os.getenv("TRADIER_OPTIONS_EXPIRATION", "").strip()
+    if not expiration:
+        dates = _fetch_tradier_expirations(ticker)
+        expiration = dates[0] if dates else ""
+    if not expiration:
+        return []
+    base = os.getenv("TRADIER_API_BASE", "https://api.tradier.com/v1").rstrip("/")
+    try:
+        r = httpx.get(
+            f"{base}/markets/options/chains",
+            params={"symbol": ticker, "expiration": expiration, "greeks": "false"},
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            timeout=10.0,
+        )
+        data = r.json()
+        opts = ((data.get("options") or {}).get("option") if isinstance(data, dict) else []) or []
+        return opts if isinstance(opts, list) else [opts]
+    except Exception as e:
+        log.debug("tradier chain %s: %s", ticker, e)
+        return []
+
+
+async def _options_flow_tickers(*, universe=None, fetch_chain=None) -> "dict[str, int]":
+    if not _options_flow_enabled():
+        return {}
+    fetch_chain = fetch_chain or _fetch_tradier_chain
+    universe = universe if universe is not None else _discovery_universe()
+    out: dict[str, int] = {}
+    for tk in universe:
+        try:
+            w = _options_flow_weight(await asyncio.to_thread(fetch_chain, tk) or [])
+        except Exception:
+            w = 0
+        if w > 0:
+            norm = _norm_ticker(tk)
+            if norm:
+                out[norm] = w
     return out
 
 
@@ -2956,15 +3366,64 @@ def _discovery_enabled() -> bool:
     return os.getenv("THEMATIC_DISCOVERY", "false").strip().lower() in ("1", "true", "yes", "on")
 
 
+_DISCOVERY_SEED_UNIVERSE = [
+    "IREN", "CIFR", "WULF", "APLD", "CORZ", "OKLO", "SMR", "NNE", "RGTI",
+    "IONQ", "QBTS", "RCAT", "ONDS", "AVAV", "KTOS", "VRT", "MU", "ALAB",
+]
+
+
+def _discovery_universe_cap() -> int:
+    """Bound default discovery breadth so the source does useful work inside the
+    scan timeout. Set THEMATIC_DISCOVERY_MAX_UNIVERSE higher when the data fetcher
+    is cached/batched."""
+    try:
+        return max(1, int(float(os.getenv("THEMATIC_DISCOVERY_MAX_UNIVERSE", "350") or 350)))
+    except Exception:
+        return 350
+
+
+def _read_ticker_file(path: Path, *, limit: int) -> "list[str]":
+    out: list[str] = []
+    try:
+        for line in path.read_text().splitlines():
+            tk = _norm_ticker(line.strip().split(",")[0])
+            if tk:
+                out.append(tk)
+                if len(out) >= limit:
+                    break
+    except Exception:
+        return []
+    return out
+
+
 def _discovery_universe() -> "list[str]":
     """Tickers to price/volume-scan for breakouts independent of buzz. Env
-    THEMATIC_DISCOVERY_UNIVERSE (comma list) else a curated catalyst-theme set.
-    A broad universe (e.g. a liquid-tickers file) is the right production input."""
+    THEMATIC_DISCOVERY_UNIVERSE (comma list) wins. Otherwise use the repo's liquid
+    ticker universe, capped for runtime, plus the IREN-class catalyst seeds so the
+    no-buzz breakout scan is materially broader than a hand-picked watchlist."""
     raw = [x.strip().upper() for x in os.getenv("THEMATIC_DISCOVERY_UNIVERSE", "").split(",") if x.strip()]
-    return raw or [
-        "IREN", "CIFR", "WULF", "APLD", "CORZ", "OKLO", "SMR", "NNE", "RGTI",
-        "IONQ", "QBTS", "RCAT", "ONDS", "AVAV", "KTOS", "VRT", "MU", "ALAB",
-    ]
+    if raw:
+        return [t for t in (_norm_ticker(x) for x in raw) if t]
+
+    cap = _discovery_universe_cap()
+    file_override = os.getenv("THEMATIC_DISCOVERY_UNIVERSE_FILE", "").strip()
+    candidates: list[str] = []
+    if file_override:
+        candidates = _read_ticker_file(Path(file_override).expanduser(), limit=cap)
+    if not candidates:
+        for name in ("tickers_liquid.txt", "tickers_quality.txt", "all_tickers.txt"):
+            candidates = _read_ticker_file(ROOT / name, limit=cap)
+            if candidates:
+                break
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for tk in [*_DISCOVERY_SEED_UNIVERSE, *candidates]:
+        norm = _norm_ticker(tk)
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
 
 
 async def _discovery_tickers(*, fetch_bars=None, fetch_bench=None, universe=None) -> "dict[str, int]":
@@ -3023,6 +3482,51 @@ def _atr_stop_pct(price: float, atr: float, base_pct: float, *,
 
 def _risk_sizing_enabled() -> bool:
     return os.getenv("THEMATIC_RISK_SIZING", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _correlation_guard_enabled() -> bool:
+    return os.getenv("THEMATIC_CORRELATION_GUARD", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _correlation_guard_for_book(
+    ticker: str,
+    existing_tickers: "list[str]",
+    *,
+    fetch_bars=None,
+    max_corr: "float | None" = None,
+) -> "tuple[bool, str]":
+    """Advisory concentration guard for thematic approvals. It is default-off and
+    fail-open because missing price history should not corrupt approvals; when data
+    exists, block adding a name whose recent returns are too correlated with the
+    current book."""
+    if not _correlation_guard_enabled() or not existing_tickers:
+        return True, "correlation guard disabled or empty book"
+    try:
+        threshold = float(max_corr if max_corr is not None else os.getenv("THEMATIC_MAX_CORRELATION", "0.85"))
+    except Exception:
+        threshold = 0.85
+    threshold = max(0.50, min(threshold, 0.99))
+    fetch_bars = fetch_bars or _fetch_daily_bars
+    try:
+        from tradingagents.portfolio.correlation import max_correlation
+        cand = (fetch_bars(ticker) or {}).get("closes", [])
+        existing = {}
+        for tk in existing_tickers:
+            if str(tk).upper() == str(ticker).upper():
+                continue
+            closes = (fetch_bars(str(tk).upper()) or {}).get("closes", [])
+            if closes:
+                existing[str(tk).upper()] = closes
+        res = max_correlation(cand, existing)
+        mc = res.get("max_corr")
+        if mc is None:
+            return True, "correlation data unavailable"
+        if float(mc) >= threshold:
+            return False, f"{ticker} correlation {mc:.2f} with {res.get('with_ticker')} >= {threshold:.2f}"
+        return True, f"correlation {mc:.2f} below {threshold:.2f}"
+    except Exception as e:
+        log.debug("correlation guard unavailable for %s: %s", ticker, e)
+        return True, "correlation guard unavailable"
 
 
 # ── Regime gate (adaptive buy threshold by market regime) ────────────────────
@@ -3326,11 +3830,54 @@ async def approve_signal(
     if raw_score < MIN_SIGNAL_SCORE:
         score_warning = f"Score {raw_score:.0f} below threshold {MIN_SIGNAL_SCORE:.0f} — force override active"
 
+    approval_warnings: list[str] = []
+
+    # ── Runtime buy gates ───────────────────────────────────────────────────────
+    # Mirror the GET /signals `will_buy` logic here so direct approval cannot bypass
+    # regime-adjusted thresholds, short-pressure vetoes, or the breakout fast-lane.
+    regime_mult = _regime_threshold_multiplier()
+    eff_min_score = MIN_SIGNAL_SCORE * regime_mult
+    if raw_score < eff_min_score:
+        msg = f"Signal score {raw_score:.0f} < regime-adjusted threshold {eff_min_score:.0f}"
+        if not body.force:
+            raise HTTPException(status_code=400, detail=f"{msg} — pass force=true to override")
+        approval_warnings.append(f"{msg} — force override active")
+
+    short_map = _finra_short_map()
+    if short_map:
+        short_level = _short_pressure_level(short_map.get(str(ticker).upper()))
+        if short_level in ("high", "extreme"):
+            sig["short_pressure"] = short_level
+        if short_level == "extreme":
+            msg = "Extreme FINRA short-volume pressure veto"
+            if not body.force:
+                raise HTTPException(status_code=400, detail=f"{msg} — pass force=true to override")
+            approval_warnings.append(f"{msg} — force override active")
+    true_short_map = _true_short_interest_map(universe=[ticker])
+    if true_short_map:
+        structural_short_level = true_short_map.get(str(ticker).upper(), "unknown")
+        if structural_short_level in ("high", "extreme"):
+            sig["short_interest_pressure"] = structural_short_level
+        if structural_short_level == "extreme":
+            msg = "Extreme structural short-interest pressure veto"
+            if not body.force:
+                raise HTTPException(status_code=400, detail=f"{msg} — pass force=true to override")
+            approval_warnings.append(f"{msg} — force override active")
+
+    breakout_ok = False
+    if sig.get("is_spike") and raw_score >= eff_min_score and _breakout_confirm_enabled():
+        try:
+            breakout_ok = _ticker_breakout(str(ticker))
+        except Exception:
+            breakout_ok = False
+        if breakout_ok:
+            sig["breakout_confirmed"] = True
+
     # ── Spike gate ────────────────────────────────────────────────────────────
     # A10: one-scan spikes must not trade — unconfirmed trend, no follow-through.
-    # Block unless force=True.
+    # Block unless force=True or the breakout fast-lane supplies price confirmation.
     spike_warning = None
-    if sig.get("is_spike"):
+    if sig.get("is_spike") and not breakout_ok:
         if not body.force:
             raise HTTPException(
                 status_code=400,
@@ -3380,6 +3927,10 @@ async def approve_signal(
     prices = _fp([ticker])
     price  = prices.get(ticker)
     result = {"portfolio_added": True, "paper_trade": None}
+    if approval_warnings:
+        result["approval_warnings"] = approval_warnings
+    live_stop_pct = stop_pct
+    live_alloc = policy_alloc
     if price and base_dollar > 0:
         # Conviction-scaled position size (auto-sized from HIL base when caller omits)
         # Policy-sized allocation (conviction × concentration), computed above.
@@ -3400,6 +3951,9 @@ async def approve_signal(
             if (_risk_sizing_enabled() and _acct_val > 0) else 0
         shares  = _risk_shares if _risk_shares > 0 else int(alloc / price)
         cost    = round(price * shares, 2)
+        live_stop_pct = _eff_stop_pct
+        if _risk_shares > 0 and cost > 0:
+            live_alloc = cost
         now_iso = _dt.datetime.now().isoformat(timespec="seconds")
         today   = _dt.date.today().isoformat()
         alpha_tier = "A+" if conviction >= 9 else "A" if conviction >= 7 else "B" if conviction >= 5 else "C"
@@ -3430,6 +3984,11 @@ async def approve_signal(
                 cap_reason = f"Theme '{sig.get('theme')}' at max {PORTFOLIO_MAX_PER_THEME} positions"
             elif thematic_count >= PORTFOLIO_MAX_SPECULATIVE:
                 cap_reason = f"Thematic/speculative positions at max {PORTFOLIO_MAX_SPECULATIVE}"
+
+            if not cap_reason and ticker not in open_positions:
+                corr_ok, corr_reason = _correlation_guard_for_book(ticker, list(open_positions.keys()))
+                if not corr_ok:
+                    cap_reason = corr_reason
 
             # ── Circuit breakers ──────────────────────────────────────────────
             cb_ok, cb_reason = _check_portfolio_circuit_breakers(state, hil_settings, cost)
@@ -3494,9 +4053,9 @@ async def approve_signal(
                     **_fidelity_request_kwargs_from_approval(
                         ticker,
                         body,
-                        stop_pct=stop_pct,
+                        stop_pct=live_stop_pct,
                         target_pct=target_pct,
-                        dollar_amount=policy_alloc,
+                        dollar_amount=live_alloc,
                     )
                 )
                 fid_account = _validate_account_number(None)

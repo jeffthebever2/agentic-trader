@@ -6,6 +6,10 @@ goals.json.tmp
 goals.json.corrupt-*
 .metrics/
 .env
+# Any .env backup/variant holds live secrets — ignore all, keep only examples.
+.env.*
+!.env.example
+!.env.enterprise.example
 *.log
 mlruns/
 experiment_log.jsonl
@@ -19,6 +23,9 @@ __pycache__/
 .external_research/
 desktop/src-tauri/target/
 .fidelity_session_*.json
+# Encrypted broker login credentials (Fernet) — never commit, even encrypted.
+.fidelity_creds_*.json
+.broker-session-key-*
 ml_models/latest.backup_*/
 ml_models/.retrain_staging/
 backtest_results_*.json
@@ -43,3 +50,10 @@ tmp/
 # Agent runtime dirs
 .agents/
 .claude/
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules
+frontend/dssync-styles.css
+web/static/charts/

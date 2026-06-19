@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import time
+import os
 from pathlib import Path
 
 # Playwright needs ProactorEventLoop on Windows to spawn subprocesses
@@ -728,6 +729,36 @@ async def _thematic_exit_loop():
         await asyncio.sleep(interval)
 
 
+async def _autonomous_live_exit_loop():
+    """Optional armed live-exit executor for managed Fidelity holdings.
+
+    Default OFF. Requires THEME/THEMATIC_LIVE_EXIT_AUTONOMOUS=true plus a recent
+    step-up arm record created through /thematic/brain/live-exits/arm. The normal
+    exit guard remains propose-only; this loop only executes existing priority
+    stop/crash EXIT proposals through the Fidelity compliance path.
+    """
+    _log = logging.getLogger("autonomous_live_exit_loop")
+    await asyncio.sleep(180)
+    while True:
+        try:
+            if os.getenv("THEMATIC_LIVE_EXIT_AUTONOMOUS", "false").lower() == "true" and _brain_market_open():
+                from web.api.fidelity import _fidelity_sessioned_emails
+                from web.api.holdings_brain import run_autonomous_live_exit_executor
+                for email in _fidelity_sessioned_emails():
+                    try:
+                        executed = await run_autonomous_live_exit_executor(email, broker="fidelity")
+                        if executed:
+                            _log.warning("AUTO-LIVE-EXIT %s: %d order(s): %s",
+                                         email[:16], len(executed),
+                                         ", ".join(e.get("ticker", "?") for e in executed))
+                    except Exception as e:
+                        _log.warning("auto live exit failed for %s: %s", email[:16], e)
+        except Exception as e:
+            _log.warning("loop error: %s", e)
+        interval = max(2, int(float(os.getenv("THEMATIC_LIVE_EXIT_INTERVAL_MIN", "5")))) * 60
+        await asyncio.sleep(interval)
+
+
 _background_tasks: list[asyncio.Task] = []
 
 
@@ -740,6 +771,7 @@ async def _startup():
     _background_tasks.append(asyncio.create_task(_holdings_brain_loop()))
     _background_tasks.append(asyncio.create_task(_exit_guard_loop()))
     _background_tasks.append(asyncio.create_task(_thematic_exit_loop()))
+    _background_tasks.append(asyncio.create_task(_autonomous_live_exit_loop()))
 
 
 @app.on_event("shutdown")
@@ -770,6 +802,13 @@ async def root():
 # Mounts registered before route handlers so exact asset paths take priority.
 # /app/assets → hashed Vite bundles (js, css, fonts)
 app.mount("/app/assets", StaticFiles(directory=str(_react_dist / "assets")), name="react-assets")
+
+# /charts → generated trade-request chart PNGs (public, so Sendblue MMS can fetch
+# the media_url). check_dir=False so the mount survives a fresh checkout before
+# the first chart is written.
+_charts_dir = Path(__file__).parent / "static" / "charts"
+_charts_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/charts", StaticFiles(directory=str(_charts_dir), check_dir=False), name="trade-charts")
 
 
 def _react_file_response(filename: str) -> Response:

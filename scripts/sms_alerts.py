@@ -75,12 +75,13 @@ def send_textnow(to: str, message: str) -> dict:
     return {"success": True}
 
 
-def send_sendblue(to: str, message: str) -> dict:
+def send_sendblue(to: str, message: str, media_url: str | None = None) -> dict:
     """Sendblue (iMessage/SMS) backend. Primary texting service.
 
     Requires SENDBLUE_API_KEY_ID and SENDBLUE_API_SECRET in the environment.
     Optional SENDBLUE_FROM_NUMBER pins the sending number on multi-number
-    accounts. Normalizes the result to the shared {success, error, ...} shape.
+    accounts. `media_url` (publicly reachable) attaches an image (e.g. a trade
+    chart) as MMS/iMessage. Normalizes to the shared {success, error, ...} shape.
     """
     load_env_defaults()
     key_id = os.getenv("SENDBLUE_API_KEY_ID", "").strip()
@@ -91,6 +92,8 @@ def send_sendblue(to: str, message: str) -> dict:
             "error": "Sendblue not configured: set SENDBLUE_API_KEY_ID and SENDBLUE_API_SECRET in .env",
         }
     body = {"number": to, "content": message}
+    if media_url:
+        body["media_url"] = media_url
     from_number = os.getenv("SENDBLUE_FROM_NUMBER", "").strip()
     if from_number:
         body["from_number"] = from_number
@@ -180,13 +183,15 @@ def evaluate_sendblue(number: str) -> dict:
     return result
 
 
-def send_sms(to: str, message: str, provider: str | None = None) -> dict:
+def send_sms(to: str, message: str, provider: str | None = None,
+             media_url: str | None = None) -> dict:
     load_env_defaults()
     # Sendblue is the primary texting service; falls back only if explicitly
     # overridden via SMS_PROVIDER or the provider argument.
     provider = (provider or os.getenv("SMS_PROVIDER") or "sendblue").strip().lower()
     if provider in ("sendblue", "send_blue"):
-        return send_sendblue(to, message)
+        return send_sendblue(to, message, media_url=media_url)
+    # Other providers are SMS-text-only here; media is dropped (Sendblue is primary).
     if provider == "textnow":
         return send_textnow(to, message)
     if provider == "textbelt":

@@ -20,6 +20,7 @@ dependencies = [
     "langgraph>=0.4.8",
     "langgraph-checkpoint-sqlite>=2.0.0",
     "matplotlib>=3.9.0",
+    "mplfinance>=0.12.10b0",
     "numpy>=2.0.0",
     "pandas>=2.3.0",
     "parsel>=1.10.0",
