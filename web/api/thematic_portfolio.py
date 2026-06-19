@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import tempfile
 import time
@@ -66,6 +67,11 @@ def _fetch_prices(tickers: list[str]) -> dict[str, float]:
                     if t not in closes.columns:
                         continue
                     price = float(closes[t].dropna().iloc[-1])
+                    # Only cache a real, usable price. A 0 / negative / inf / NaN
+                    # would poison the cache and corrupt downstream sizing and
+                    # entry-price math (division, position dollars).
+                    if not math.isfinite(price) or price <= 0:
+                        continue
                     _price_cache[t] = (price, now)
                 except Exception:
                     pass
@@ -442,8 +448,32 @@ async def get_defaults(_user: dict = Depends(get_current_user)):
 # ── Paper-trade injection ─────────────────────────────────────────────────────
 import datetime as _dt
 
-PAPER_STATE_FILE = ROOT / "tmp" / "paper_trading_today" / "unified_brain" / "state.json"
+PAPER_STATE_FILE = ROOT / "tmp" / "thematic_paper" / "state.json"
 THEMATIC_TRADES_FILE = ROOT / "tmp" / "thematic_trades.jsonl"
+
+# Dedicated thematic paper book — isolated from the 15-portfolio competition
+# state.json (tmp/paper_trading_today/unified_brain/state.json) so thematic P&L
+# is tracked cleanly and the papertrader process never races writes on it.
+THEMATIC_PAPER_START_CASH = float(os.getenv("THEMATIC_PAPER_START_CASH", "100000") or 100000)
+
+
+def _ensure_thematic_paper_state() -> None:
+    """Create the dedicated thematic paper book on first use.
+
+    A fresh book must start with a realistic balance (not the legacy $10k
+    default scattered through `state.get("cash", ...)` reads) so conviction-
+    scaled ~$1k positions fit under the position caps, and every reader sees a
+    consistent cash figure within a single approve call. Idempotent.
+    """
+    if PAPER_STATE_FILE.exists():
+        return
+    PAPER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(PAPER_STATE_FILE, {
+        "cash": THEMATIC_PAPER_START_CASH,
+        "settled_cash": THEMATIC_PAPER_START_CASH,
+        "starting_cash": THEMATIC_PAPER_START_CASH,
+        "positions": {},
+    })
 
 
 class ThematicTradeIn(BaseModel):
@@ -544,6 +574,7 @@ async def thematic_paper_trade(body: ThematicTradeIn, user: dict = Depends(get_c
     # both write 11, losing one entry.
     async with _paper_state_lock:
         PAPER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_thematic_paper_state()
         state: dict = {}
         if PAPER_STATE_FILE.exists():
             try:
