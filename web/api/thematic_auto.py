@@ -1869,13 +1869,27 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
             reason = "stop_hit"
         elif age_days >= hold_days:
             reason = "max_hold_exceeded"
-        elif age_days >= 2 and latest_scores and ticker not in latest_scores:
-            reason = "buzz_collapse"
-        elif age_days >= 1 and latest_scores:
-            entry_raw = float(pos.get("entry_raw_score", 0) or 0)
-            current_raw = latest_scores.get(ticker, 0)
-            if entry_raw > 0 and current_raw < entry_raw * BUZZ_DECAY_RATIO:
-                reason = "buzz_decay"
+        else:
+            # Buzz-based exits require PRICE confirmation. Social buzz fading is not
+            # a price signal, and the entry is often peak buzz (so next-day decay is
+            # normal). Don't liquidate a position that is meaningfully GREEN just
+            # because attention pulled back or a flaky scraper didn't re-surface it
+            # — its stop/target/trailing manage the downside. Only buzz-exit a flat/
+            # red name (env THEMATIC_BUZZ_EXIT_GREEN_PCT, default 3% above entry).
+            _entry_px = float(pos.get("entry_price", 0) or 0)
+            try:
+                _green_buf = 1.0 + max(0.0, float(os.getenv("THEMATIC_BUZZ_EXIT_GREEN_PCT", "3"))) / 100.0
+            except ValueError:
+                _green_buf = 1.03
+            _is_green = _entry_px > 0 and price > _entry_px * _green_buf
+            if not _is_green:
+                if age_days >= 2 and latest_scores and ticker not in latest_scores:
+                    reason = "buzz_collapse"
+                elif age_days >= 1 and latest_scores:
+                    entry_raw = float(pos.get("entry_raw_score", 0) or 0)
+                    current_raw = latest_scores.get(ticker, 0)
+                    if entry_raw > 0 and current_raw < entry_raw * BUZZ_DECAY_RATIO:
+                        reason = "buzz_decay"
 
         if reason:
             pnl_pct = round((price - float(pos.get("entry_price", price))) / float(pos.get("entry_price", price)) * 100, 2) if pos.get("entry_price") else 0
