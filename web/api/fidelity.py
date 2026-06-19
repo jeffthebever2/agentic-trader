@@ -60,6 +60,48 @@ def _validate_account_number(account: str | None) -> str | None:
     return cleaned
 
 
+def _protected_account_numbers() -> set[str]:
+    """Account numbers that must NEVER be traded (Roth IRA / retirement / etc.).
+
+    Configured via env ``FIDELITY_PROTECTED_ACCOUNTS`` (comma-separated). This is
+    a broker-level kill switch independent of the Holdings-Brain account scrape —
+    it blocks ANY order routed to these accounts, from any code path.
+    """
+    raw = os.getenv("FIDELITY_PROTECTED_ACCOUNTS", "")
+    out = set()
+    for tok in raw.replace(" ", "").split(","):
+        t = tok.replace("-", "").strip()
+        if t:
+            out.add(t)
+    return out
+
+
+def _assert_account_tradeable(account: str | None) -> None:
+    """Raise 403 if the target account is on the protected (no-trade) list.
+
+    A protected list with an EMPTY/None target account is also refused — we never
+    trade the broker's default account when protected accounts exist, because the
+    default could resolve to a retirement account."""
+    from fastapi import HTTPException
+    protected = _protected_account_numbers()
+    if not protected:
+        return
+    cleaned = (account or "").replace("-", "").replace(" ", "").strip()
+    if cleaned in protected:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Account {cleaned} is protected (FIDELITY_PROTECTED_ACCOUNTS) — trading is blocked.",
+        )
+    # Strict mode: refuse the broker's default account too, so an order can never
+    # silently land on whichever account Fidelity has selected (could be the Roth).
+    if not cleaned and os.getenv("FIDELITY_REQUIRE_EXPLICIT_ACCOUNT", "false").strip().lower() == "true":
+        raise HTTPException(
+            status_code=403,
+            detail="FIDELITY_REQUIRE_EXPLICIT_ACCOUNT=true — specify an explicit, allowed "
+                   "account number (refusing the default account).",
+        )
+
+
 # Confirmation patterns on Fidelity order success page
 _ORDER_CONFIRM_PATTERNS = [
     "order received", "order submitted", "order number", "confirmation",
@@ -95,8 +137,11 @@ if str(ROOT) not in sys.path:
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
 from web.auth import require_admin, require_step_up
-from web.secure_store import encrypted_temp_file, is_encrypted_path, write_encrypted
-from pydantic import BaseModel, Field
+from web.secure_store import (
+    encrypted_temp_file, is_encrypted_path, write_encrypted,
+    write_encrypted_json, read_encrypted_json, broker_session_key_configured,
+)
+from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter()
 
@@ -108,6 +153,37 @@ _PW_CONTEXTS: dict[str, object] = {}
 _PW_INSTANCES: dict[str, object] = {}
 _PW_BROWSERS: dict[str, object] = {}
 _FIDELITY_STORAGE_PURPOSE = "fidelity-playwright-storage-state"
+_FIDELITY_CREDS_PURPOSE = "fidelity-login-credentials"
+
+# Per-user auto-relogin lock — prevents N concurrent endpoints all driving a
+# fresh browser login at once when a session expires.
+_RELOGIN_LOCKS: dict[str, asyncio.Lock] = {}
+# Per-user relogin failure backoff: key → (next_allowed_ts, consecutive_fails).
+# Stops repeated failed logins from locking the real Fidelity account when the
+# stored password is stale.
+_RELOGIN_BACKOFF: dict[str, tuple[float, int]] = {}
+_RELOGIN_BACKOFF_BASE = 300.0   # 5 min after first failure
+_RELOGIN_BACKOFF_MAX = 3600.0   # cap at 1 hour
+
+# Users with a live order on the shared browser context. While set, background
+# loops (keepalive / auto-relogin / exit-guard) must NOT reset or relogin that
+# user's browser — doing so closes the context and crashes the in-flight order.
+_ORDER_IN_FLIGHT: set[str] = set()
+
+
+class _order_in_flight:
+    """Context manager marking an active order so background loops leave the
+    browser alone (prevents TargetClosedError mid-order)."""
+    def __init__(self, email: str):
+        self.key = _user_key(email)
+
+    def __enter__(self):
+        _ORDER_IN_FLIGHT.add(self.key)
+        return self
+
+    def __exit__(self, *exc):
+        _ORDER_IN_FLIGHT.discard(self.key)
+        return False
 
 LOGIN_URL = "https://digital.fidelity.com/ftgw/digital/login/full-page"
 PORTFOLIO_URL = "https://digital.fidelity.com/ftgw/digital/portfolio/positions"
@@ -117,6 +193,22 @@ SUMMARY_URL = "https://digital.fidelity.com/ftgw/digital/portfolio/summary"
 
 def _user_key(email: str) -> str:
     return (email or "").strip().lower()
+
+
+# Fidelity bounces an expired session to a SIGN-IN url, not a "login" one:
+#   https://digital.fidelity.com/prgw/digital/signin/retail?...
+# Detecting only "login" missed this → false "connected" + failed scrapes.
+_LOGIN_URL_MARKERS = ("login", "signin", "sign-in", "/prgw/digital/signin", "/ftgw/digital/login")
+
+
+def _is_login_url(url: str) -> bool:
+    u = (url or "").lower()
+    return any(m in u for m in _LOGIN_URL_MARKERS)
+
+
+def _is_authenticated_url(url: str) -> bool:
+    u = (url or "").lower()
+    return "digital.fidelity" in u and not _is_login_url(u)
 
 
 def _fidelity_state_path(email: str) -> Path:
@@ -178,21 +270,26 @@ async def _ensure_browser(email: str):
         "--window-position=-32000,-32000",  # off-screen, not visible to user
         "--window-size=1280,900",
     ]
-    # Try system Edge/Chrome headless first (less detectable than bundled Chromium)
-    try:
-        browser = await instance.chromium.launch(
-            channel="msedge", headless=True, args=launch_args
-        )
-    except Exception:
+    visible_args = launch_args + ["--window-position=80,60", "--window-size=1280,900"]
+    # Fidelity blocks *headless* Chrome (bot detection → positions grid never
+    # renders → TargetClosedError). So we ALWAYS run a real headed browser; the
+    # only knob is whether it's on-screen or parked off-screen (invisible).
+    #   FIDELITY_HEADLESS=false → on-screen (debug login/scrape)
+    #   otherwise (default)      → headed but off-screen at -32000,-32000 (hidden)
+    on_screen = os.getenv("FIDELITY_HEADLESS", "true").strip().lower() == "false"
+    win_args = visible_args if on_screen else hidden_args
+    # Prefer system Edge/Chrome (less detectable than bundled Chromium), all headed.
+    for channel in ("msedge", "chrome", None):
         try:
-            browser = await instance.chromium.launch(
-                channel="chrome", headless=True, args=launch_args
-            )
+            kwargs = {"headless": False, "args": win_args}
+            if channel:
+                kwargs["channel"] = channel
+            browser = await instance.chromium.launch(**kwargs)
+            break
         except Exception:
-            # Bundled Chromium — Fidelity blocks headless, run headed but off-screen
-            browser = await instance.chromium.launch(
-                headless=False, args=hidden_args
-            )
+            browser = None
+    if browser is None:
+        raise RuntimeError("Could not launch any Chromium browser for Fidelity automation")
     _PW_BROWSERS[key] = browser
     storage_path = _fidelity_state_path(key)
     storage_tmp = encrypted_temp_file(storage_path, _FIDELITY_STORAGE_PURPOSE) if storage_path.exists() else None
@@ -217,7 +314,13 @@ async def _ensure_browser(email: str):
             except Exception:
                 pass
     if storage_path.exists() and not is_encrypted_path(storage_path):
-        await _save_context_storage(context, storage_path)
+        # Best-effort re-encrypt migration. A storage-save failure (e.g. the
+        # context was closed by a background loop) must NEVER crash context
+        # creation — same contract as _save_storage.
+        try:
+            await _save_context_storage(context, storage_path)
+        except Exception as e:
+            log.warning("storage re-encrypt skipped for %s: %s", key[:16], e)
     # Suppress automation flags
     await context.add_init_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
@@ -227,11 +330,17 @@ async def _ensure_browser(email: str):
 
 
 async def _save_storage(email: str):
+    """Persist the browser session (best-effort). NEVER raises — a storage-save
+    failure (e.g. the context was closed by a background loop) must not crash a
+    trade or any caller. A confirmed order must surface as success regardless."""
     key = _user_key(email)
     context = _PW_CONTEXTS.get(key)
-    if context:
-        path = _fidelity_state_path(key)
-        await _save_context_storage(context, path)
+    if not context:
+        return
+    try:
+        await _save_context_storage(context, _fidelity_state_path(key))
+    except Exception as e:
+        log.warning("session save skipped for %s: %s", key[:16], e)
 
 
 async def _save_context_storage(context, path: Path):
@@ -271,17 +380,30 @@ async def _is_logged_in(email: str) -> bool:
             await page.goto(PORTFOLIO_URL, wait_until="domcontentloaded", timeout=20_000)
             await asyncio.sleep(2)
             url = page.url
-            result = "login" not in url.lower() and "digital.fidelity" in url
+            result = _is_authenticated_url(url)
             _set_session_cache(email, result)
-            return result
         finally:
             try:
                 await page.close()
             except Exception:
                 pass
+        if result:
+            return True
     except Exception:
         _set_session_cache(email, False)
-        return False
+    # Session looks dead — try a silent re-login from stored creds (device must
+    # be trusted; otherwise returns False and the user logs in manually).
+    return await _auto_relogin(email)
+
+
+async def _handle_login_redirect(email: str, page) -> bool:
+    """Call when a *data* page unexpectedly redirected to Fidelity login.
+
+    Marks the cache dead immediately (so /status stops lying) and attempts a
+    silent re-login. Returns True if recovered — caller should re-navigate.
+    """
+    _set_session_cache(email, False)
+    return await _auto_relogin(email)
 
 
 async def _close_session(email: str):
@@ -290,6 +412,225 @@ async def _close_session(email: str):
     path = _fidelity_state_path(key)
     if path.exists():
         path.unlink()
+    # Wipe stored credentials too — logout means no silent re-login.
+    cpath = _fidelity_creds_path(key)
+    if cpath.exists():
+        try:
+            cpath.unlink()
+        except Exception:
+            pass
+
+
+# ── Credential storage (for silent auto re-login) ──────────────
+# Username + password are stored ENCRYPTED (Fernet, BROKER_SESSION_KEY) so the
+# server can silently re-login when a session expires. No TOTP secret is stored;
+# silent re-login only works once the device is trusted (Fidelity skips 2FA).
+def _fidelity_creds_path(email: str) -> Path:
+    digest = hashlib.sha256(_user_key(email).encode()).hexdigest()[:16]
+    return ROOT / f".fidelity_creds_{digest}.json"
+
+
+def _credential_storage_enabled() -> bool:
+    """Opt-in. Storing a recoverable password is off unless explicitly enabled."""
+    return os.getenv("FIDELITY_STORE_CREDENTIALS", "false").strip().lower() == "true"
+
+
+def _save_credentials(email: str, username: str, password: str) -> None:
+    if not _credential_storage_enabled():
+        log.info("FIDELITY_STORE_CREDENTIALS not enabled — not storing creds (manual re-login).")
+        return
+    if not broker_session_key_configured():
+        log.warning("BROKER_SESSION_KEY not configured — NOT storing Fidelity credentials (no auto re-login).")
+        return
+    # The on-disk auto-generated key sits next to the ciphertext: anyone with the
+    # box gets both. An env-supplied key is materially stronger. Warn, don't block.
+    try:
+        from web.secure_store import broker_session_key_status
+        if broker_session_key_status().get("source") == "local_file":
+            log.warning(
+                "Storing Fidelity creds with an ON-DISK encryption key (tmp/broker_session.key). "
+                "For stronger protection set BROKER_SESSION_KEY in the environment instead."
+            )
+    except Exception:
+        pass
+    try:
+        write_encrypted_json(
+            _fidelity_creds_path(email),
+            {"username": username, "password": password},
+            _FIDELITY_CREDS_PURPOSE,
+        )
+    except Exception as e:
+        log.warning("Failed to store Fidelity credentials: %s", e)
+
+
+def _load_credentials(email: str) -> dict | None:
+    path = _fidelity_creds_path(email)
+    if not path.exists():
+        return None
+    try:
+        data = read_encrypted_json(path, _FIDELITY_CREDS_PURPOSE)
+        if data.get("username") and data.get("password"):
+            return data
+    except Exception as e:
+        log.warning("Failed to read Fidelity credentials: %s", e)
+    return None
+
+
+async def _check_trust_device(page) -> None:
+    """Tick any 'remember/trust this device' checkbox so future logins skip 2FA.
+
+    Fidelity shows this either as a checkbox on the 2FA page (before submitting
+    the code) or as a button after auth. Safe to call when none is present.
+    """
+    # Checkboxes: select then ensure checked (label text varies)
+    for sel in (
+        "input[type='checkbox'][id*='remember' i]",
+        "input[type='checkbox'][id*='trust' i]",
+        "input[type='checkbox'][name*='remember' i]",
+        "label:has-text('Don\\'t ask') input[type='checkbox']",
+        "label:has-text('Remember') input[type='checkbox']",
+        "label:has-text('Trust') input[type='checkbox']",
+    ):
+        try:
+            loc = page.locator(sel).first
+            await loc.wait_for(state="attached", timeout=1500)
+            if not await loc.is_checked():
+                await loc.check(timeout=1500)
+            return
+        except Exception:
+            continue
+
+
+def _get_relogin_lock(email: str) -> asyncio.Lock:
+    key = _user_key(email)
+    if key not in _RELOGIN_LOCKS:
+        _RELOGIN_LOCKS[key] = asyncio.Lock()
+    return _RELOGIN_LOCKS[key]
+
+
+async def _auto_relogin(email: str) -> bool:
+    """Silently re-establish a Fidelity session from stored credentials.
+
+    Returns True only if it lands on an authenticated page WITHOUT needing 2FA
+    (relies on a previously trusted device). Never prompts; if 2FA is required
+    it gives up and returns False so the caller surfaces a manual-login error.
+    """
+    creds = _load_credentials(email)
+    if not creds:
+        return False
+    key = _user_key(email)
+    # Never reset/relogin the browser while an order is in flight — it would close
+    # the context the order is using (TargetClosedError).
+    if key in _ORDER_IN_FLIGHT:
+        return _get_session_cache(email) is True
+    # Respect failure backoff so stale creds can't hammer Fidelity into a lockout.
+    bo = _RELOGIN_BACKOFF.get(key)
+    if bo and _time.time() < bo[0]:
+        log.debug("Silent re-login in backoff for %s (%.0fs left)", email[:20], bo[0] - _time.time())
+        return False
+
+    def _note_failure(wipe: bool = False) -> None:
+        fails = (_RELOGIN_BACKOFF.get(key, (0.0, 0))[1]) + 1
+        delay = min(_RELOGIN_BACKOFF_BASE * (2 ** (fails - 1)), _RELOGIN_BACKOFF_MAX)
+        _RELOGIN_BACKOFF[key] = (_time.time() + delay, fails)
+        _set_session_cache(email, False)
+        if wipe:
+            # Credentials definitively rejected — delete them so we stop trying
+            # with a known-bad password and force a clean manual re-login.
+            cpath = _fidelity_creds_path(key)
+            if cpath.exists():
+                try:
+                    cpath.unlink()
+                except Exception:
+                    pass
+            log.warning("Stored Fidelity creds rejected — wiped; manual login required: %s", email[:20])
+
+    lock = _get_relogin_lock(email)
+    # If another coroutine is already relogging in, wait for it then report state.
+    if lock.locked():
+        async with lock:
+            return _get_session_cache(email) is True
+    async with lock:
+        log.info("Attempting silent Fidelity re-login: %s", email[:20])
+        try:
+            await _reset_browser_state(email)  # drop any half-dead context
+            ctx = await _ensure_browser(email)
+            page = await ctx.new_page()
+            try:
+                await page.goto(LOGIN_URL, wait_until="commit", timeout=60_000)
+                await asyncio.sleep(3)
+                state = await _login_fill(page, creds["username"], creds["password"])
+                if state == "need_totp":
+                    log.warning("Silent re-login needs 2FA (device not trusted) — manual login required: %s", email[:20])
+                    _note_failure()
+                    return False
+                if state == "login_error":
+                    _note_failure(wipe=True)
+                    return False
+                if state != "authenticated":
+                    await page.goto(PORTFOLIO_URL, wait_until="domcontentloaded", timeout=20_000)
+                    await asyncio.sleep(2)
+                    state = await _detect_page_state(page)
+                if state == "authenticated":
+                    await _save_storage(email)
+                    _set_session_cache(email, True)
+                    _RELOGIN_BACKOFF.pop(key, None)  # clear backoff on success
+                    log.info("Silent re-login succeeded: %s", email[:20])
+                    return True
+                _note_failure()
+                return False
+            finally:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning("Silent re-login failed for %s: %s", email[:20], e)
+            _note_failure()
+            return False
+
+
+async def _login_fill(page, username: str, password: str) -> str:
+    """Fill username → next → password → submit, tick trust-device, return page state.
+
+    Shared by the interactive WS auth flow and silent re-login. Does NOT handle
+    TOTP entry (caller does); it only ticks the trust-device box when present.
+    """
+    filled_user = await _try_fill(page, [
+        "#dom-username-input",
+        "input[name='userId']",
+        "input[id*='username' i]",
+        "input[placeholder*='username' i]",
+        "input[type='text']",
+    ], username, timeout=8000)
+    if not filled_user:
+        return "login_page"
+    next_clicked = await _try_click(page, [
+        "button[data-testid='nextBtn']",
+        "button[id*='next' i]",
+        "#dom-username-go-button",
+        "button[type='submit']",
+    ], timeout=3000)
+    if next_clicked:
+        await asyncio.sleep(1.5)
+    filled_pw = await _try_fill(page, [
+        "#dom-pswd-input",
+        "input[name='password']",
+        "input[type='password']",
+        "input[id*='password' i]",
+    ], password, timeout=8000)
+    if not filled_pw:
+        return "login_page"
+    # Tick trust-device BEFORE submitting so the credential step itself is trusted.
+    await _check_trust_device(page)
+    await _try_click(page, [
+        "#dom-login-button",
+        "button[data-testid='loginBtn']",
+        "button[type='submit']",
+        "#fs-login-button",
+    ], timeout=5000)
+    await asyncio.sleep(3)
+    return await _detect_page_state(page)
 
 
 # ── Auth WebSocket ─────────────────────────────────────────────
@@ -336,7 +677,7 @@ async def _detect_page_state(page) -> str:
         return "need_totp"
     if any(k in html for k in ("verification code", "one-time", "authenticator", "security code", "enter the code")):
         return "need_totp"
-    if "login" in url or "username" in html or "sign in" in html:
+    if _is_login_url(url) or "username" in html or "sign in" in html:
         return "login_page"
     if any(k in html for k in ("incorrect", "invalid", "failed", "error", "wrong")):
         return "login_error"
@@ -387,55 +728,14 @@ async def ws_fidelity_auth(websocket: WebSocket):
             await page.goto(LOGIN_URL, wait_until="commit", timeout=60_000)
             await asyncio.sleep(4)
 
-            # --- Username ---
-            await send({"step": "logging_in", "message": "Entering username…"})
-            filled_user = await _try_fill(page, [
-                "#dom-username-input",
-                "input[name='userId']",
-                "input[id*='username' i]",
-                "input[placeholder*='username' i]",
-                "input[type='text']",
-            ], username, timeout=8000)
-
-            if not filled_user:
-                await send({"step": "error", "message": "Could not find username field. Fidelity may have changed their login page."})
-                return
-
-            # Click Next / Continue if needed (some flows split username + password)
-            next_clicked = await _try_click(page, [
-                "button[data-testid='nextBtn']",
-                "button[id*='next' i]",
-                "#dom-username-go-button",
-                "button[type='submit']",
-            ], timeout=3000)
-            if next_clicked:
-                await asyncio.sleep(1.5)
-
-            # --- Password ---
-            await send({"step": "logging_in", "message": "Entering password…"})
-            filled_pw = await _try_fill(page, [
-                "#dom-pswd-input",
-                "input[name='password']",
-                "input[type='password']",
-                "input[id*='password' i]",
-            ], password, timeout=8000)
-
-            if not filled_pw:
-                await send({"step": "error", "message": "Could not find password field."})
-                return
-
-            await _try_click(page, [
-                "#dom-login-button",
-                "button[data-testid='loginBtn']",
-                "button[type='submit']",
-                "#fs-login-button",
-            ], timeout=5000)
-
-            await asyncio.sleep(3)
-            state = await _detect_page_state(page)
+            # --- Username + password (shared with silent re-login) ---
+            await send({"step": "logging_in", "message": "Entering credentials…"})
+            state = await _login_fill(page, username, password)
 
             # --- TOTP / 2FA ---
             if state == "need_totp":
+                # Tick the trust-device box on the 2FA page so future logins skip 2FA.
+                await _check_trust_device(page)
                 await send({
                     "step": "need_totp",
                     "message": "Two-factor authentication required.",
@@ -519,6 +819,9 @@ async def ws_fidelity_auth(websocket: WebSocket):
 
             await _save_storage(user_email)
             _set_session_cache(user_email, True)
+            # Store creds (encrypted) so the server can silently re-login when
+            # the session later expires — no manual login on trade approval.
+            _save_credentials(user_email, username, password)
             await send({"step": "authenticated", "message": "Connected to Fidelity successfully"})
 
         finally:
@@ -548,6 +851,11 @@ async def fidelity_status(user: dict = Depends(require_admin)):
         "session_scope": "per_user",
         "session_owner_hash": _session_owner_hash(email),
         "legacy_session_file": _LEGACY_STORAGE_STATE.exists(),
+        # True ⇒ server can reconnect silently when the session expires (no
+        # manual login on trade approval), provided the device stays trusted.
+        "auto_relogin": _load_credentials(email) is not None,
+        "broker_key_configured": broker_session_key_configured(),
+        "credential_storage_enabled": _credential_storage_enabled(),
     }
 
 
@@ -624,15 +932,20 @@ async def fidelity_positions(admin: dict = Depends(require_admin)):
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
 
-        if "login" in page.url.lower():
-            raise HTTPException(status_code=401, detail="Not authenticated with Fidelity")
+        if _is_login_url(page.url):
+            # Session died mid-flight — try a silent re-login, then re-navigate once.
+            if await _handle_login_redirect(admin["email"], page):
+                await _nav(page, PORTFOLIO_URL, sleep=6)
+            if _is_login_url(page.url):
+                raise HTTPException(status_code=401, detail="Not authenticated with Fidelity. Log in at /broker.")
 
+        grid_loaded = True
         try:
             await page.wait_for_selector(
                 '.ag-pinned-left-cols-container .ag-row[row-index]', timeout=15_000
             )
         except Exception:
-            pass
+            grid_loaded = False
         await asyncio.sleep(2)
 
         result = await page.evaluate("""
@@ -659,9 +972,25 @@ async def fidelity_positions(admin: dict = Depends(require_admin)):
             const positions = [];
             const grandTotals = {};
 
-            Object.entries(symMap).forEach(([ri, symText]) => {
+            // Iterate in numeric row-index order so account-group header rows are
+            // seen BEFORE the positions that belong to them. Fidelity renders an
+            // 'Account: <name> <number>' header row above each account's holdings.
+            let curAcctName = '';
+            let curAcctNum = '';
+            const ordered = Object.entries(symMap).sort((a, b) => Number(a[0]) - Number(b[0]));
+
+            ordered.forEach(([ri, symText]) => {
                 const lines = symText.split('\\n').map(l => l.trim()).filter(Boolean);
                 const ticker = lines[0] || '';
+
+                // Account-group header row → update current account context.
+                if (/^Account/i.test(symText) || /^[A-Z]?\\d{6,12}$/.test(ticker)) {
+                    const numMatch = symText.match(/\\b([A-Z]?\\d{6,12})\\b/);
+                    curAcctNum = numMatch ? numMatch[1] : '';
+                    curAcctName = symText.replace(/^Account:?/i, '')
+                        .replace(/\\b[A-Z]?\\d{6,12}\\b/, '').replace(/\\s+/g, ' ').trim();
+                    return;
+                }
 
                 // Capture grand total
                 if (ticker.startsWith('Grand total')) {
@@ -688,6 +1017,8 @@ async def fidelity_positions(admin: dict = Depends(require_admin)):
                 positions.push({
                     symbol:          ticker,
                     description:     desc,
+                    account_number:  curAcctNum,
+                    account_name:    curAcctName,
                     last_price:      lstLines[0] || '',
                     today_gain_loss: todLines[0] || '',
                     today_gain_pct:  todLines[1] || '',
@@ -708,7 +1039,16 @@ async def fidelity_positions(admin: dict = Depends(require_admin)):
         await _save_storage(admin["email"])
         positions = result.get("positions", [])
         grand = result.get("grandTotals", {})
-        return {"positions": positions, "grand_totals": grand, "url": page.url, "count": len(positions)}
+        # Grid never rendered AND nothing parsed → treat as a transient load
+        # failure, not a real empty account. Caller can retry instead of
+        # showing a misleading "0 positions" on a live, funded account.
+        if not grid_loaded and not positions and not grand:
+            raise HTTPException(
+                status_code=503,
+                detail="Fidelity positions grid did not load (session may be stale). Refresh and retry.",
+            )
+        return {"positions": positions, "grand_totals": grand, "url": page.url,
+                "count": len(positions), "grid_loaded": grid_loaded}
     finally:
         await page.close()
 
@@ -722,7 +1062,7 @@ async def fidelity_summary(admin: dict = Depends(require_admin)):
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
 
-        if "login" in page.url.lower():
+        if _is_login_url(page.url):
             raise HTTPException(status_code=401, detail="Not authenticated with Fidelity")
 
         try:
@@ -826,6 +1166,7 @@ async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(requi
     async with order_lock:
         if LIVE_TRADING_HARD_BLOCKED:
             raise HTTPException(status_code=403, detail="LIVE_TRADING_HARD_BLOCKED=True in compliance.py")
+        _assert_account_tradeable(body.account)  # block protected (Roth/IRA) accounts
         decision = validate_live_order(body.model_dump())
         if not decision.allowed:
             raise HTTPException(status_code=403, detail=decision.reason)
@@ -842,7 +1183,7 @@ async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(requi
             page = await ctx.new_page()
             await _nav(page, "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry", sleep=5)
 
-            if "login" in page.url.lower():
+            if _is_login_url(page.url):
                 raise HTTPException(status_code=401, detail="Not authenticated with Fidelity")
 
             if account:
@@ -892,19 +1233,13 @@ async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(requi
                 raise HTTPException(status_code=400, detail=f"Failed to select action: {e}")
 
             try:
+                # Playwright fill — a JS native-setter does NOT register with
+                # Fidelity's input framework ("Please enter a quantity" at preview).
                 qty_val = str(body.quantity)
-                await page.evaluate(f"""
-                () => {{
-                    const el = document.getElementById('eqt-shared-quantity');
-                    if (!el) throw new Error('qty input not found');
-                    el.focus();
-                    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-                    nativeSetter.set.call(el, '{qty_val}');
-                    el.dispatchEvent(new Event('input',  {{bubbles:true}}));
-                    el.dispatchEvent(new Event('change', {{bubbles:true}}));
-                    el.dispatchEvent(new KeyboardEvent('keyup', {{bubbles:true}}));
-                }}
-                """)
+                qty_loc = page.locator('#eqt-shared-quantity')
+                await qty_loc.wait_for(state="visible", timeout=8000)
+                await qty_loc.fill(qty_val)
+                await qty_loc.press("Tab")
                 await asyncio.sleep(0.8)
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Failed to enter quantity: {e}")
@@ -1028,8 +1363,12 @@ async def _get_fidelity_balances(email: str) -> dict:
     page = await ctx.new_page()
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
-        if "login" in page.url.lower():
-            return {"error": "not_authenticated"}
+        if _is_login_url(page.url):
+            # Session died — try silent re-login, re-navigate once before giving up.
+            if await _handle_login_redirect(email, page):
+                await _nav(page, PORTFOLIO_URL, sleep=6)
+            if _is_login_url(page.url):
+                return {"error": "not_authenticated"}
 
         try:
             await page.wait_for_selector(
@@ -1204,6 +1543,96 @@ class FidelityThematicTradeRequest(BaseModel):
     ask:              Optional[float] = None
     market_open:      Optional[bool] = None
 
+    # ── Input bounds (real money) ─────────────────────────────────────────────
+    # A stop_pct >= 100 yields a stop price <= $0; a negative stop_pct / target_pct
+    # inverts the protective stop / profit target; a negative dollar_amount or an
+    # out-of-range pct_of_account corrupts position sizing. Reject at the boundary
+    # — these never reach the Playwright order or the compliance quote gate.
+    @field_validator("stop_pct")
+    @classmethod
+    def _stop_pct_sane(cls, v: float) -> float:
+        if not (0 < v < 100):
+            raise ValueError("stop_pct must be between 0 and 100 (exclusive)")
+        return v
+
+    @field_validator("target_pct")
+    @classmethod
+    def _target_pct_sane(cls, v: float) -> float:
+        if not (0 < v <= 1000):
+            raise ValueError("target_pct must be between 0 and 1000")
+        return v
+
+    @field_validator("dollar_amount")
+    @classmethod
+    def _dollar_amount_positive(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and v <= 0:
+            raise ValueError("dollar_amount must be > 0")
+        return v
+
+    @field_validator("pct_of_account")
+    @classmethod
+    def _pct_of_account_sane(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and not (0 < v <= 100):
+            raise ValueError("pct_of_account must be between 0 and 100")
+        return v
+
+
+def _broker_quote_max_age_seconds() -> int:
+    """Operator-tunable execution-freshness window for broker (Playwright) orders.
+
+    The Fidelity order is placed via browser automation that itself takes
+    ~20-30s, so the compliance default of 3s is unreachable on this path. We
+    pass this bounded value through compliance's *supported* per-order
+    ``max_quote_age_seconds`` parameter — it widens nothing inside compliance.py
+    and never bypasses the trusted-source or spread checks.
+    """
+    try:
+        v = int(float(os.getenv("BROKER_QUOTE_MAX_AGE_SECONDS", "120")))
+    except Exception:
+        v = 120
+    return max(3, min(v, 600))
+
+
+def _trusted_quote_fields(ticker: str) -> dict:
+    """Fetch a trusted live quote via the multi-provider gateway (FMP/Finnhub/…).
+
+    Returns order-dict fields that satisfy the compliance PreTradeGate's
+    *trusted source* requirement, or ``{}`` when no trusted quote is available —
+    in which case a live order stays correctly blocked (fail-safe).
+
+    Note: the gateway stamps quote_time using the provider's exchange timestamp
+    in *naive local* time, so we also pass a matching naive-local ``now`` to keep
+    the freshness comparison like-for-like (compliance otherwise defaults to
+    UTC, which would skew the age by the local UTC offset and falsely block).
+    """
+    try:
+        import datetime as _dt
+        from tradingagents.data.quote_gateway import get_gateway
+        gw = get_gateway()
+        if gw is None:
+            return {}
+        gq = gw.get_quote(ticker)
+        if gq is None or not gq.best.trusted:
+            return {}
+        pk = gq.pretrade_kwargs()
+        qt = pk.get("price_snapshot_time")
+        qt_iso = qt.isoformat() if hasattr(qt, "isoformat") else (str(qt) if qt else None)
+        return {
+            "quote_price":    pk.get("price"),
+            "quote_time":     qt_iso,
+            "quote_source":   pk.get("quote_source"),
+            "backup_sources": pk.get("backup_sources") or [],
+            "consensus_ok":   pk.get("consensus_ok"),
+            "bid":            pk.get("bid"),
+            "ask":            pk.get("ask"),
+            "now":            _dt.datetime.now().isoformat(),
+            "max_quote_age_seconds": _broker_quote_max_age_seconds(),
+            "_trusted_reference_price": gq.best.reference_price(),
+        }
+    except Exception as e:
+        log.warning("Trusted quote fetch failed for %s: %s", ticker, e)
+        return {}
+
 
 @router.post("/fidelity/thematic-trade")
 async def fidelity_thematic_trade(
@@ -1251,6 +1680,8 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
     import datetime as _dt
     from fastapi import HTTPException
     from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
+
+    _assert_account_tradeable(account)  # block protected (Roth/IRA) accounts
 
     # ── 1. Fetch price ────────────────────────────────────────────────────────
     loop = asyncio.get_running_loop()
@@ -1335,6 +1766,19 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
         "ask": body.ask,
         "market_open": body.market_open,
     }
+    # Route a trusted live quote (FMP/Finnhub/…) into the order so it can pass
+    # the compliance trusted-source gate. Only when the caller didn't already
+    # supply a trusted source. No trusted quote ⇒ order stays blocked (fail-safe).
+    if not body.quote_source:
+        _tq = await loop.run_in_executor(None, _trusted_quote_fields, ticker)
+        if _tq:
+            _ref = _tq.pop("_trusted_reference_price", 0) or 0
+            order_dict.update({k: v for k, v in _tq.items() if not k.startswith("_")})
+            if _ref > 0:
+                limit_price = round(_ref * 1.002, 2)
+                order_dict["limit_price"] = limit_price
+                order_dict["quote_price"] = _ref
+
     decision = validate_live_order(order_dict)
     if not decision.allowed:
         raise HTTPException(status_code=403, detail=f"Compliance: {decision.reason}")
@@ -1351,11 +1795,12 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
 
         ctx = await _ensure_browser(admin["email"])
         page = await ctx.new_page()
+        _ORDER_IN_FLIGHT.add(_user_key(admin["email"]))  # freeze background browser resets
         try:
             trade_url = "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry"
             await _nav(page, trade_url, sleep=5)
 
-            if "login" in page.url.lower():
+            if _is_login_url(page.url):
                 raise HTTPException(status_code=401, detail="Session expired — log in again")
 
             # Account — use pre-validated numeric account number only
@@ -1477,8 +1922,12 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Fidelity order failed: {e}")
         finally:
+            _ORDER_IN_FLIGHT.discard(_user_key(admin["email"]))
             await _save_storage(admin["email"])
-            await page.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
     else:
         order_status = "preview"
 
@@ -1487,8 +1936,10 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
     if body.also_paper_trade and body.execute and order_status == "executed":
         try:
             from web.api.thematic_auto import _paper_state_lock, PAPER_STATE_FILE
+            from web.api.thematic_portfolio import _ensure_thematic_paper_state
             PAPER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
             async with _paper_state_lock:
+                _ensure_thematic_paper_state()
                 state: dict = {}
                 if PAPER_STATE_FILE.exists():
                     try:
@@ -1623,6 +2074,8 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
     from fastapi import HTTPException
     from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
 
+    _assert_account_tradeable(account)  # block protected (Roth/IRA) accounts
+
     # ── Fetch current Fidelity positions to find share count ──────────────────
     ctx = await _ensure_browser(admin["email"])
     page = await ctx.new_page()
@@ -1631,7 +2084,7 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
 
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
-        if "login" in page.url.lower():
+        if _is_login_url(page.url):
             raise HTTPException(status_code=401, detail="Not authenticated with Fidelity.")
 
         try:
@@ -1657,12 +2110,15 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
         }}
         """)
 
+        price_source = None
         if pos_data:
             try:
                 fidelity_shares = float(str(pos_data.get("qty", "")).replace(",", ""))
             except Exception:
                 pass
             last_price = _parse_dollar(pos_data.get("price", "") or "")
+            if last_price:
+                price_source = "fidelity_realtime"  # broker's own price = trusted
 
     finally:
         await page.close()
@@ -1689,28 +2145,56 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
             except Exception:
                 return None
         last_price = await loop.run_in_executor(None, _get_exit_price, ticker)
+        if last_price:
+            price_source = "yfinance"  # untrusted — will need an FMP trusted quote
 
     if not last_price:
         raise HTTPException(status_code=400, detail=f"Cannot determine price for {ticker}")
 
-    # Always use Limit order for exits — compliance blocks Market
-    limit_price = round(last_price * (1 + body.limit_pct / 100), 2)
+    # Exit order type: Limit (default, marketable) or Market (sell-only, gated by
+    # compliance ALLOW_MARKET_SELL). Market exits carry no limit price.
+    is_market = str(body.order_type or "Limit").strip().lower() == "market"
+    limit_price = None if is_market else round(last_price * (1 + body.limit_pct / 100), 2)
+
+    # The Fidelity-scraped price IS a trusted execution source (fidelity_realtime)
+    # — stamp it with a fresh naive-local time so compliance passes WITHOUT relying
+    # on a (rate-limited / sometimes timeless) FMP quote.
+    import datetime as _qdt
+    _broker_now = _qdt.datetime.now().isoformat(timespec="seconds")  # naive local
+    eff_source = body.quote_source or price_source or "yfinance"
+    eff_time = body.quote_time or (_broker_now if price_source == "fidelity_realtime" else None)
 
     order_dict = {
         "symbol": ticker, "action": "Sell",
-        "order_type": "Limit",
+        "order_type": "Market" if is_market else "Limit",
         "quantity": shares_to_sell,
         "limit_price": limit_price,
         "execute": body.execute,
         "quote_price": last_price,
-        "quote_time": body.quote_time,
-        "quote_source": body.quote_source or "yfinance",
+        "quote_time": eff_time,
+        "quote_source": eff_source,
         "backup_sources": body.backup_sources,
         "consensus_ok": body.consensus_ok,
         "bid": body.bid,
         "ask": body.ask,
         "market_open": body.market_open,
+        "now": _broker_now,
+        "max_quote_age_seconds": _broker_quote_max_age_seconds(),
     }
+    # If the price is NOT already from a trusted source (yfinance fallback), rescue
+    # the order with a trusted FMP/Finnhub quote. Skip when fidelity_realtime — it's
+    # already trusted and FMP can be unavailable.
+    if not body.quote_source and price_source != "fidelity_realtime":
+        _exit_loop = asyncio.get_running_loop()
+        _tq = await _exit_loop.run_in_executor(None, _trusted_quote_fields, ticker)
+        if _tq:
+            _ref = _tq.pop("_trusted_reference_price", 0) or 0
+            order_dict.update({k: v for k, v in _tq.items() if not k.startswith("_")})
+            if _ref > 0:
+                limit_price = round(_ref * (1 + body.limit_pct / 100), 2)
+                order_dict["limit_price"] = limit_price
+                order_dict["quote_price"] = _ref
+
     decision = validate_live_order(order_dict)
     if not decision.allowed:
         raise HTTPException(status_code=403, detail=f"Compliance: {decision.reason}")
@@ -1725,6 +2209,7 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
             raise HTTPException(status_code=403, detail="LIVE_TRADING_ENABLED not set to true in .env")
 
         exit_page = None  # define before try so finally can safely check
+        _ORDER_IN_FLIGHT.add(_user_key(admin["email"]))  # freeze background browser resets
         try:
             exit_page = await ctx.new_page()
             await _nav(exit_page, "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry", sleep=5)
@@ -1740,7 +2225,7 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
                     log.warning("Could not select account %s — using default", account)
 
             sym_input = exit_page.locator('#eq-ticket-dest-symbol')
-            await sym_input.wait_for(state="visible", timeout=10000)
+            await sym_input.wait_for(state="visible", timeout=20000)  # ticket form loads slowly
             await sym_input.click()
             await sym_input.fill(ticker)
             await asyncio.sleep(1.5)
@@ -1762,24 +2247,21 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
                     continue
             await asyncio.sleep(0.8)
 
-            # Quantity — integer shares only, no injection risk
+            # Quantity — integer shares only. Use Playwright fill (NOT a JS
+            # native-setter: that does not register with Fidelity's input
+            # framework → "Please enter a quantity" at preview). fill() avoids the
+            # overlay <label> watermark that intercepts a real mouse click.
             qty_val = str(int(shares_to_sell))
-            await exit_page.evaluate(f"""
-            () => {{
-                const el = document.getElementById('eqt-shared-quantity');
-                if (!el) throw new Error('qty not found');
-                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');
-                nativeSetter.set.call(el, '{qty_val}');
-                el.dispatchEvent(new Event('input',  {{bubbles:true}}));
-                el.dispatchEvent(new Event('change', {{bubbles:true}}));
-            }}
-            """)
+            qty_loc = exit_page.locator('#eqt-shared-quantity')
+            await qty_loc.wait_for(state="visible", timeout=8000)
+            await qty_loc.fill(qty_val)
+            await qty_loc.press("Tab")
             await asyncio.sleep(0.8)
 
-            # Order type — validated: only "Limit" allowed (compliance blocks Market)
+            # Order type — Limit (default) or Market (sell-only, compliance-gated)
             await exit_page.locator('#dest-dropdownlist-button-ordertype').click()
             await asyncio.sleep(1)
-            order_type_label = "Limit"  # always use Limit for exits (Market blocked by compliance)
+            order_type_label = "Market" if is_market else "Limit"
             for sel in [f'[role="option"]:has-text("{order_type_label}")', f'li:has-text("{order_type_label}")', f'a:has-text("{order_type_label}")']:
                 try:
                     loc = exit_page.locator(sel).first
@@ -1842,6 +2324,7 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Fidelity exit failed: {e}")
         finally:
+            _ORDER_IN_FLIGHT.discard(_user_key(admin["email"]))
             await _save_storage(admin["email"])
             if exit_page is not None:
                 try:
@@ -1892,7 +2375,7 @@ async def fidelity_thematic_sync(admin: dict = Depends(require_admin)):
     page = await ctx.new_page()
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
-        if "login" in page.url.lower():
+        if _is_login_url(page.url):
             raise HTTPException(status_code=401, detail="Not authenticated with Fidelity.")
         try:
             await page.wait_for_selector('.ag-pinned-left-cols-container .ag-row[row-index]', timeout=15_000)
@@ -2006,7 +2489,7 @@ async def fidelity_debug_trade(admin: dict = Depends(require_admin)):
         page = await ctx.new_page()
         await _nav(page, "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry", sleep=7)
         current_url = page.url
-        if "login" in current_url.lower():
+        if _is_login_url(current_url):
             return {"error": "Not authenticated — log in via Fidelity panel first", "url": current_url, "elements": [], "body_snippet": ""}
         # Safe JS — all values coerced to strings, className handled for SVG elements
         elements = await page.evaluate("""
