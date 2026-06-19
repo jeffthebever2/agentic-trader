@@ -801,15 +801,28 @@ async def _yahoo_movers(client: httpx.AsyncClient) -> dict[str, int]:
 _MAX_PER_SOURCE_PTS: float = 60.0
 
 
+# Dual-class / renamed tickers that refer to the same company. Without folding
+# these, one name's social signal is split across two tickers (so neither
+# confirms) and the picker can propose both. Map to the more-liquid primary line.
+_TICKER_ALIASES = {
+    "GOOG": "GOOGL",   # Alphabet C → A (one Alphabet position)
+    "FB": "META",      # Meta's old ticker still appears in chatter
+    "FCAU": "STLA",    # legacy → Stellantis
+    "SQ": "XYZ",       # Block renamed
+}
+
+
 def _norm_ticker(raw: object) -> str:
     """Canonical ticker key for cross-source merging: upper-case, stripped of
-    whitespace and a leading cashtag '$'. Ensures 'nvda', 'NVDA' and '$NVDA' from
-    different sources collapse to one entry so the multi-source confirmation bonus
-    actually fires and a name's score isn't fragmented across case variants."""
+    whitespace and a leading cashtag '$', then folded across dual-class/renamed
+    aliases. Ensures 'nvda', 'NVDA', '$NVDA' collapse to one entry — and that
+    GOOG/GOOGL or FB/META don't fragment a single company's signal across two
+    tickers (or seed two proposals for the same business)."""
     t = str(raw or "").strip().upper()
     if t.startswith("$"):
         t = t[1:]
-    return t.strip()
+    t = t.strip()
+    return _TICKER_ALIASES.get(t, t)
 
 
 async def _merge_signals(
