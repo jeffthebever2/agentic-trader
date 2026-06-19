@@ -989,7 +989,12 @@ async def _merge_signals(
     _SOLO_DAMPEN = 0.7
     for t in list(scores.keys()):
         srcs = source_presence.get(t, set())
-        if len(srcs) == 1 and not (srcs & _HIGH_TRUST_SOLO):
+        # scan_memory is the ticker's OWN prior-scan history, not an independent
+        # live source — it must not count as cross-confirmation here, or a
+        # single-live-feed name would dodge the dampener just for having appeared
+        # before. Dampen when there is <= 1 live (non-memory) source.
+        live = srcs - {"scan_memory"}
+        if len(live) <= 1 and not (live & _HIGH_TRUST_SOLO):
             scores[t] = round(scores[t] * _SOLO_DAMPEN, 1)
             breakdown.setdefault(t, {})["single_source_dampener"] = _SOLO_DAMPEN
 
