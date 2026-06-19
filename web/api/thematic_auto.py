@@ -2393,12 +2393,23 @@ def _adaptive_dollar(account_value: float, score: float, target_pct: float, hil:
 
 
 def _real_atr(ticker: str, price: float) -> float:
-    """Compute approximate 14-day ATR from yfinance. Falls back to 2% of price."""
+    """Compute approximate 14-day ATR from yfinance. Falls back to 2% of price.
+
+    Always returns a finite, non-negative value: a NaN/0/negative price or a
+    NaN ATR (thin/bad data) would otherwise feed a garbage stop distance."""
+    import math as _m
+    try:
+        px = float(price)
+    except (TypeError, ValueError):
+        px = 0.0
+    if not _m.isfinite(px) or px <= 0:
+        px = 0.0
+    fallback = round(px * 0.02, 4)  # 0.0 when price is unusable
     try:
         import yfinance as yf
         df = yf.download(ticker, period="20d", auto_adjust=True, progress=False)
         if df.empty or "High" not in df or "Low" not in df or "Close" not in df:
-            return round(price * 0.02, 4)
+            return fallback
         closes = df["Close"].squeeze()
         highs  = df["High"].squeeze()
         lows   = df["Low"].squeeze()
@@ -2407,9 +2418,11 @@ def _real_atr(ticker: str, price: float) -> float:
             (highs - prev_c).abs(), max
         ).combine((lows - prev_c).abs(), max)
         atr = float(tr.dropna().tail(14).mean())
-        return round(atr if atr > 0 else price * 0.02, 4)
+        if not _m.isfinite(atr) or atr <= 0:
+            return fallback
+        return round(atr, 4)
     except Exception:
-        return round(price * 0.02, 4)
+        return fallback
 
 
 def _check_portfolio_circuit_breakers(state: dict, hil: dict, base_dollar: float) -> tuple[bool, str]:
