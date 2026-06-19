@@ -599,23 +599,23 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
           candidates.length === 0 ? (
             <div style={{ padding: 20, color: 'var(--ink-faint)', fontSize: 12, textAlign: 'center' }}>No candidates today</div>
           ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <table className="data-table">
               <thead>
-                <tr style={{ background: 'var(--surface-soft)' }}>
+                <tr>
                   {['Ticker', 'Strategy', 'Entry', 'Target', 'ML%', 'Score'].map(h => (
-                    <th key={h} style={{ padding: '8px 12px', textAlign: 'left', color: 'var(--ink-faint)', fontWeight: 600, fontSize: 11, borderBottom: '1px solid var(--surface-rule)' }}>{h}</th>
+                    <th key={h} className={['Entry', 'Target', 'ML%', 'Score'].includes(h) ? 'num' : undefined}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {candidates.map((c, i) => (
-                  <tr key={i} className="tr-hover" style={{ borderBottom: '1px solid var(--surface-rule)' }}>
-                    <td style={{ padding: '8px 12px', fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{c.ticker}</td>
-                    <td style={{ padding: '8px 12px', color: 'var(--ink-muted)' }}>{c._stratLabel}</td>
-                    <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>${Number(c.entry).toFixed(2)}</td>
-                    <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: '#4ade80' }}>${Number(c.target).toFixed(2)}</td>
-                    <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>{(Number(c.ml_probability) * 100).toFixed(0)}%</td>
-                    <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: 'var(--ink)' }}>{Number(c.score).toFixed(2)}</td>
+                  <tr key={i}>
+                    <td className="sym font-mono">{c.ticker}</td>
+                    <td>{c._stratLabel}</td>
+                    <td className="num font-mono" style={{ color: 'var(--ink)' }}>${Number(c.entry).toFixed(2)}</td>
+                    <td className="num font-mono" style={{ color: '#4ade80' }}>${Number(c.target).toFixed(2)}</td>
+                    <td className="num font-mono" style={{ color: 'var(--accent)' }}>{(Number(c.ml_probability) * 100).toFixed(0)}%</td>
+                    <td className="num font-mono" style={{ color: 'var(--ink)' }}>{Number(c.score).toFixed(2)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -627,11 +627,11 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
           ) : trades.length === 0 ? (
             <div style={{ padding: 20, color: 'var(--ink-faint)', fontSize: 12, textAlign: 'center' }}>No recent trades</div>
           ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <table className="data-table">
               <thead>
-                <tr style={{ background: 'var(--surface-soft)' }}>
+                <tr>
                   {['Ticker', 'Strategy', 'Date', 'P&L'].map(h => (
-                    <th key={h} style={{ padding: '8px 12px', textAlign: 'left', color: 'var(--ink-faint)', fontWeight: 600, fontSize: 11, borderBottom: '1px solid var(--surface-rule)' }}>{h}</th>
+                    <th key={h} className={h === 'P&L' ? 'num' : undefined}>{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -639,11 +639,11 @@ function LiveFeedPanel({ accounts }: { accounts: PaperAccount[] }) {
                 {trades.map((t, i) => {
                   const pnl = t.pnl ?? 0
                   return (
-                    <tr key={i} className="tr-hover" style={{ borderBottom: '1px solid var(--surface-rule)' }}>
-                      <td style={{ padding: '8px 12px', fontWeight: 700, color: 'var(--ink)', fontFamily: 'var(--font-mono)' }}>{t.ticker ?? '—'}</td>
-                      <td style={{ padding: '8px 12px', color: 'var(--ink-muted)' }}>{t.strategy ?? '—'}</td>
-                      <td style={{ padding: '8px 12px', color: 'var(--ink-muted)' }}>{(t.timestamp ?? t.exit_date ?? t.date ?? '').slice(0, 10) || '—'}</td>
-                      <td style={{ padding: '8px 12px', fontFamily: 'var(--font-mono)', color: pnlColor(pnl) }}>
+                    <tr key={i}>
+                      <td className="sym font-mono">{t.ticker ?? '—'}</td>
+                      <td>{t.strategy ?? '—'}</td>
+                      <td>{(t.timestamp ?? t.exit_date ?? t.date ?? '').slice(0, 10) || '—'}</td>
+                      <td className="num font-mono" style={{ color: pnlColor(pnl) }}>
                         {pnl >= 0 ? '+' : ''}{fmt$(pnl, 2)}
                       </td>
                     </tr>
