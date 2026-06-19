@@ -2543,6 +2543,8 @@ async def get_signals(_user: dict = Depends(get_current_user)):
     # (env THEMATIC_REGIME_GATE, default off → multiplier 1.0, no change).
     _regime_mult = _regime_threshold_multiplier()
     _eff_min = MIN_SIGNAL_SCORE * _regime_mult
+    # Short-pressure risk overlay (env THEMATIC_SHORT_OVERLAY, default off → {}).
+    _short_map = _finra_short_map()
     # Annotate each signal with buy eligibility, spike status, and scan history
     for sig in pending:
         rs = float(sig.get("raw_score", 0) or 0)
@@ -2564,7 +2566,17 @@ async def get_signals(_user: dict = Depends(get_current_user)):
             sig["breakout_confirmed"] = True
         # will_buy: clear the (regime-adjusted) score threshold AND (confirmed by
         # 2+ scans OR a price breakout). Spike-only signals are shown but flagged.
-        sig["will_buy"]        = (rs >= _eff_min) and (not is_spike or breakout_ok)
+        _wb = (rs >= _eff_min) and (not is_spike or breakout_ok)
+        # Short-pressure overlay: surface the level, and VETO will_buy on extreme
+        # short volume (don't auto-suggest buying into a shorts-pressing-hard name;
+        # HIL can still approve manually). Additive-to-score is intentionally NOT done.
+        if _short_map:
+            _lvl = _short_pressure_level(_short_map.get(str(sig.get("ticker", "")).upper()))
+            if _lvl in ("high", "extreme"):
+                sig["short_pressure"] = _lvl
+            if _lvl == "extreme":
+                _wb = False
+        sig["will_buy"]        = _wb
         sig["score_threshold"] = round(_eff_min, 1)
         if _regime_mult != 1.0:
             sig["regime_multiplier"] = round(_regime_mult, 2)
@@ -2744,6 +2756,94 @@ def _ticker_breakout(ticker: str, *, fetch=None) -> bool:
 
 def _atr_stops_enabled() -> bool:
     return os.getenv("THEMATIC_ATR_STOPS", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── FINRA short-volume RISK OVERLAY (NOT a buzz source) ──────────────────────
+# Heavy short volume pressing into a long is a RISK, not a bullish signal — so it
+# must never be additive to the buzz score (that would wrongly rank UP shorted
+# names). It is surfaced as a per-signal risk annotation only. One daily file
+# covers all symbols (cached); pure parser + injectable fetch = testable offline.
+_finra_short_cache: dict = {"day": "", "map": {}}
+
+
+def _short_overlay_enabled() -> bool:
+    return os.getenv("THEMATIC_SHORT_OVERLAY", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _parse_finra_short_volume(text: str) -> "dict[str, float]":
+    """Parse a FINRA daily short-volume file (pipe-delimited; header row
+    Date|Symbol|ShortVolume|...|TotalVolume|...) → {symbol: short/total ratio}."""
+    out: dict[str, float] = {}
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return out
+    header = [h.strip().lower() for h in lines[0].split("|")]
+    try:
+        i_sym, i_short, i_total = header.index("symbol"), header.index("shortvolume"), header.index("totalvolume")
+    except ValueError:
+        return out
+    for ln in lines[1:]:
+        parts = ln.split("|")
+        if len(parts) <= max(i_sym, i_short, i_total):
+            continue
+        try:
+            sym = parts[i_sym].strip().upper()
+            sv, tv = float(parts[i_short]), float(parts[i_total])
+        except (ValueError, IndexError):
+            continue
+        if sym and tv > 0:
+            out[sym] = round(sv / tv, 4)
+    return out
+
+
+def _short_pressure_level(ratio: "float | None") -> str:
+    """'extreme' (>=0.60) | 'high' (>=0.50) | 'normal' | 'unknown'. ~0.40-0.45 is
+    typical market-wide, so >=0.50 means shorts are unusually active."""
+    if ratio is None:
+        return "unknown"
+    import math as _m
+    try:
+        r = float(ratio)
+    except (TypeError, ValueError):
+        return "unknown"
+    if not _m.isfinite(r):
+        return "unknown"
+    if r >= 0.60:
+        return "extreme"
+    if r >= 0.50:
+        return "high"
+    return "normal"
+
+
+def _fetch_finra_short_file() -> str:
+    """Today's FINRA consolidated short-volume file (no-auth CDN). '' on failure."""
+    import datetime as _d
+    ymd = _d.date.today().strftime("%Y%m%d")
+    try:
+        r = httpx.get(f"https://cdn.finra.org/equity/regsho/daily/CNMSshvol{ymd}.txt", timeout=10.0)
+        return r.text if r.status_code == 200 else ""
+    except Exception as e:
+        log.debug("finra file fetch: %s", e)
+        return ""
+
+
+def _finra_short_map(*, fetch=None, day=None) -> "dict[str, float]":
+    """Cached {symbol: short_ratio} for today. {} unless THEMATIC_SHORT_OVERLAY."""
+    if not _short_overlay_enabled():
+        return {}
+    import datetime as _d
+    today = day or _d.date.today().isoformat()
+    if _finra_short_cache.get("day") == today and _finra_short_cache.get("map"):
+        return _finra_short_cache["map"]
+    fetch = fetch or _fetch_finra_short_file
+    try:
+        m = _parse_finra_short_volume(fetch() or "")
+    except Exception as e:
+        log.debug("finra short overlay: %s", e)
+        return {}
+    if m:
+        _finra_short_cache["day"], _finra_short_cache["map"] = today, m
+    return m
 
 
 # ── Analyst signals (FMP grade changes + Finnhub recommendation trends) ──────
