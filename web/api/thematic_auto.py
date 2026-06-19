@@ -2747,6 +2747,44 @@ def _atr_stop_pct(price: float, atr: float, base_pct: float, *,
     return max(floor_pct, min(atr_pct, cap_pct))
 
 
+def _risk_sizing_enabled() -> bool:
+    return os.getenv("THEMATIC_RISK_SIZING", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _risk_pct_per_trade() -> float:
+    """Account fraction risked if the stop is hit (env THEMATIC_RISK_PCT_PER_TRADE,
+    default 1%, clamped to (0, 5])."""
+    try:
+        return max(0.05, min(5.0, float(os.getenv("THEMATIC_RISK_PCT_PER_TRADE", "1") or 1)))
+    except ValueError:
+        return 1.0
+
+
+def _risk_based_shares(account_value: float, price: float, stop: float,
+                       risk_pct: float, *, max_position_pct: float = 10.0) -> int:
+    """Volatility-targeted share count: size so a stop-out loses ~risk_pct of the
+    account (`shares = risk_budget / (entry − stop)`), bounded by the position cap.
+
+    This makes *dollar risk* constant across names regardless of their volatility
+    — the right way to size, vs equal-dollar which puts wildly different risk on a
+    quiet mega-cap and a volatile small-cap. Returns 0 on unusable inputs (caller
+    falls back to the dollar-allocation path). Pure + testable."""
+    import math as _m
+    try:
+        av, p, st, rp = float(account_value), float(price), float(stop), float(risk_pct)
+    except (TypeError, ValueError):
+        return 0
+    if not all(_m.isfinite(x) for x in (av, p, st, rp)):
+        return 0
+    if av <= 0 or p <= 0 or st <= 0 or st >= p or rp <= 0:
+        return 0
+    risk_per_share = p - st
+    risk_budget = av * (rp / 100.0)
+    shares = int(risk_budget / risk_per_share)
+    cap_shares = int(av * (max_position_pct / 100.0) / p)   # never exceed position cap
+    return max(0, min(shares, cap_shares))
+
+
 def _real_atr(ticker: str, price: float) -> float:
     """Compute approximate 14-day ATR from yfinance. Falls back to 2% of price.
 
@@ -3028,8 +3066,6 @@ async def approve_signal(
         # Policy-sized allocation (conviction × concentration), computed above.
         alloc = policy_alloc
 
-        shares  = int(alloc / price)
-        cost    = round(price * shares, 2)
         # Fetch ATR before acquiring lock (IO-bound, no state dependency)
         loop = asyncio.get_running_loop()
         atr = await loop.run_in_executor(None, _real_atr, ticker, price)
@@ -3037,6 +3073,14 @@ async def approve_signal(
         _eff_stop_pct = _atr_stop_pct(price, atr, stop_pct) if _atr_stops_enabled() else stop_pct
         stop    = round(price * (1 - _eff_stop_pct / 100), 4)
         target  = round(price * (1 + target_pct / 100), 4)
+        # Position size. Risk-based (env THEMATIC_RISK_SIZING, default off): size so
+        # a stop-out loses ~THEMATIC_RISK_PCT_PER_TRADE of the account (constant
+        # dollar risk across names), bounded by the 10% cap. Else the policy dollar
+        # alloc. Risk-sizing of 0 (unusable inputs) falls back to the alloc path.
+        _risk_shares = _risk_based_shares(_acct_val, price, stop, _risk_pct_per_trade()) \
+            if (_risk_sizing_enabled() and _acct_val > 0) else 0
+        shares  = _risk_shares if _risk_shares > 0 else int(alloc / price)
+        cost    = round(price * shares, 2)
         now_iso = _dt.datetime.now().isoformat(timespec="seconds")
         today   = _dt.date.today().isoformat()
         alpha_tier = "A+" if conviction >= 9 else "A" if conviction >= 7 else "B" if conviction >= 5 else "C"
