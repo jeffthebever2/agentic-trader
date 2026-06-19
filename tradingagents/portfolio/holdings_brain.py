@@ -336,8 +336,8 @@ _NON_EQUITY_NAME_KEYWORDS = (
 
 def is_non_equity_symbol(ticker: str, name: str = "") -> bool:
     """True for money-market / mutual-fund holdings the brain must not trade."""
-    t = (ticker or "").upper().strip()
-    n = (name or "").lower()
+    t = str(ticker or "").upper().strip()   # coerce: a non-str ticker must not crash
+    n = str(name or "").lower()
     if any(k in n for k in _NON_EQUITY_NAME_KEYWORDS):
         return True
     if t.endswith("XX"):  # money-market sweep funds
