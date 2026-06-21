@@ -1,0 +1,8 @@
+# Windows batch / PowerShell scripts must check out with CRLF line endings,
+# or cmd.exe can mis-parse them.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Shell scripts must stay LF even on Windows checkouts.
+*.sh    text eol=lf

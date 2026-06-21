@@ -70,6 +70,24 @@ cd frontend && npm install && npm run build   # → web/static/dist (served live
 Dashboard (SPA): **http://localhost:8001/app**
 Legacy portfolio leaderboard (server-rendered): **http://localhost:8001/portfolios**
 
+### Windows (one-click)
+
+On Windows, skip the steps above — run the launcher from the repo root:
+
+```bat
+start.bat            :: set up venv + deps + .env + UI, then start the dashboard
+start.bat doctor     :: check what's installed / wrong (changes nothing)
+start.bat stop       :: stop the dashboard
+start.bat help       :: all commands (paper, train, retrain, all, ...)
+```
+
+Double-click `start.bat`, or run it in Command Prompt / PowerShell. The first run creates
+`.venv`, installs dependencies, copies `.env`, and builds the UI (a few minutes); after
+that it starts in seconds and opens the dashboard in your browser. On any failure it
+prints plain-English `[FAIL]` lines saying exactly what to fix. Requires Python 3.10+ on
+PATH (tick *Add python.exe to PATH* when installing); Node 18+ only if the UI isn't
+already built. The brains live in `scripts/windows_launcher.py`.
+
 ---
 
 ## Commands
