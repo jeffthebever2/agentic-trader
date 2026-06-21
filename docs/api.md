@@ -1,330 +1,325 @@
-# TradingAgents API Documentation
+# Agentic Trader — Web API Reference
 
-Two distinct APIs live in this project:
-1. **Python SDK** — `TradingAgentsGraph` for multi-agent LLM analysis
-2. **Web API** — FastAPI backend for paper trading, thematic portfolios, live trading, ML, and admin
+Router-level reference for the FastAPI backend (`web/`). This is a **router map**, not an
+exhaustive per-endpoint catalog — it lists each router's prefix, purpose, and key endpoints.
+For exact request/response shapes, read the router source in `web/api/*.py`.
 
----
+## Conventions
 
-## Python SDK
+| | |
+|---|---|
+| **Base URL** | `http://127.0.0.1:8001` (uvicorn, localhost-only; public access via Cloudflare tunnel) |
+| **SPA** | Served under base path `/app` (React `BrowserRouter basename="/app"`) |
+| **API prefix** | Every router in `web/api/` is mounted with `prefix="/api"`, so all paths below are under `/api/...` — **except `portfolios.py`, which self-declares `/api/portfolios/...`** |
+| **Auth** | Cloudflare Access JWT (production) or session cookie (dev). User identity resolved per-request. There is **no** `POST /api/auth/login` / `/logout` — auth is handled by the Cloudflare edge, not the app. |
+| **WebSockets** | Per-feature, not multiplexed. No single `/ws`. See [WebSockets](#websockets). |
 
-### TradingAgentsGraph
+`web/api/fidelity_trade.py` is **not a mounted router** — it is just a Pydantic request model used
+by the Fidelity endpoints.
 
-```python
-from tradingagents.graph.trading_graph import TradingAgentsGraph
+### Live-order compliance kill-chain
 
-ta = TradingAgentsGraph(
-    selected_analysts=["market", "social", "news", "fundamentals"],
-    debug=False,
-    config=None,      # uses DEFAULT_CONFIG if None
-    callbacks=None,   # LangChain callback handlers
-)
-state, decision = ta.propagate("AAPL", "2024-01-15")
-```
+Order-placing endpoints (`POST /api/fidelity/trade`, `/api/fidelity/thematic-trade`,
+`/api/fidelity/thematic-exit`, and the Holdings-Brain approve route) route through
+`tradingagents/compliance.py::validate_live_order` **and** require per-trade step-up 2FA. Gates:
 
-**`propagate(company_name, trade_date)`** returns `(state_dict, decision_string)`.
+- **Limit orders only** — no market / short / margin / options.
+- **`MAX_POSITION_PCT_OF_ACCOUNT` = 10%** of account per position.
+- **$50k per order** cap.
+- **Trusted, fresh execution quote** required (`PreTradeGate`, `require_trusted_source=True`;
+  trusted sources = finnhub / twelve_data / fmp). yfinance is untrusted for execution.
+- Two master kill-switches: `LIVE_TRADING_HARD_BLOCKED` (source constant) and
+  `LIVE_TRADING_ENABLED` (`.env`).
 
-**Configuration keys:** `llm_provider`, `deep_think_llm`, `quick_think_llm`, `max_debate_rounds`, `data_cache_dir`, `checkpoint_enabled`, `starting_cash`, `portfolio_state_path`, `trade_log_path`.
+**Never weaken these gates — real money flows through here.**
 
-**Data providers:** `yfinance` (free), `alpha_vantage` (paid), `fmp` (paid), `sec` (EDGAR filings).
+## Health (not under the `/api`-prefix rule)
 
-**Metrics:**
-```python
-from tradingagents.metrics import get_metrics
-summary = get_metrics().get_summary()
-```
+Both bare and `/api`-prefixed forms exist:
 
----
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health`, `/api/health` | Liveness |
+| GET | `/health/deep`, `/api/health/deep` | Deep health (deps, market-hours aware) |
 
-## Web API
+## WebSockets
 
-Base URL: `http://localhost:8000` (default). All endpoints require authentication unless noted.
-
-Auth: Cloudflare Access JWT (production) or session cookie (dev). Manager endpoints additionally require `X-Manager-Key` header.
-
----
-
-### Auth
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/auth/me` | Current user info |
-| POST | `/api/auth/login` | Login (returns session) |
-| POST | `/api/auth/logout` | Logout |
-| GET | `/api/auth/2fa/status` | 2FA enrollment status |
-| POST | `/api/auth/2fa/enroll` | Enroll TOTP |
-| POST | `/api/auth/2fa/verify` | Verify TOTP code |
-| POST | `/api/auth/step-up` | Step-up auth for sensitive actions |
+| Path | Purpose |
+|---|---|
+| `/api/ws/analyze` | Streaming LLM multi-agent analysis |
+| `/api/ws/backtest` | Strategy backtest progress |
+| `/api/ws/algo-backtest` | Algo backtest progress |
+| `/api/ws/scanner/scan` | Live scan progress |
+| `/api/ws/ml-train` | ML training progress |
+| `/api/ws/rl-train` | RL training progress |
+| `/api/ws/fidelity-auth` | Fidelity Playwright login (TOTP pause handshake) |
 
 ---
 
-### Market Data
+## Routers
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/market/quote?symbol=X` | Live quote |
-| GET | `/api/market/quote-detail?symbol=X` | Fundamentals, 52-week range, analyst target |
-| GET | `/api/market/history?symbol=X&period=1y` | OHLCV history |
-| GET | `/api/market/news?symbol=X` | Latest news for symbol |
-| GET | `/api/market/regime` | Current market regime state |
-| GET | `/api/market/watchlist` | User watchlist |
-| POST | `/api/market/watchlist` | Add to watchlist |
-| DELETE | `/api/market/watchlist/{symbol}` | Remove from watchlist |
-| GET | `/api/market/opportunities` | Top screener opportunities |
+All paths below are relative to `/api` unless shown otherwise.
 
----
+### auth_routes.py — `/auth/*`
+Current-user context and user administration (login itself is Cloudflare's job).
 
-### Paper Trading
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/auth/me` | Current user identity |
+| GET | `/auth/features` | Feature flags visible to this user |
+| GET | `/auth/users` | List users (admin) |
+| PUT | `/auth/users/{email}/role` | Change a user's role (admin) |
+| DELETE | `/auth/users/{email}` | Remove a user (admin) |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/paper/start` | Start paper trading session |
-| POST | `/api/paper/stop` | Stop running session |
-| GET | `/api/paper/status` | Session status + config |
-| GET | `/api/paper/summary` | Portfolio summary + P&L |
-| GET | `/api/paper/positions` | Open positions |
-| GET | `/api/paper/candidates` | Current scan candidates |
-| GET | `/api/paper/events` | Event log (last N entries) |
-| GET | `/api/paper/hil/pending` | Pending HIL approvals |
-| POST | `/api/paper/hil/approve` | Approve HIL trade |
-| POST | `/api/paper/hil/reject` | Reject HIL trade |
-| GET | `/api/paper/settings` | HIL + paper settings |
-| POST | `/api/paper/settings` | Update settings |
+### twofa_routes.py — `/auth/2fa/*`
+TOTP / passcode / passkey enrollment and **per-trade step-up** challenges.
 
-**Default config (POST /api/paper/start body):**
-```json
-{
-  "target_mult": 1.2,
-  "stop_mult": 1.0,
-  "ml_probability_threshold": 0.55,
-  "ml_large_loss_max": 0.50,
-  "min_risk_reward": 1.15,
-  "skip_vix_low_vol": true,
-  "skip_extended_bounce": true,
-  "skip_thursday": true
-}
-```
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/auth/2fa/status` | Enrollment + method status |
+| POST | `/auth/2fa/totp/enroll`, `/totp/activate`, `/totp/disable` | TOTP lifecycle |
+| GET | `/auth/2fa/totp/qr` | TOTP enrollment QR |
+| POST | `/auth/2fa/passcode/set`, `/passcode/disable` | Trading-passcode lifecycle |
+| POST | `/auth/2fa/method` | Set preferred step-up method |
+| POST | `/auth/2fa/step-up/totp`, `/step-up/passcode`, `/step-up/email`, `/step-up/email/send` | Step-up via TOTP / passcode / email |
+| POST | `/auth/2fa/step-up/passkey/begin`, `/step-up/passkey/complete` | Step-up via passkey |
+| POST | `/auth/2fa/passkey/register/begin`, `/passkey/register/complete` | Register a passkey |
+| DELETE | `/auth/2fa/passkey/{id}` | Remove a passkey |
 
----
+### market.py — `/market/*`
+Quotes, charts, news, watchlist, and the trusted-quote gateway.
 
-### Thematic Portfolio (Manual Conviction)
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/market/quotes` | Batch quotes |
+| GET | `/market/quote-detail` | Single-symbol detail (fundamentals, 52w, target) |
+| GET | `/market/chart` | OHLCV chart data |
+| GET | `/market/sparklines` | Compact sparkline series |
+| GET | `/market/sp500-list` | S&P 500 constituents |
+| GET | `/market/news-summary` | News summary for a symbol |
+| GET | `/market/watchlist` | User watchlist |
+| GET | `/market/trade-chart.png` | Rendered TradingView-style trade chart (cached PNG) |
+| GET | `/market/gateway-quote` | Trusted-source quote via `quote_gateway` |
+| GET | `/market/gateway-health` | Quote-gateway provider health |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/thematic/portfolio` | Full portfolio with live prices + scores |
-| POST | `/api/thematic/portfolio/position` | Add position |
-| PUT | `/api/thematic/portfolio/position/{ticker}` | Edit position |
-| DELETE | `/api/thematic/portfolio/position/{ticker}` | Remove position |
-| GET | `/api/thematic/portfolio/themes` | User's themes |
-| POST | `/api/thematic/portfolio/themes/{theme_key}` | Add/update theme |
-| POST | `/api/thematic/portfolio/notes` | Save portfolio notes |
-| GET | `/api/thematic/portfolio/score/{ticker}` | Score single position |
-| GET | `/api/thematic/portfolio/defaults` | Themes, categories, risk levels for dropdowns |
-| POST | `/api/thematic/trade` | Inject paper trade with R:R gate + conviction scaling |
+### analysis.py — `/analyze`
+Multi-agent LLM analysis (WebSocket-driven, not job-poll).
 
-**`POST /api/thematic/trade` body:**
-```json
-{
-  "ticker": "NVDA",
-  "dollar_amount": 500,    // scales by conviction from portfolio
-  "entry_price": null,     // null = fetch live price
-  "stop_pct": 5.0,
-  "target_pct": 10.0       // auto-widened if R:R < min_rr
-}
-```
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/analyze` | Kick off an analysis |
+| WS | `/ws/analyze` | Stream the run |
 
-**Response includes:** `rr`, `conviction`, `atr`, `warnings[]` (if R:R was auto-widened).
+### scanner.py — `/scanner/*`
+Breakout/pullback candidate screening.
 
----
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/scanner/screen` | Run a screen |
+| GET | `/scanner/ticker-files` | Available ticker universe files |
+| GET | `/scanner/tickers` | Tickers in a given file |
+| WS | `/ws/scanner/scan` | Stream scan progress |
 
-### Thematic Auto (AI-Picked Signals)
+### backtest.py — `/backtest/*`
+Backtest runs and result artifacts.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/thematic/auto/scan` | Trigger fresh scan (async) |
-| GET | `/api/thematic/auto/status` | Scan status |
-| GET | `/api/thematic/auto/signals` | Pending signal queue |
-| POST | `/api/thematic/auto/signals/{id}/approve` | Approve signal → paper trade |
-| POST | `/api/thematic/auto/signals/{id}/skip` | Skip signal |
-| GET | `/api/thematic/auto/trending` | Raw trending tickers (no AI) |
-| GET | `/api/thematic/auto/exit-check` | Dry-run: positions that would exit |
-| POST | `/api/thematic/auto/exit-check` | Execute exits (stop/target/hold/buzz) |
-| GET | `/api/thematic/auto/exit-log` | Last 50 exit records |
-| GET | `/api/thematic/auto/score-history?limit=20` | Last N scan score snapshots |
-| GET | `/api/thematic/auto/brave-usage` | Brave Search monthly usage |
-| GET | `/api/thematic/auto/hil-settings` | HIL settings |
-| POST | `/api/thematic/auto/hil-settings` | Update HIL settings |
-| GET | `/api/thematic/auto/twitter-status` | Twitter API availability |
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/backtest/results` | List result files |
+| GET | `/backtest/results/{filename}` | Fetch one result file |
+| POST | `/backtest/screen` | Screen within a backtest |
+| WS | `/ws/backtest`, `/ws/algo-backtest` | Stream backtest / algo-backtest |
 
-**HIL settings body:**
-```json
-{
-  "enabled": true,
-  "dollar_amount": 500,
-  "auto_trade_paper": false,
-  "min_rr": 1.5,
-  "max_portfolio_heat": 80.0,
-  "daily_loss_limit_pct": 3.0,
-  "conviction_scale": true,
-  "sms_notify": false
-}
-```
+### ml.py — `/ml/*`
+Deployed-model status and training. (Note: `POST /ml/retrain` lives in **system.py**.)
 
-**`POST /api/thematic/auto/signals/{id}/approve` body:**
-```json
-{
-  "dollar_amount": 500,
-  "stop_pct": null,      // null = use signal's stop
-  "target_pct": null,    // null = use signal's target
-  "fidelity_trade": false,
-  "execute_fidelity": false
-}
-```
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/ml/status` | Deployed model stats (ROC, Brier, features, date) |
+| GET | `/ml/readiness` | Whether a usable model is loaded |
+| GET | `/ml/history` | Past training runs |
+| WS | `/ws/ml-train` | Stream a training run |
 
----
+### rl.py — `/rl/*`
+Reinforcement-learning training (`.venv-torch`).
 
-### Portfolio (Manual Tracker)
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/rl/status` | RL training status |
+| WS | `/ws/rl-train` | Stream an RL training run |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/portfolio` | Portfolio with live prices + P&L |
-| POST | `/api/portfolio/positions` | Add position (deducted from cash) |
-| DELETE | `/api/portfolio/positions/{ticker}` | Remove (cash returned at current price) |
-| GET | `/api/portfolio/history` | Trade history log |
-| GET | `/api/portfolio/paper-trades` | Paper trades from account file |
+### paper.py — `/paper/*`
+The 15-portfolio paper competition, HIL queue, and SMS/MMS approval bridge.
 
----
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/paper/analytics` | Paper analytics |
+| GET | `/paper/equity` | Equity curve |
+| GET | `/paper/system-health` | Paper-loop health |
+| GET | `/paper/quotes` | Quotes for paper positions |
+| GET | `/paper/hil/pending` | Pending HIL approvals |
+| POST | `/paper/hil/resolve` | Resolve a pending item (single endpoint — not approve/reject) |
+| GET | `/approve` | SMS approve deep-link target |
+| — | `/paper/sms/*`, `/paper/mms/test` | SMS/MMS notify + inbound + test |
 
-### ML
+### portfolio.py — `/portfolio/*`
+Single manual portfolio tracker.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/ml/summary` | Model stats: ROC, Brier, feature count, training date |
-| GET | `/api/ml/feature-importance` | Top features |
-| GET | `/api/ml/score/{ticker}` | Score single ticker with deployed model |
-| POST | `/api/ml/retrain` | Trigger retrain pipeline (admin) |
-| GET | `/api/ml/retrain/status` | Retrain job status |
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/portfolio/positions` | Positions with live prices + P&L |
 
----
+### portfolios.py — `/api/portfolios/*` (self-prefixed)
+The 15-portfolio competition leaderboard (note: declares its own `/api/portfolios` prefix).
 
-### Scanner
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/portfolios/leaderboard` | Leaderboard |
+| GET | `/api/portfolios/leaderboard/groups` | Leaderboard grouped |
+| GET | `/api/portfolios/model-health` | Deployed-model health summary |
+| GET | `/api/portfolios/groups` | Portfolio groups |
+| GET | `/api/portfolios/{name}` | One portfolio's detail |
+| GET | `/api/portfolios/{name}/config` | One portfolio's config |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/scanner/status` | Scan status |
-| POST | `/api/scanner/scan` | Trigger breakout scan (async) |
-| POST | `/api/scanner/scan/sync` | Synchronous scan (blocks) |
-| GET | `/api/scanner/results` | Latest scan results |
-| GET | `/api/scanner/candidates` | Current candidate list |
+### thematic_auto.py — `/thematic/auto/*`
+Social-momentum scanner (scrapes ~15 sources → AI pick → pending signals).
 
----
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/thematic/auto/scan` | Trigger a scan |
+| GET | `/thematic/auto/status` | Scan status / last run |
+| GET | `/thematic/auto/twitter-status` | Twitter-source availability |
 
-### Analysis (LLM Multi-Agent)
+### thematic_portfolio.py — `/thematic/portfolio/*`
+Manual-conviction thematic book (position CRUD).
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/analyze` | Start async LLM analysis for ticker+date |
-| POST | `/api/analyze/sync` | Synchronous analysis (blocks) |
-| GET | `/api/analyze/status/{job_id}` | Analysis job status |
-| GET | `/api/analyze/result/{job_id}` | Analysis result |
+| Method | Path | Purpose |
+|---|---|---|
+| GET / POST / PUT / DELETE | `/thematic/portfolio/...` | Thematic position create / read / update / delete |
 
----
+### holdings_brain.py — `/thematic/brain/*`
+AI management of **existing real broker holdings** — propose-only HIL; approval routes through the
+compliance-gated Fidelity endpoints.
 
-### Backtest
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/thematic/brain/holdings` | Real holdings the brain sees |
+| POST | `/thematic/brain/assess` | Run an assessment cycle |
+| GET | `/thematic/brain/proposals` | Queued HIL proposals |
+| POST | `/thematic/brain/proposals/{id}/approve` | Approve a proposal (**kill-chain + step-up**) |
+| POST | `/thematic/brain/proposals/{id}/skip` | Skip a proposal |
+| POST | `/thematic/brain/live-exits/arm` | Arm live-exit guard |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/backtest/run` | Start backtest job |
-| GET | `/api/backtest/status/{job_id}` | Job status |
-| GET | `/api/backtest/results/{job_id}` | Results |
-| GET | `/api/backtest/list` | Recent backtest runs |
+### fidelity.py — `/fidelity/*`
+**Live broker execution** via Playwright (drives digital.fidelity.com). LIMIT orders only;
+every order passes the compliance kill-chain + step-up 2FA.
 
----
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/fidelity/status` | Session status |
+| POST | `/fidelity/logout` | Close session |
+| GET | `/fidelity/positions` | Live positions (stale-while-revalidate cache; `?refresh=1` forces) |
+| GET | `/fidelity/summary` | Account summary |
+| GET | `/fidelity/accounts` | Account list |
+| GET | `/fidelity/screenshot` | Current-page screenshot |
+| POST | `/fidelity/trade` | Place a LIMIT order (**kill-chain + step-up**) |
+| POST | `/fidelity/thematic-trade` | Thematic entry (**kill-chain + step-up**) |
+| POST | `/fidelity/thematic-exit` | Thematic exit (**kill-chain + step-up**) |
+| GET | `/fidelity/thematic-sync` | Reconcile thematic paper ↔ broker |
+| GET | `/fidelity/trade-log` | Order/trade log |
+| WS | `/ws/fidelity-auth` | Playwright login handshake |
+| — | `/fidelity/debug-html`, `/debug-grid`, `/debug-trade` | Scrape-debug helpers |
 
-### Fidelity (Live Trading)
+### webull_portfolio.py — `/webull/*`
+Webull (`fidelity-api`/webull lib) — read primitives + order routes. No thematic-execution bridge yet.
 
-Requires `LIVE_TRADING_ENABLED=true` AND `LIVE_TRADING_HARD_BLOCKED=False` in compliance.
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/webull/status` | Session status |
+| POST | `/webull/request-mfa`, `/login`, `/trade-pin`, `/logout`, `/refresh` | Auth lifecycle |
+| GET | `/webull/account`, `/positions`, `/orders` | Account / positions / orders |
+| POST | `/webull/orders` | Place an order |
+| DELETE | `/webull/orders/{order_id}` | Cancel an order |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/fidelity/status` | Session status |
-| POST | `/api/fidelity/login` | Start Playwright session |
-| POST | `/api/fidelity/logout` | Close session |
-| GET | `/api/fidelity/portfolio` | Live Fidelity positions |
-| GET | `/api/fidelity/cash` | Scraped cash balance |
-| POST | `/api/fidelity/trade` | Place market/limit order |
-| POST | `/api/fidelity/thematic-trade` | Thematic conviction trade |
-| GET | `/api/fidelity/orders` | Order history |
-| POST | `/api/fidelity/cancel/{order_id}` | Cancel order |
+### performance.py — `/performance/*`
+Deposit-adjusted P&L tracker over real Fidelity holdings (per-user append-only snapshots).
 
----
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/performance/summary` | Hero P&L summary |
+| GET | `/performance/history` | Snapshot history |
+| GET | `/performance/day/{date}` | One day's snapshot |
+| GET | `/performance/positions` | Holdings detail |
+| GET | `/performance/validate` | Validation report |
+| GET | `/performance/synclog` | Sync-log entries |
+| GET | `/performance/export` | Export CSV/JSON |
+| POST | `/performance/sync` | Capture a fresh snapshot |
+| GET / POST / DELETE | `/performance/cashflows` | Deposit/withdrawal ledger |
 
-### History
+### history.py — `/history/*`
+Closed-trade history and stats.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/history/trades` | All closed trades |
-| GET | `/api/history/performance` | Aggregate P&L, WR, Sharpe |
-| GET | `/api/history/by-strategy` | P&L broken down by strategy |
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/history` | Trade history |
+| GET | `/history/stats` | Aggregate stats |
+| GET | `/history/tickers` | Tickers traded |
+| GET | `/history/{ticker}/{date}` | One trade record |
 
----
+### logs.py — `/logs/*`
+Operational log/feed tails.
 
-### Settings
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/logs/stats` | Log stats |
+| GET | `/logs/memory` | Scan-memory feed |
+| GET | `/logs/paper-decisions` | Paper decision log |
+| GET | `/logs/trades` | Trade log |
+| GET | `/logs/system` | System log |
+| GET | `/logs/sources` | Source-scrape log |
+| GET | `/logs/daily-audit` | Daily audit feed |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/settings` | User settings (authenticated) |
-| POST | `/api/settings` | Update settings |
-| GET | `/api/settings/defaults` | Default config values |
+### settings.py — `/settings`
+`.env`-backed user/runtime settings.
 
----
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/settings` | Read settings |
+| POST | `/settings` | Update settings |
 
-### Admin
+### live_verification.py — `/live/verification`
+Live-readiness verification snapshot.
 
-All require admin role.
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/live/verification` | Live-trading verification status |
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/admin/users` | User list |
-| POST | `/api/admin/users` | Create user |
-| DELETE | `/api/admin/users/{email}` | Delete user |
-| GET | `/api/admin/flags` | Feature flags |
-| POST | `/api/admin/flags` | Update feature flags |
-| GET | `/api/admin/health` | Deep health check |
-| GET | `/api/admin/logs` | System logs |
-| POST | `/api/admin/view-as` | Impersonate user (manager key required) |
-| GET | `/api/admin/paper/runs` | All paper trading run summaries |
+### cloudflare_ai.py — `/cloudflare-ai/*`
+Free-LLM (Cloudflare Workers AI / OpenRouter fallback) status + test.
 
----
+| Method | Path | Purpose |
+|---|---|---|
+| GET / POST | `/cloudflare-ai/...` | Free-LLM status / test |
 
-### Logs
+### system.py — `/system/*` (+ `/ml/retrain`)
+Host/service metrics and the retrain trigger.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/logs/server` | Server log tail |
-| GET | `/api/logs/paper` | Paper trading log tail |
-| GET | `/api/logs/retrain` | ML retrain log tail |
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/system/metrics` | Host metrics |
+| GET | `/system/services` | Service status |
+| POST | `/ml/retrain` | Trigger the retrain pipeline |
 
----
+### admin.py — `/admin/*`
+Admin: audit, feature flags, runtime control, export.
 
-### System
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/system/info` | Version, uptime, config |
-| GET | `/api/health` | Basic health check |
-| GET | `/ws` | WebSocket for real-time updates |
-
----
-
-### WebSocket Events
-
-Connect to `/ws` with auth cookie/token. Server pushes JSON events:
-
-```json
-{"type": "paper_update", "data": {...}}
-{"type": "signal_new", "data": {...}}
-{"type": "exit_executed", "data": {...}}
-{"type": "scan_complete", "data": {...}}
-{"type": "price_alert", "data": {"symbol": "NVDA", "price": 950.0}}
-```
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/admin/audit` | Audit log |
+| GET / POST | `/admin/flags` | Read / set feature flags |
+| GET | `/admin/cloudflare` | Cloudflare config view |
+| GET | `/admin/runtime/status` | Runtime status |
+| GET | `/admin/runtime/diagnostics` | Runtime diagnostics |
+| POST | `/admin/runtime/web/restart` | Restart the web service |
+| POST | `/admin/runtime/tunnel/start`, `/runtime/tunnel/stop` | Tunnel control |
+| GET | `/admin/export` | Data export |

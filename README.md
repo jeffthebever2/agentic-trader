@@ -1,200 +1,204 @@
 # Agentic Trader
 
-Production algorithmic stock trading system. ML-driven candidate scanning, 15-portfolio paper-trading competition, and Qlib alpha-factor research — all wired into a single pipeline.
+A production algorithmic stock-trading system: ML candidate scanning, a 15-portfolio
+paper-trading competition, Qlib alpha research, a FastAPI + React dashboard, and
+**real-money broker execution** (Fidelity / Webull) behind a human-in-the-loop (HIL)
+approval flow.
 
----
+> ⚠️ **This system can place real orders with real money.** Live execution is OFF by
+> default and guarded by a multi-layer compliance kill-chain plus per-trade step-up 2FA.
+> Read [`SECURITY.md`](SECURITY.md) before enabling anything live.
 
-## Quick Start
-
-```bash
-# 1. Set up environment
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env       # fill in brokerage/API keys
-
-# 2. Train all models (first run only — 30–90 min)
-./start.sh train
-
-# 3. Start the system
-./start.sh all             # web dashboard + paper trading
-```
-
-Dashboard: **http://localhost:8001**  
-Portfolio competition: **http://localhost:8001/portfolios**
-
----
-
-## Commands
-
-```
-./start.sh web          Start the web dashboard only (port 8001)
-./start.sh paper        Start 15-portfolio paper trading competition
-./start.sh train        Full pipeline: ML + HMM + Qlib + validation
-./start.sh retrain      Weekly model refresh (fastest, Qlib included)
-./start.sh all          Web + paper trading together
-./start.sh status       Show what's running + model health
-./start.sh logs         Tail latest logs
-./start.sh stop         Kill all managed processes
-```
+- Python package: **`tradingagents/`**
+- Dashboard backend: **`web/`** (FastAPI, served on `127.0.0.1:8001`)
+- Dashboard frontend: **`frontend/`** (React + Vite + TypeScript → built into `web/static/dist`)
+- Agent/developer guide: [`CLAUDE.md`](CLAUDE.md) · Deep-dive docs: [`docs/`](docs/)
 
 ---
 
 ## Architecture
 
 ```
-Market Data (yfinance / Fidelity API)
-         │
-         ▼
-  Candidate Scanner          ← scripts/paper_trade_today.py
-  (breakout + pullback)
-         │
-         ▼
-  ML Scoring Layer           ← ml_models/latest/model_bundle.joblib
-  (XGBoost win-probability)
-  +  Qlib Alpha Factors      ← tradingagents/qlib_integration/
-  (momentum, volatility,     (qlib_mom_252_21, qlib_mom_63,
-   ATR-Z, close rank,         qlib_vol_ratio, qlib_atr_z,
-   cross-sectional ranks)     cross-sectional percentile ranks)
-         │
-         ▼
-  15 Portfolio Accounts      ← tradingagents/portfolios/
-  (signal / risk / hold / filter groups)
-  competing simultaneously
-         │
-         ▼
-  Web Dashboard              ← web/app.py  +  web/static/
-  + Portfolio Leaderboard    ← /portfolios  (live comparison)
+            Market data (yfinance · Fidelity · trusted quote gateway)
+                                   │
+        ┌──────────────────────────┼───────────────────────────┐
+        ▼                          ▼                            ▼
+  Candidate scanner          Thematic scanner            Holdings Brain
+  (breakout / pullback)      (~15 social/news feeds)     (reads REAL broker
+        │                          │                      holdings, assesses
+        ▼                          ▼                      hold/trim/add/exit)
+  ML win-probability         AI pick + buzz/intent             │
+  (XGBoost bundle)           scoring → signals                 │
+  + Qlib alpha factors            │                            │
+        │                          │                            │
+        ▼                          ▼                            ▼
+  UnifiedBrain  ───────────►  HIL approval queue  ◄─────────────┘
+  (sizes / gates)            (human approves in dashboard or via SMS link)
+        │                          │
+        ▼                          ▼
+  15 paper portfolios        Compliance kill-chain  →  LIVE broker order
+  (competition leaderboard)  (tradingagents/compliance.py)   (Fidelity / Webull,
+        │                     limit-only · 10% cap · $50k ·    LIMIT only)
+        ▼                     trusted fresh quote · step-up 2FA
+  FastAPI + React dashboard  ──────────────────────────────────►
 ```
 
----
-
-## Portfolio Competition
-
-15 named portfolios run simultaneously on the same candidate stream, each with different risk/sizing/hold parameters. The leaderboard at `/portfolios` ranks them by total return in real time.
-
-**Groups:**
-| Group | Hypothesis |
-|-------|-----------|
-| **Signal** | Different entry-signal sources (algo, ML, combined) |
-| **Risk** | Conservative vs. aggressive stop/target/sizing |
-| **Hold** | Quick exits (3d) vs. swing (25d) vs. standard |
-| **Filter** | ML probability gates at different thresholds |
+Nothing trades autonomously. Every background loop is **propose-only** — orders require
+an explicit human approval that passes the compliance gates.
 
 ---
 
-## Training Pipeline
+## Quick Start (development)
 
-### Quick retrain (recommended weekly)
 ```bash
-./start.sh retrain
-# or with full options:
-python3 scripts/retrain_weekly.py --tickers all_tickers.txt --include-qlib-features
+# 1. Python env (two venvs exist: .venv main, .venv-torch for RL/torch)
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e '.[web,dev]'        # deps come from pyproject.toml (uv.lock pins them);
+                                   # `uv sync` also works. NOTE: requirements.txt is a stub.
+
+# 2. Configure
+cp .env.example .env               # fill in keys; live trading stays OFF by default
+
+# 3. Frontend (only needed if you change the UI)
+cd frontend && npm install && npm run build   # → web/static/dist (served live)
+
+# 4. Run
+./start.sh web                     # dashboard only → http://localhost:8001/app
+./start.sh all                     # dashboard + paper-trading competition
 ```
 
-### Full pipeline (all models, resumable)
+Dashboard (SPA): **http://localhost:8001/app**
+Legacy portfolio leaderboard (server-rendered): **http://localhost:8001/portfolios**
+
+---
+
+## Commands
+
 ```bash
-./start.sh train
-# resume after interruption:
-python3 scripts/train_everything.py --resume tmp/train_everything/<run_id>/state.json
+# Dev process control (foreground)
+./start.sh web        # FastAPI dashboard (run_web.py → uvicorn :8001)
+./start.sh paper      # candidate engine (scripts/paper_trade_today.py)
+./start.sh all        # web + paper together
+./start.sh train      # full pipeline: ML + HMM + Qlib + validation (resumable)
+./start.sh retrain    # weekly model refresh
+./start.sh status     # what's running + model health
+./start.sh logs       # tail latest logs
+./start.sh stop       # kill managed processes
+
+# Frontend (strict — must be type-clean to ship)
+cd frontend && npm run build     # tsc -b && vite build → web/static/dist
+cd frontend && npm run dev       # vite dev server (:5173, proxies /api → :8001)
+
+# Tests (pytest; testpaths=tests, pythonpath=".")
+python3 -m pytest                # full suite
+python3 -m pytest tests/test_holdings_brain.py -q
+python3 -m pytest -m unit        # markers: unit | integration | smoke
 ```
 
-**What gets trained:**
-- `ml_models/latest/` — XGBoost win-probability model (walk-forward validated, gate: WF ROC ≥ 0.49)
-- `ml_models/stock_universe/` — Stock universe ranker
-- `ml_models/hmm_regime/` — Hidden Markov regime detector
-- Qlib features merged in at training time when `--include-qlib-features` is set
+Full command reference (CLIs, health checks, production ops): [`docs/COMMANDS.md`](docs/COMMANDS.md).
 
-### Model gate
-A retrain only deploys if:
-- Walk-forward ROC ≥ 0.49 (SE ≈ 0.009 over ~2000 OOS rows)
-- Brier score ≤ 0.25 (calibration check)
-- PSI feature stability pass
+### Production runtime (launchd)
+
+In production the system runs as launchd services
+(`~/Library/LaunchAgents/org.agentictrader.*.plist`): `webserver` (run_web.py → uvicorn
+on `127.0.0.1:8001`), `papertrader` (`scripts/paper_trade_unified.py`, 15-min loop),
+`tunnel` (cloudflared), `autofix`, `logrotate`. After editing backend code or `.env`,
+reload the running server:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/org.agentictrader.webserver
+```
+
+Frontend changes are pure static — `npm run build` then hard-refresh the browser.
 
 ---
 
-## Qlib Integration
+## Subsystems
 
-Qlib (0.9.8.dev31) provides lagged alpha factors used as model features. Enable with `--include-qlib-features`.
-
-**Factors:**
-| Feature | Description | History needed |
-|---------|-------------|---------------|
-| `qlib_mom_252_21` | 12-month minus 1-month momentum | ~273 days |
-| `qlib_mom_63` | 3-month minus 1-month momentum (fallback for short history) | ~85 days |
-| `qlib_vol_ratio` | Short/long volatility ratio | ~63 days |
-| `qlib_atr_z` | ATR normalized by 63-day mean | ~85 days |
-| `qlib_close_rank` | Cross-sectional price level rank | 1 day |
-| `qlib_cs_rank_*` | Per-scan-date percentile ranks of all 4 base factors | same as base |
-
-All features are lagged ≥ 1 day at the computation layer — no look-ahead.
+| Subsystem | Where | What it does |
+|-----------|-------|--------------|
+| **ML + portfolio pipeline** | `scripts/paper_trade_*.py`, `tradingagents/portfolio/`, `ml_models/` | Builds candidates → XGBoost win-probability + Qlib factors → `UnifiedBrain` sizes/gates → 15 competing paper accounts. |
+| **15-portfolio competition** | `tradingagents/portfolios/`, `web/api/portfolios.py` | Same candidate stream, 15 different risk/sizing/hold configs, ranked live at `/portfolios`. |
+| **Thematic system** | `web/api/thematic_auto.py`, `thematic_portfolio.py` | Scrapes ~15 social/news sources → AI pick + buzz/tweet-intent scoring → HIL signals → paper (and optional live). |
+| **Holdings Brain** | `tradingagents/portfolio/holdings_brain.py`, `web/api/holdings_brain.py` | Reads real broker holdings (incl. pre-existing), proposes hold/trim/add/exit via HIL. Never touches protected (Roth/retirement) accounts. |
+| **Live execution + compliance** | `tradingagents/compliance.py`, `web/api/fidelity.py`, `webull_portfolio.py` | Every live order passes the kill-chain. Fidelity = Playwright automation; Webull = `fidelity-api`/webull lib. |
+| **Performance tracker** | `web/api/performance.py`, `frontend/src/pages/Performance/` | Deposit-adjusted P&L, cash-flow ledger, daily auto-capture from real broker data. |
+| **Web dashboard** | `web/app.py`, `web/api/*.py`, `frontend/` | FastAPI backend (25 routers) + React SPA under `/app`. |
 
 ---
 
-## Directory Structure
+## Repository layout
 
 ```
-scripts/
-  paper_trade_today.py     Main paper trading engine (15 portfolios)
-  retrain_weekly.py        Weekly ML retrain pipeline
-  train_everything.py      Full training orchestrator (resumable)
-  paper_trade_unified.py   UnifiedBrain alternative runner
-  daily_audit.py           Daily health check
+tradingagents/        Core Python package
+  compliance.py         Live-order kill-chain (the safety floor — never weaken)
+  portfolio/            UnifiedBrain, Holdings Brain, sizers, exit managers
+  portfolios/           15-portfolio competition framework
+  qlib_integration/     Qlib alpha-factor pipeline
+  screening/            Candidate + thematic scanners, tweet-intent
+  data/                 quote_gateway.py (trusted execution quotes)
+  ml/                   ML training + calibration
 
-tradingagents/
-  portfolios/              15-portfolio competition framework
-    config.py              PortfolioConfig dataclass
-    registry.py            All 15 portfolio definitions
-    comparison.py          Stats engine (Sharpe, drawdown, equity curve)
-  ml/                      ML training + calibration
-  qlib_integration/        Qlib alpha factor pipeline
-  backtesting/             Backtest engine
-  screening/               Candidate scanners
+web/                  FastAPI dashboard backend
+  app.py                App + startup background loops (all propose-only)
+  api/*.py              25 routers (prefix /api): fidelity, webull, thematic,
+                        holdings_brain, performance, portfolios, twofa, …
+  static/dist/          Built React SPA (output of frontend build)
 
-web/
-  app.py                   FastAPI server
-  api/portfolios.py        Portfolio leaderboard API
-  static/portfolios.html   Portfolio comparison dashboard
+frontend/             React + Vite + TypeScript SPA (basename /app)
+  src/pages/            Dashboard, Broker, HIL, Thematic, Performance, ML, …
 
-tests/                     pytest suite (19 Qlib leakage tests, etc.)
-ml_models/                 Deployed model artifacts
-  latest/                  Active win-probability model
-  stock_universe/          Stock ranker model
-  hmm_regime/              Regime detector
+scripts/              Paper-trade engines, training, validation, ops
+ml_models/            Deployed model artifacts (latest/, stock_universe/, hmm_regime/)
+docs/                 Reference docs + plans/ (audits & roadmaps)
+tests/                pytest suite
 ```
 
 ---
 
 ## Configuration
 
-Copy `.env.example` to `.env` and configure:
+Copy `.env.example` → `.env`. Key variables:
 
 | Variable | Purpose |
 |----------|---------|
-| `FIDELITY_*` | Brokerage connection (paper mode is safe without this) |
-| `OPENAI_API_KEY` | Optional: LLM-based signal augmentation |
-| `ANTHROPIC_API_KEY` | Optional: LLM signal analysis |
-| `WEB_PORT` | Dashboard port (default: 8001) |
-| `PAPER_OUTPUT_DIR` | Where portfolio state files are written |
+| `WEB_HOST` | Bind host (default `127.0.0.1`). *Note: the bind port is hardcoded `8001`.* |
+| `LIVE_TRADING_ENABLED` | Master live toggle (default `false`). Even when `true`, `LIVE_TRADING_HARD_BLOCKED` in source must also be off. |
+| `FIDELITY_*` / Webull creds | Brokerage connection (only needed for live trading). |
+| `FMP_API_KEY` | Trusted execution-quote source (gates live orders). |
+| `THEMATIC_AUTO_SCAN` | Enable the 4-hour thematic scan loop. |
+| `HOLDINGS_BRAIN_ENABLED` | Enable Holdings Brain proposal loops. |
+| `STEP_UP_SECRET` | Secret for per-trade step-up 2FA (set a real value in production). |
+
+The `.env` file is sensitive and has been clobbered before — **append, don't overwrite;
+back it up first.**
 
 ---
 
-## Safety
+## Safety & compliance
 
-- Paper trading only — no live order execution by default
-- Model gate blocks deployment of underperforming retrains
-- Leakage checks run automatically before every training (via `tests/test_qlib_leakage.py`)
-- `FORCE_FLATTEN` halts all positions on catastrophic drawdown
+Live order execution is protected by independent layers (see [`SECURITY.md`](SECURITY.md)
+for the full model):
 
-See `SECURITY.md` for full threat model.
+- **Two master kill-switches** — `LIVE_TRADING_HARD_BLOCKED` (source constant) and
+  `LIVE_TRADING_ENABLED` (`.env`, read fresh per call).
+- **Compliance kill-chain** (`validate_live_order`) — LIMIT only (no market/short/margin/
+  options), ≤10% of account per position, ≤$50k/order, and a **trusted, fresh** execution
+  quote (`PreTradeGate`).
+- **Per-trade step-up 2FA** on every order endpoint (TOTP / passcode / passkey).
+- **Protected accounts** — Roth/retirement/non-equity accounts are never traded.
+- **Propose-only loops** — background scanners queue HIL proposals; only the explicitly
+  armed autonomous-live-exit loop can place an order without a fresh click, and it
+  requires a step-up arm record.
 
 ---
 
 ## Requirements
 
-- Python 3.10+
+- Python ≥ 3.10 (production runs 3.14)
+- Node.js 18+ (frontend build only)
 - Qlib 0.9.8+ (for `--include-qlib-features`)
-- Node.js 18+ (for frontend build only)
 
 ```bash
-pip install -r requirements.txt
+pip install -e '.[web,dev]'      # or: uv sync
 ```

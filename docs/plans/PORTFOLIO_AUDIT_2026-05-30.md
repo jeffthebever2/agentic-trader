@@ -1,5 +1,11 @@
 # Portfolio Audit — Discrepancies & Profitability Improvements
 
+> **Status (2026-06-21): PARTIALLY SHIPPED — historical.** This was a "PROPOSED — NOT
+> IMPLEMENTED" audit. Many findings have since shipped (e.g. the `_ATR_STOP` 0.7→1.0 fix,
+> Cycle 44/45 remediations — see `docs/CHANGELOG.md`). Verify each item against current
+> code before acting. The current authoritative audit is
+> [`SYSTEM_AUDIT_2026-06-19.md`](SYSTEM_AUDIT_2026-06-19.md).
+
 **Date:** 2026-05-30
 **Scope:** All 19 modules in `tradingagents/portfolio/` + integration paths (`scripts/paper_trade_today.py`, `paper_trade_unified.py`, `backtest.py`, `screening/screener.py`)
 **Method:** 4 parallel read-only subagents, one per subsystem

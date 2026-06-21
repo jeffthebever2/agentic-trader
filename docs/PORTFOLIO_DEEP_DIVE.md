@@ -1,5 +1,10 @@
 # Portfolio Deep Dive — All Systems
 
+> **Status (2026-06-21): stale snapshot.** Generated 2026-06-02; predates live broker
+> execution, Holdings Brain, the performance tracker, and the latest thematic/sizing work.
+> Useful as an architecture reference but verify specific numbers against current code.
+> See `docs/CHANGELOG.md` and [`plans/SYSTEM_AUDIT_2026-06-19.md`](plans/SYSTEM_AUDIT_2026-06-19.md).
+
 *Generated 2026-06-02 from live source code. All numbers pulled directly from code — not approximated.*
 
 ---

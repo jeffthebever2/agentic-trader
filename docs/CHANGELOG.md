@@ -1,10 +1,80 @@
 # Changelog
 
-All notable changes to TradingAgents are documented here.
+All notable changes to **Agentic Trader** (a private fork of TradingAgents) are
+documented here. Entries after 1.1.0 are this fork's private work.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
+
+## [1.2.0] — 2026-06-21
+
+Consolidated release notes for the fork's daily development from 2026-06-03 → 2026-06-21.
+(Replaces the former root-level `*_UPDATES.md` / `*_LOG.md` diaries, now removed.)
+
+### Added
+
+- **Live broker execution + compliance kill-chain** — real-money orders now flow through
+  `tradingagents/compliance.py::validate_live_order`: LIMIT-only, ≤10% of account per
+  position, ≤$50k/order, and a trusted+fresh execution quote via `PreTradeGate`. Two
+  master switches (`LIVE_TRADING_HARD_BLOCKED` source constant + `LIVE_TRADING_ENABLED`
+  env) plus per-trade step-up 2FA on every order endpoint. Trusted quote sources
+  (`finnhub`/`twelve_data`/`fmp`) via `tradingagents/data/quote_gateway.py`. See
+  `SECURITY.md`.
+- **Holdings Brain** (`tradingagents/portfolio/holdings_brain.py`, `web/api/holdings_brain.py`,
+  `/api/thematic/brain/*`) — AI assessment of real broker holdings (hold/trim/add/exit/
+  set-stop) that queues propose-only HIL proposals. Roth/retirement/non-equity accounts
+  protected by three layers (instrument filter, account-type denylist, broker kill-switch;
+  `FIDELITY_PROTECTED_ACCOUNTS`).
+- **Webull integration** (`web/api/webull_portfolio.py`) — status/login/MFA/trade-pin/
+  positions/orders via the `fidelity-api`/webull library.
+- **Performance tracker** (`web/api/performance.py`, `frontend/src/pages/Performance/`) —
+  deposit-adjusted P&L, cash-flow ledger, realized-from-tradelog, daily auto-capture from
+  real Fidelity data; Overview/Calendar/Holdings dashboard.
+- **Step-up 2FA methods** — added PBKDF2 passcode (salted, lockout) and passkey/WebAuthn
+  alongside TOTP (`web/twofa.py`, `web/api/twofa_routes.py`).
+- **TradingView-style trade charts → SMS** (`tradingagents/portfolio/chart.py`,
+  `GET /api/market/trade-chart.png`) — auto-generated trade charts attached to SMS alerts;
+  added `trendspyg` (Google Trends) dependency and a public-host upload fallback.
+- **Portfolio-aware position sizing** (`tradingagents/portfolio/position_sizer.py`) —
+  whole-book multi-factor sizer (conviction × quality × inverse-vol × correlation, hard
+  caps per-position/sector/heat/cash) on the thematic HIL path.
+- **Sentiment-weighted buzz** (`tradingagents/screening/buzz_score.py`) and a **tweet-intent
+  classifier** (`tradingagents/screening/tweet_intent.py`) — buzz now reflects conviction
+  (bull/bear/neutral) and stops padding on crowd selling pressure.
+- **Alert cooldown + signal persistence** (`web/alert_cooldown.py`) — per-ticker cooldown,
+  persisted pending queue (TTL), scan min-interval — kills thematic alert spam / turnover.
+- **Fidelity holdings cache** — stale-while-revalidate snapshot cache so the Broker page
+  loads instantly; keepalive warms it. Display reads only; execution still scrapes fresh.
+- **Free-AI features** — shared `$0`-budget LLM helper (Cloudflare free models + OpenRouter
+  fallback) for ticker validation, catalyst materiality, news-driven exit rescue, and
+  red-flag deepening.
+
+### Changed
+
+- **Fidelity reliability** — auto re-login (no TOTP), encrypted credential store,
+  trust-device support, cache-lie fix; SPAXX core money-market now recognized in cash
+  scrape so live sizing counts it.
+- **Thematic scoring** — fixed score compression (trusted-twitter flat-cap, composite
+  reweighting), new `MIN_COMPOSITE_SCORE` gate (`THEMATIC_MIN_SIGNAL_SCORE`), sentiment-
+  aware composite, adaptive sizing, let-winners-run trailing stops.
+- **Frontend** — Broker / HIL / Performance / Settings page redesigns on the shared
+  design-token system; HIL split into Approvals | Settings with a Holdings-Brain
+  proposals card.
+
+### Fixed
+
+- **Thematic scanner was silently frozen** (Jun 2 → Jun 19, stale cache shown as live) —
+  added per-source scrape timeout, moved sync DDGS off the event loop, and override of a
+  stale `running` status that had blocked all future scans.
+- **Thematic turnover / alert spam** — pending queue + brain proposals were wiped and
+  rebuilt every cycle with no cooldown, causing one-scan flip-flop alerts.
+
+### Security
+
+- Hardened the live-order kill-chain and made every order endpoint require per-trade
+  step-up 2FA; enforced protected-account (Roth/retirement) isolation at three layers.
+  See `SECURITY.md` for the full model.
 
 ## [1.1.0] — 2026-06-02
 

@@ -1,356 +1,237 @@
-# TradingAgents Command Sheet (v1.0.0)
+# Agentic Trader — Command Reference
 
-Run these from the project root:
+Accurate as of 2026-06-21. Environment: **macOS / zsh**.
+
+Run everything from the project root using **absolute paths** where possible.
+Don't `cd` inside compound bash commands (triggers permission prompts).
+
+> **Canonical web entrypoint is `run_web.py`.** Anything you remember about
+> `web/start.py` is dead — ignore it.
+
+---
+
+## Quick reference
+
+| Goal | Command |
+|------|---------|
+| Web dashboard (dev) | `./start.sh web` → http://localhost:8001 |
+| Candidate/paper engine (dev) | `./start.sh paper` |
+| Web + paper together | `./start.sh all` |
+| What's running | `./start.sh status` |
+| Tail logs | `./start.sh logs [name]` |
+| Stop dev procs | `./start.sh stop` |
+| Full training pipeline | `./start.sh train` |
+| Weekly retrain | `./start.sh retrain` |
+| Portfolio leaderboard (CLI) | `./start.sh portfolios` |
+| Model health | `./start.sh model` |
+| **Apply backend / `.env` change (prod)** | `launchctl kickstart -k gui/$(id -u)/org.agentictrader.webserver` |
+| Frontend build | `cd frontend && npm run build` |
+| Full test suite | `python3 -m pytest` |
+| Health check | `curl -s localhost:8001/health` |
+
+---
+
+## Environment & dependencies
+
+Two virtualenvs exist:
+
+- **`.venv`** — main env (web, ML, trading).
+- **`.venv-torch`** — RL / torch work.
+
+Production launchd services run under **Python 3.14**
+(`/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14`).
+
+Dependencies are declared in **`pyproject.toml`** (locked by `uv.lock`).
+**`requirements.txt` is a no-op stub (just `.`)** — do **not** `pip install -r requirements.txt`.
 
 ```bash
-cd /path/to/TradingAgents
-# or if cloned from GitHub:
-cd ~/projects/agentic-trader
-```
-
-## Start The Web App
-
-```bash
-python3 web/start.py --port 8001
-```
-
-Open:
-
-```text
-http://localhost:8001
-```
-
-If the port is already busy, either stop the old server with `Ctrl+C`, or use another port:
-
-```bash
-python3 web/start.py --port 8002
-```
-
-## Restore A Fresh Computer And Start Everything
-
-After cloning the repo on another computer, run the restore command from the
-project root. It checks dependencies, restores optional local ML/data artifacts,
-starts the web app, starts Cloudflare Tunnel, and prints troubleshooting logs.
-
-First install the command:
-
-```bash
+# Preferred (uv, uses uv.lock):
 uv sync --extra web --extra dev
+
+# Or with pip (editable install):
+python3 -m pip install -e .
+python3 -m pip install -e '.[web,dev]'      # include web + dev extras
 ```
 
-If you do not have `uv` yet:
+Optional extra groups (from `pyproject.toml`): `web`, `dev`, `media`.
+
+First-time setup:
 
 ```bash
-python3 -m pip install -e ".[web,dev]"
+python3 -m venv .venv && source .venv/bin/activate
+uv sync --extra web --extra dev      # or: pip install -e '.[web,dev]'
+cp .env.example .env                 # fill in your keys
+# NOTE: .env is sensitive and has been clobbered before — append, don't overwrite. Back it up first.
 ```
 
-Run diagnostics:
+---
+
+## Dev / foreground process control — `./start.sh`
+
+`start.sh` runs services in the **foreground / background for local dev**.
+It resolves Python from `.venv/bin/python3` if present, else system `python3`.
+
+| Command | What it runs |
+|---------|--------------|
+| `./start.sh web` | `run_web.py` — FastAPI dashboard → http://localhost:8001 (leaderboard at `/portfolios`) |
+| `./start.sh paper` | `scripts/paper_trade_today.py` — candidate / paper-trading engine |
+| `./start.sh all` | `run_web.py` + `scripts/paper_trade_today.py` (both backgrounded, PIDs tracked) |
+| `./start.sh train` | `scripts/train_everything.py --tickers all_tickers.txt --include-qlib-features --profile safe` (ML + HMM + Qlib + validation, 30–90 min, resumable via `--resume`) |
+| `./start.sh retrain` | `scripts/retrain_weekly.py --tickers all_tickers.txt --include-qlib-features` (fastest model refresh) |
+| `./start.sh status` | Managed PIDs + port-8001 check + deployed-model health |
+| `./start.sh logs [name]` | `tail -f logs/<name>.log`; with no name, tails the most recent `logs/*.log` |
+| `./start.sh stop` | Kills managed procs **and** anything bound to port 8001 |
+| `./start.sh portfolios` (alias `report`) | `scripts/portfolio_report.py` — leaderboard CLI |
+| `./start.sh model` (alias `model-status`) | `scripts/check_retrain_status.py` — model health + retrain history |
+| `./start.sh` (bare) / `--help` / `-h` | Prints help |
+
+Extra args pass straight through, e.g.:
 
 ```bash
-agentic-restore doctor
+./start.sh train --resume
+./start.sh logs web
 ```
 
-Start the app and named Cloudflare tunnel:
+---
+
+## Production runtime — launchd (NOT `start.sh`)
+
+In production the system runs as **launchd** services, defined in
+`~/Library/LaunchAgents/org.agentictrader.*.plist`:
+
+| Service | Process |
+|---------|---------|
+| `webserver` | `run_web.py` → uvicorn on `127.0.0.1:8001` |
+| `papertrader` | `scripts/paper_trade_unified.py` (15-min loop) |
+| `tunnel` | `cloudflared` |
+| `autofix` | self-heal watcher |
+| `logrotate` | log rotation |
+
+Logs land in `logs/*.log` and `logs/*.err`.
+
+### Apply a backend / `.env` change
+
+The running server loaded its **code and `.env` at startup**, so edits aren't live
+until you reload the process:
 
 ```bash
+launchctl kickstart -k gui/$(id -u)/org.agentictrader.webserver
+```
+
+- `kickstart -k` **restarts the plist's process** (picks up edited Python + `.env`).
+- It does **NOT** reload an edited `.plist`. Changing the plist itself needs a full
+  **unload + load** (`launchctl bootout` then `bootstrap`).
+
+Other services kickstart the same way, e.g.:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/org.agentictrader.papertrader
+```
+
+### Edit → see-it loop
+
+- **Frontend** changes are pure static (`npm run build` → `web/static/dist`, served
+  live) → just **hard-refresh the browser**. No kickstart needed.
+- **Backend / `.env`** changes → **kickstart the webserver** (above).
+
+---
+
+## Frontend (React / Vite / TypeScript)
+
+The trading UI lives entirely in **`frontend/`**. The build is strict — `tsc -b`
+must be type-clean (any implicit-`any` / untyped code fails the build).
+
+> The root `package.json` (chalk/vitest "orchestrator") is an unrelated tool —
+> **ignore it**.
+
+```bash
+cd frontend
+npm run build     # tsc -b && vite build → outputs to web/static/dist (served live → hard-refresh)
+npm run dev       # vite dev server on :5173, proxies /api → :8001
+npm run lint
+```
+
+---
+
+## Tests (pytest)
+
+Config lives in `pyproject.toml` `[tool.pytest.ini_options]`
+(`testpaths=tests`, `pythonpath="."`, `--strict-markers`).
+
+```bash
+python3 -m pytest                              # full suite
+python3 -m pytest tests/test_holdings_brain.py -q   # one file
+python3 -m pytest tests/test_x.py::test_name        # one test
+```
+
+Markers:
+
+```bash
+python3 -m pytest -m unit
+python3 -m pytest -m integration
+python3 -m pytest -m smoke
+```
+
+---
+
+## CLIs
+
+### `ta` — operator console (`ta = "ta:app"`)
+
+Installed as a console script via `pip install -e .`. Subcommand groups:
+
+```bash
+ta paper status        # paper: status / start / stop
+ta ml status           # ml: retrain / status / train / predict
+ta hil pending         # hil: pending / approve / reject
+ta server              # server controls
+ta backtest            # backtests
+ta db                  # db utilities
+ta --help              # full command tree
+```
+
+### `agentic-restore` — fresh-machine bring-up (`agentic-restore = "cli.restore_runtime:main"`)
+
+Checks deps, restores optional local ML/data artifacts, starts the web app + tunnel,
+prints troubleshooting logs.
+
+```bash
+agentic-restore doctor        # diagnostics
 agentic-restore start --restart
-```
-
-If Cloudflare named tunnel is not set up yet, use a temporary Quick Tunnel:
-
-```bash
-agentic-restore start --restart --quick-tunnel
-```
-
-Check status and logs:
-
-```bash
-agentic-restore status
-```
-
-Stop the local web server and tunnel screen sessions:
-
-```bash
+agentic-restore start --restart --quick-tunnel   # temporary Cloudflare Quick Tunnel
 agentic-restore stop
-```
-
-### Restore ML / Data Artifacts
-
-Git intentionally does not include large local folders like `ml_models`,
-`rl_models`, `.backtest_cache`, and generated DB/cache files.
-
-On the old computer, bundle local ML/data artifacts:
-
-```bash
 agentic-restore bundle-data --output ~/Desktop/agentic-trader-artifacts.tar.gz
+agentic-restore all --artifact-tar ~/Desktop/agentic-trader-artifacts.tar.gz --install --restart
 ```
 
-Move that tarball to the new computer, then restore and start everything:
+Git intentionally omits large local folders (`ml_models/`, `rl_models/`,
+`.backtest_cache/`, `backtest_index.db`); `bundle-data` packages them for transfer.
+
+---
+
+## Health checks
 
 ```bash
-agentic-restore all \
-  --artifact-tar ~/Desktop/agentic-trader-artifacts.tar.gz \
-  --install \
-  --restart
+curl -s localhost:8001/health          # liveness
+curl -s localhost:8001/health/deep     # deep check (deps / data / market-hours aware)
+curl -s localhost:8001/api/paper/status | head -c 500   # paper engine status
+
+./start.sh status                      # dev: procs + port 8001 + model health
+ps aux | rg "run_web.py|paper_trade_(today|unified).py"  # is it running?
+lsof -ti:8001                          # what's on the web port
 ```
 
-If you copied a folder instead of a tarball:
+---
 
-```bash
-agentic-restore all \
-  --artifact-dir /path/to/agentic-trader-artifacts \
-  --install \
-  --restart
-```
+## Gotchas
 
-The restore command expects these artifact paths when present:
-
-```text
-ml_models/
-rl_models/
-.backtest_cache/
-backtest_index.db
-```
-
-Useful tunnel troubleshooting:
-
-```bash
-cloudflared tunnel login
-cloudflared tunnel info dsadsa
-tail -n 80 tmp/cloudflared.screen.log
-tail -n 80 tmp/web.screen.log
-```
-
-## Stop Running Jobs
-
-In the terminal running the job:
-
-```text
-Ctrl+C
-```
-
-For long ML training, one `Ctrl+C` is safe. It keeps the downloaded price cache and already-written CSV rows.
-
-## Normal Backtest
-
-Basic confirmed-pullback backtest:
-
-```bash
-python3 backtest.py \
-  --tickers all_tickers.txt \
-  --start 2020-01-01 \
-  --end 2024-12-31 \
-  --threshold 100 \
-  --score-mode confirmed_pullback \
-  --entry-timing trigger_break \
-  --hold-periods 1 2 3 \
-  --primary-hold 3 \
-  --export-csv backtest_trades.csv
-```
-
-Recent backtest through 2026:
-
-```bash
-python3 backtest.py \
-  --tickers all_tickers.txt \
-  --start 2020-01-01 \
-  --end 2026-05-07 \
-  --threshold 100 \
-  --score-mode confirmed_pullback \
-  --entry-timing trigger_break \
-  --hold-periods 1 2 3 \
-  --primary-hold 3 \
-  --export-csv backtest_trades_2026.csv
-```
-
-Faster backtest without charts:
-
-```bash
-python3 backtest.py \
-  --tickers all_tickers.txt \
-  --start 2020-01-01 \
-  --end 2024-12-31 \
-  --threshold 100 \
-  --no-generate-charts \
-  --export-csv backtest_trades.csv
-```
-
-Grid-search thresholds:
-
-```bash
-python3 backtest.py \
-  --tickers all_tickers.txt \
-  --start 2020-01-01 \
-  --end 2024-12-31 \
-  --grid-search \
-  --grid-thresholds 70 80 90 100 \
-  --export-csv backtest_grid_trades.csv
-```
-
-## Paper Trading
-
-Start live paper trading from the web page, or run from terminal:
-
-```bash
-python3 scripts/paper_trade_today.py \
-  --tickers all_tickers.txt \
-  --model-bundle ml_models/stock_universe/model_bundle.joblib \
-  --starting-cash 10000 \
-  --scan-interval-minutes 15 \
-  --output-dir tmp/paper_trading_today \
-  --no-dashboard
-```
-
-One scan only, useful for testing:
-
-```bash
-python3 scripts/paper_trade_today.py \
-  --tickers all_tickers.txt \
-  --model-bundle ml_models/stock_universe/model_bundle.joblib \
-  --starting-cash 10000 \
-  --max-tickers 200 \
-  --once \
-  --force \
-  --no-ai \
-  --no-dashboard \
-  --output-dir tmp/paper_test
-```
-
-Compare old ML vs new challenger ML:
-
-```bash
-python3 scripts/paper_trade_today.py \
-  --tickers all_tickers.txt \
-  --model-bundle ml_models/stock_universe/model_bundle.joblib \
-  --new-model-bundle ml_models/stock_universe_candidate_20260512/model_bundle.joblib \
-  --starting-cash 10000 \
-  --scan-interval-minutes 15 \
-  --output-dir tmp/paper_trading_today \
-  --no-dashboard
-```
-
-## Train New ML Separately
-
-This creates a separate challenger model and does not overwrite the old model:
-
-```bash
-python3 scripts/train_ml_from_stock_data.py \
-  --tickers all_tickers.txt \
-  --start 2019-01-01 \
-  --end 2026-05-07 \
-  --output-dir ml_models/stock_universe_candidate_20260512 \
-  --dataset-csv ml_models/stock_universe_candidate_20260512/stock_candidate_training_data.csv \
-  --rebuild-dataset \
-  --rebuild-price-cache \
-  --hold 3 \
-  --batch-size 100 \
-  --yfinance-threads 8 \
-  --n-estimators 250 \
-  --max-depth 8 \
-  --min-samples-leaf 20 \
-  --ml-probability-threshold 0.58 \
-  --ml-expected-return-min 0.0 \
-  --ml-large-loss-max 0.20
-```
-
-## Resume ML Training
-
-Use this if training was stopped after it already created the price cache and partial CSV:
-
-```bash
-python3 scripts/train_ml_from_stock_data.py \
-  --tickers all_tickers.txt \
-  --start 2019-01-01 \
-  --end 2026-05-07 \
-  --output-dir ml_models/stock_universe_candidate_20260512 \
-  --dataset-csv ml_models/stock_universe_candidate_20260512/stock_candidate_training_data.csv \
-  --price-cache ml_models/stock_universe_candidate_20260512/price_data_2017-11-07_2026-05-20_SPY_4815.pkl \
-  --rebuild-dataset \
-  --resume-dataset \
-  --hold 3 \
-  --batch-size 100 \
-  --yfinance-threads 8 \
-  --n-estimators 250 \
-  --max-depth 8 \
-  --min-samples-leaf 20 \
-  --ml-probability-threshold 0.58 \
-  --ml-expected-return-min 0.0 \
-  --ml-large-loss-max 0.20
-```
-
-If moving to another computer, copy this folder:
-
-```text
-ml_models/stock_universe_candidate_20260512
-```
-
-Also make sure the other computer has the updated code with `--resume-dataset`.
-
-## Use Existing Dataset Only
-
-If the CSV is already fully built and you only want to train from it:
-
-```bash
-python3 scripts/train_ml_from_stock_data.py \
-  --tickers all_tickers.txt \
-  --output-dir ml_models/stock_universe_candidate_20260512 \
-  --dataset-csv ml_models/stock_universe_candidate_20260512/stock_candidate_training_data.csv \
-  --reuse-dataset \
-  --hold 3 \
-  --n-estimators 250 \
-  --max-depth 8 \
-  --min-samples-leaf 20 \
-  --ml-probability-threshold 0.58 \
-  --ml-expected-return-min 0.0 \
-  --ml-large-loss-max 0.20
-```
-
-## Check Model Files
-
-Old/current big model:
-
-```text
-ml_models/stock_universe/model_bundle.joblib
-```
-
-New challenger model:
-
-```text
-ml_models/stock_universe_candidate_20260512/model_bundle.joblib
-```
-
-Check that the new model exists:
-
-```bash
-ls -lh ml_models/stock_universe_candidate_20260512/model_bundle.joblib
-```
-
-## Useful Health Checks
-
-Compile key Python files:
-
-```bash
-python3 -m py_compile \
-  backtest.py \
-  scripts/paper_trade_today.py \
-  scripts/train_ml_from_stock_data.py \
-  web/api/paper.py
-```
-
-Run paper trading tests:
-
-```bash
-python3 -m pytest tests/test_paper_trading_state.py -q
-```
-
-Check if the web server or paper runner is already running:
-
-```bash
-ps aux | rg "web/start.py|paper_trade_today.py"
-```
-
-Check paper status API:
-
-```bash
-curl -s http://localhost:8001/api/paper/status | head -c 500
-```
+- **`run_web.py` is the entrypoint** — not `web/start.py`.
+- **`WEB_PORT` does nothing** — the uvicorn bind is hardcoded to **8001**. Only
+  `WEB_HOST` is honored.
+- **`requirements.txt` is a stub** — install via `uv sync` / `pip install -e .`.
+- **`kickstart` reloads the process, not the plist** — editing a `.plist` needs
+  unload + load.
+- Frontend `tsc -b` is strict — type errors block the build.
+- Don't `cd` inside compound bash commands here (permission prompts) — use absolute
+  paths.
+- `.env` is sensitive and was clobbered once — **append, don't overwrite; back it up first.**

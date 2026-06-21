@@ -1,5 +1,11 @@
 # Unified Brain — Path to 30%+ Annualized
 
+> **Status (2026-06-21): PARTIALLY SHIPPED — historical plan.** "PROPOSED — NOT
+> IMPLEMENTED" as written; the flagship item (B1 stop unification) is already live, and
+> later waves are partly done — reconcile against `docs/CHANGELOG.md` and current code
+> before trusting the remaining-work framing. Current authoritative audit:
+> [`SYSTEM_AUDIT_2026-06-19.md`](SYSTEM_AUDIT_2026-06-19.md).
+
 **Date:** 2026-05-30
 **Target:** 30%+ out-of-sample risk-adjusted annual return from the Unified Portfolio Brain.
 **Scope:** `tradingagents/portfolio/unified_brain.py` + the geometry/sizing infra it depends on.

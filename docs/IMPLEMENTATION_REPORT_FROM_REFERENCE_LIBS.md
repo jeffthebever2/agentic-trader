@@ -1,5 +1,8 @@
 # Implementation Report: Reference Library Analysis
 
+> **Status (2026-06-21): point-in-time gap analysis.** Generated 2026-06-07; verify which
+> of the ranked gaps remain open against current code before using as a worklist.
+
 **Generated:** 2026-06-07  
 **Author:** AI Analysis Pass  
 **Zips analyzed:**
