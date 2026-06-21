@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import api from '@/api/client'
 import { LoadingState } from '@/components/shared/LoadingState'
+import { openStepUp, stepUpHeaders } from '@/components/modals/StepUpModal'
 
 // ── Thematic HIL types ────────────────────────────────────────────────────────
 
@@ -20,6 +21,7 @@ interface ThematicSignal {
   theme?: string
   conviction?: number
   raw_score?: number
+  score?: number
   thesis?: string
   catalyst?: string
   target_pct?: number
@@ -91,6 +93,61 @@ interface HilPendingRaw {
   }
 }
 
+interface BrainAction {
+  kind: string
+  reason?: string
+  fraction?: number
+  conviction?: number
+  stop?: number | null
+  target?: number | null
+  risk_flags?: string[]
+}
+interface BrainHolding {
+  ticker: string
+  shares?: number
+  last?: number
+  unrealized_pct?: number
+  pct_of_account?: number
+  account_name?: string
+  name?: string
+}
+interface BrainProposal {
+  id: string
+  ticker: string
+  broker?: string
+  action: BrainAction
+  holding?: BrainHolding
+  status?: string
+  created_at?: string
+  priority?: boolean
+}
+interface BrainDeferred {
+  ticker: string
+  kind: string
+  conviction?: number
+  reason: string
+  holding?: BrainHolding
+}
+interface BrainProposalsResp {
+  ok: boolean
+  pending: BrainProposal[]
+  count: number
+  deferred?: BrainDeferred[]
+  history?: BrainProposal[]
+}
+interface BrainExcluded {
+  symbol: string
+  account_name?: string
+  account_number?: string
+  reason: string
+}
+interface BrainHoldingsResp {
+  ok: boolean
+  count: number
+  excluded?: BrainExcluded[]
+  holdings?: Array<{ holding: BrainHolding; action: BrainAction }>
+}
+
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 const card: React.CSSProperties = {
@@ -121,6 +178,30 @@ const labelStyle: React.CSSProperties = {
   marginBottom: 4,
   textTransform: 'uppercase',
   letterSpacing: '0.04em',
+}
+
+const tabBarWrap: React.CSSProperties = {
+  display: 'flex', gap: 4, marginBottom: 16,
+  background: 'var(--surface-soft)', border: '1px solid var(--surface-rule)',
+  borderRadius: 10, padding: 4,
+}
+function tabBtn(active: boolean): React.CSSProperties {
+  return {
+    flex: 1, padding: '9px 14px', fontSize: 13, fontWeight: 600,
+    border: 'none', borderRadius: 7, cursor: 'pointer',
+    background: active ? 'var(--accent)' : 'transparent',
+    color: active ? '#fff' : 'var(--ink-muted)',
+    transition: 'background .15s, color .15s',
+  }
+}
+const pillFor = (kind: string): { bg: string; fg: string; label: string } => {
+  const k = (kind || '').toUpperCase()
+  if (k === 'EXIT') return { bg: 'rgba(239,68,68,.12)', fg: '#f87171', label: 'DROP / EXIT' }
+  if (k === 'TRIM') return { bg: 'rgba(251,191,36,.12)', fg: '#fbbf24', label: 'TRIM' }
+  if (k === 'ADD') return { bg: 'rgba(52,211,153,.12)', fg: '#34d399', label: 'ADD' }
+  if (k === 'ADOPT') return { bg: 'rgba(96,165,250,.12)', fg: '#60a5fa', label: 'KEEP / ADOPT' }
+  if (k === 'SET_STOP') return { bg: 'rgba(167,139,250,.12)', fg: '#a78bfa', label: 'SET STOP' }
+  return { bg: 'var(--surface-raised)', fg: 'var(--ink-muted)', label: k || '—' }
 }
 
 const inputStyle: React.CSSProperties = {
@@ -209,6 +290,53 @@ const DEFAULT_PREFS: HilPrefs = {
   approval_timeout_min: 15,
   auto_reject_on_timeout: true,
   notify_channel: 'sms',
+}
+
+// ── On-demand trade chart (server-rendered TradingView-style PNG) ─────────────
+// Lazy: only fetched when the user expands it, so the Approvals queue doesn't
+// trigger N heavy chart renders at once. Real entry/stop/target (or pcts) drive
+// the lines; the endpoint caches each chart ~15 min.
+function tradeChartUrl(p: {
+  ticker: string; entry?: number | null; stop?: number | null; target?: number | null
+  stopPct?: number | null; targetPct?: number | null
+}): string {
+  const q = new URLSearchParams({ ticker: p.ticker })
+  if (p.entry != null) q.set('entry', String(p.entry))
+  if (p.stop != null) q.set('stop', String(p.stop))
+  if (p.target != null) q.set('target', String(p.target))
+  if (p.stopPct != null) q.set('stop_pct', String(p.stopPct))
+  if (p.targetPct != null) q.set('target_pct', String(p.targetPct))
+  return `/api/market/trade-chart.png?${q.toString()}`
+}
+
+function TradeChart(props: {
+  ticker: string; entry?: number | null; stop?: number | null; target?: number | null
+  stopPct?: number | null; targetPct?: number | null
+}) {
+  const [open, setOpen] = useState(false)
+  const [err, setErr] = useState(false)
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <button
+        onClick={() => { setErr(false); setOpen(o => !o) }}
+        style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 12, padding: 0, fontWeight: 600 }}
+      >
+        {open ? '▾ Hide chart' : '📈 Show chart'}
+      </button>
+      {open && !err && (
+        <img
+          src={tradeChartUrl(props)}
+          alt={`${props.ticker} trade chart`}
+          loading="lazy"
+          onError={() => setErr(true)}
+          style={{ marginTop: 8, width: '100%', borderRadius: 8, border: '1px solid var(--surface-rule)', display: 'block' }}
+        />
+      )}
+      {open && err && (
+        <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginTop: 8 }}>Chart unavailable right now.</div>
+      )}
+    </div>
+  )
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -344,6 +472,80 @@ export default function HILPage() {
     onSuccess: () => refetchThematicSignals(),
   })
 
+  const [tab, setTab] = useState<'approvals' | 'settings'>(() => {
+    // Deep link from the trade-request SMS lands on the Approvals tab.
+    try {
+      const t = new URLSearchParams(window.location.search).get('tab')
+      return t === 'settings' ? 'settings' : 'approvals'
+    } catch {
+      return 'approvals'
+    }
+  })
+
+  // ── Holdings Brain (full-account takeover: keep/drop/trim/exit proposals) ──
+  const { data: brainData, refetch: refetchBrain } = useQuery<BrainProposalsResp>({
+    queryKey: ['brain-proposals'],
+    queryFn: () => api.get<BrainProposalsResp>('/thematic/brain/proposals').then(r => r.data),
+    refetchInterval: 20_000,
+  })
+  // Live Fidelity scrape (Playwright) — only when viewing Settings, to avoid a
+  // heavy broker read on every Approvals poll.
+  const { data: brainHoldings, refetch: refetchBrainHoldings } = useQuery<BrainHoldingsResp>({
+    queryKey: ['brain-holdings'],
+    queryFn: () => api.get<BrainHoldingsResp>('/thematic/brain/holdings', { timeout: 180_000 }).then(r => r.data),
+    enabled: tab === 'settings',
+  })
+  // Broker actions drive Playwright (scrape / order placement) → 30-90s. Override
+  // the default 30s axios timeout so the UI doesn't bail while the order completes.
+  const SLOW_MS = 180_000
+  const brainAssessMut = useMutation({
+    mutationFn: () => api.post('/thematic/brain/assess', {}, { timeout: SLOW_MS }).then(r => r.data),
+    onSuccess: () => { refetchBrain(); refetchBrainHoldings() },
+  })
+  const [brainBusyId, setBrainBusyId] = useState<string | null>(null)
+  const [brainMsg, setBrainMsg] = useState<{ id: string; text: string; ok: boolean } | null>(null)
+  const brainApproveMut = useMutation({
+    mutationFn: async ({ id, execute }: { id: string; execute: boolean }) => {
+      // Real orders (execute) need step-up 2FA; store-only keeps/stops do not.
+      // Reuse a cached step-up token (~5 min) so you enter a code once, not every tap.
+      if (execute && !stepUpHeaders()['X-Step-Up-Token']) {
+        const ok = await openStepUp({
+          title: 'Confirm trade with 2FA',
+          copy: 'Authorize this real-money order. Your approval is reused for ~5 min.',
+        })
+        if (!ok) throw new Error('Step-up cancelled')
+      }
+      return api.post(`/thematic/brain/proposals/${id}/approve`, { execute },
+        { headers: stepUpHeaders(), timeout: SLOW_MS }).then(r => r.data)
+    },
+    onMutate: ({ id }) => { setBrainBusyId(id); setBrainMsg(null) },
+    onSuccess: (_d, { id, execute }) => {
+      setBrainBusyId(null)
+      setBrainMsg({ id, ok: true, text: execute ? 'Order placed ✓' : 'Kept & adopted ✓' })
+      refetchBrain(); refetchBrainHoldings()
+    },
+    onError: (e: unknown, { id }) => {
+      setBrainBusyId(null)
+      setBrainMsg({ id, ok: false, text: (e as Error)?.message || 'Failed' })
+    },
+  })
+  const brainSkipMut = useMutation({
+    mutationFn: (id: string) => api.post(`/thematic/brain/proposals/${id}/skip`).then(r => r.data),
+    onMutate: (id) => setBrainBusyId(id),
+    onSuccess: () => { setBrainBusyId(null); refetchBrain() },
+    onError: () => setBrainBusyId(null),
+  })
+  // Bulk "keep & adopt everything" — store-only, no orders, no step-up. Sequential
+  // so the proposals file isn't raced.
+  const brainKeepAllMut = useMutation({
+    mutationFn: async (ids: string[]) => {
+      for (const id of ids) {
+        await api.post(`/thematic/brain/proposals/${id}/approve`, { execute: false }, { timeout: SLOW_MS })
+      }
+    },
+    onSuccess: () => { setBrainMsg(null); refetchBrain(); refetchBrainHoldings() },
+  })
+
   // ── Helpers ───────────────────────────────────────────────────────
   function setField(key: keyof HilPrefs, value: unknown) {
     setForm(f => ({ ...f, [key]: value }))
@@ -392,6 +594,10 @@ export default function HILPage() {
 
   const profile = (form.risk_profile as string | undefined) ?? 'balanced'
   const pending = hilRaw?.pending ? hilRaw.trade : null
+  const brainPending = brainData?.pending ?? []
+  const brainDeferred = brainData?.deferred ?? []
+  const brainExcluded = brainHoldings?.excluded ?? []
+  const approvalsCount = (pending ? 1 : 0) + pendingSignals.length + brainPending.length
 
   if (userLoading) return <LoadingState />
 
@@ -424,10 +630,11 @@ export default function HILPage() {
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--ink)', marginBottom: 4 }}>
-              🛡️ Human-In-the-Loop Approvals
+              🛡️ Human-In-the-Loop
             </div>
             <div style={{ fontSize: 13, color: 'var(--ink-muted)', maxWidth: 560 }}>
-              Set your risk profile and require SMS approval before any real-money trade. These preferences are saved to your account.
+              Review and approve every real-money trade. <strong>Approvals</strong> is your action queue;
+              <strong> HIL Settings</strong> holds your risk profile, disclosure, SMS, and brain controls.
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -444,6 +651,19 @@ export default function HILPage() {
         </div>
       </div>
 
+      {/* ── Tab bar ── */}
+      <div style={tabBarWrap}>
+        <button style={tabBtn(tab === 'approvals')} onClick={() => setTab('approvals')}>
+          ⏳ Approvals{approvalsCount ? ` (${approvalsCount})` : ''}
+        </button>
+        <button style={tabBtn(tab === 'settings')} onClick={() => setTab('settings')}>
+          ⚙️ HIL Settings
+        </button>
+      </div>
+
+      {/* ===== SETTINGS: disclosure (also shown until accepted) ===== */}
+      {(tab === 'settings' || !fullyAccepted) && (
+      <>
       {/* ── 2. Disclosure card ── */}
       <div style={card}>
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
@@ -465,7 +685,7 @@ export default function HILPage() {
           )}
         </div>
 
-        <details open style={{ marginBottom: 16 }}>
+        <details {...(fullyAccepted ? {} : { open: true })} style={{ marginBottom: 16 }}>
           <summary style={{
             fontSize: 13, fontWeight: 600, color: 'var(--ink)', cursor: 'pointer',
             padding: '8px 0', userSelect: 'none',
@@ -580,6 +800,9 @@ export default function HILPage() {
         )}
       </div>
 
+      </>
+      )}
+
       {/* ── Locked message if not accepted ── */}
       {!fullyAccepted && (
         <div style={{
@@ -592,11 +815,16 @@ export default function HILPage() {
 
       {fullyAccepted && (
         <>
+          {/* ===== SETTINGS PANEL (risk · behavior · sms · bridge) ===== */}
+          {tab === 'settings' && (
+          <>
           {/* ── 3. Risk profile card ── */}
           <div style={card}>
             <div style={sectionTitle}>⚖️ Risk profile</div>
             <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginTop: -8, marginBottom: 14 }}>
-              Pick a recommended preset, or fine-tune below (switches to Custom).
+              Sizing/limits for the <strong>paper competition &amp; candidate scanner</strong>. Live broker sizing
+              is governed separately by compliance (10% position cap) and the brain&apos;s thematic conviction —
+              see <em>Holdings-Brain controls</em> below.
             </div>
 
             {/* Preset cards */}
@@ -822,10 +1050,139 @@ export default function HILPage() {
             )}
           </div>
 
+          </>
+          )}
+
+          {/* ===== APPROVALS PANEL ===== */}
+          {tab === 'approvals' && (
+          <>
+          {/* ── Holdings-Brain proposals (keep / drop / trim / exit) ── */}
+          <div style={card}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={sectionTitle}>🧠 Holdings-Brain proposals</div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {(() => {
+                  const keepIds = brainPending
+                    .filter(p => !['EXIT', 'TRIM', 'ADD'].includes((p.action?.kind || '').toUpperCase()))
+                    .map(p => p.id)
+                  return keepIds.length > 1 ? (
+                    <button style={{ ...btnPrimary, padding: '4px 12px', fontSize: 12 }}
+                      disabled={brainKeepAllMut.isPending}
+                      onClick={() => brainKeepAllMut.mutate(keepIds)}>
+                      {brainKeepAllMut.isPending ? 'Keeping…' : `✓ Keep all (${keepIds.length})`}
+                    </button>
+                  ) : null
+                })()}
+                <button style={{ ...btnSecondary, padding: '4px 12px', fontSize: 12 }}
+                  disabled={brainAssessMut.isPending}
+                  onClick={() => brainAssessMut.mutate()}>
+                  {brainAssessMut.isPending ? 'Scanning…' : '↻ Re-assess account'}
+                </button>
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 14 }}>
+              On takeover the brain proposes which existing holdings to <strong>keep</strong> vs
+              <strong> drop</strong>, plus trims/exits — capped per cycle to avoid churn. Each is propose-only
+              and needs your approval (step-up 2FA on live orders).
+            </div>
+
+            {brainPending.length === 0 ? (
+              <div style={{ padding: '16px 0', textAlign: 'center', fontSize: 13, color: 'var(--ink-faint)' }}>
+                No brain proposals pending. Re-assess to refresh.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {brainPending.map(p => {
+                  const pill = pillFor(p.action?.kind || '')
+                  const h = p.holding || { ticker: p.ticker }
+                  const isOrder = ['EXIT', 'TRIM', 'ADD'].includes((p.action?.kind || '').toUpperCase())
+                  return (
+                    <div key={p.id} style={{
+                      border: '1px solid var(--surface-rule)', borderRadius: 8,
+                      padding: '12px 14px', background: 'var(--surface-soft)',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
+                        <span style={{ fontWeight: 700, fontSize: 15, color: 'var(--ink)' }}>{p.ticker}</span>
+                        <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 99, background: pill.bg, color: pill.fg }}>
+                          {pill.label}
+                        </span>
+                        {p.priority && <span style={{ ...badge('red'), fontSize: 10 }}>PRIORITY</span>}
+                        <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>
+                          {h.pct_of_account != null ? `${Number(h.pct_of_account).toFixed(1)}% of acct · ` : ''}
+                          {h.unrealized_pct != null ? `${Number(h.unrealized_pct) >= 0 ? '+' : ''}${Number(h.unrealized_pct).toFixed(1)}%` : ''}
+                          {p.action?.conviction != null ? ` · conv ${p.action.conviction}/10` : ''}
+                        </span>
+                      </div>
+                      {p.action?.reason && (
+                        <div style={{ fontSize: 12, color: 'var(--ink-muted)', marginBottom: 10, lineHeight: 1.45 }}>
+                          {p.action.reason}
+                        </div>
+                      )}
+                      <TradeChart ticker={p.ticker} entry={h.last} stop={p.action?.stop} target={p.action?.target} />
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <button
+                          style={{ ...btnPrimary, padding: '5px 14px', fontSize: 12, opacity: brainBusyId === p.id ? 0.6 : 1 }}
+                          disabled={brainBusyId === p.id}
+                          onClick={() => brainApproveMut.mutate({ id: p.id, execute: isOrder })}
+                        >
+                          {brainBusyId === p.id ? 'Working…' : isOrder ? 'Approve & place order' : 'Approve — keep'}
+                        </button>
+                        <button
+                          style={{ ...btnSecondary, padding: '5px 14px', fontSize: 12 }}
+                          disabled={brainBusyId === p.id}
+                          onClick={() => brainSkipMut.mutate(p.id)}
+                        >
+                          Skip
+                        </button>
+                        {brainMsg?.id === p.id && (
+                          <span style={{ fontSize: 12, fontWeight: 600, color: brainMsg.ok ? '#34d399' : 'var(--danger)' }}>
+                            {brainMsg.text}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* ── Deferred trades (held back by per-cycle budget / min-hold) ── */}
+          {brainDeferred.length > 0 && (
+            <div style={card}>
+              <div style={sectionTitle}>🕒 Deferred to a later cycle ({brainDeferred.length})</div>
+              <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 12 }}>
+                Held back to avoid churn — surfaced automatically on the next brain cycle, or force them now
+                with “Re-assess account”.
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {brainDeferred.map((d, i) => {
+                  const pill = pillFor(d.kind)
+                  return (
+                    <div key={`${d.ticker}-${i}`} style={{
+                      display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                      padding: '8px 12px', borderRadius: 7,
+                      background: 'var(--surface-soft)', border: '1px dashed var(--surface-rule)',
+                    }}>
+                      <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--ink)' }}>{d.ticker}</span>
+                      <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 99, background: pill.bg, color: pill.fg }}>
+                        {pill.label}
+                      </span>
+                      {d.conviction != null && (
+                        <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>conv {d.conviction}/10</span>
+                      )}
+                      <span style={{ fontSize: 11, color: 'var(--ink-faint)', marginLeft: 'auto' }}>{d.reason}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
           {/* ── 7. Pending approvals card ── */}
           <div style={card}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
-              <div style={sectionTitle}>⏳ Pending approval</div>
+              <div style={sectionTitle}>⏳ Pending paper approval</div>
               <button style={{ ...btnSecondary, padding: '4px 12px', fontSize: 12 }} onClick={() => refetchPending()}>
                 ↻ Refresh
               </button>
@@ -977,7 +1334,7 @@ export default function HILPage() {
                               <span style={{ ...badge('grey'), fontSize: 10 }}>{sig.theme}</span>
                             )}
                             <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>
-                              Conviction {sig.conviction ?? '—'}/10 · Buzz {Math.round(sig.raw_score ?? 0)} pts
+                              Score {sig.score ?? Math.round((sig.conviction ?? 7) * 9)}/100
                             </span>
                             {thematicHil.fidelity_trade && (
                               <span style={{ fontSize: 10, fontWeight: 700, color: '#fbbf24' }}>FIDELITY</span>
@@ -991,6 +1348,8 @@ export default function HILPage() {
                           <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginBottom: 10 }}>
                             Target +{sig.target_pct ?? 12}% · Stop -{sig.stop_pct ?? 6}% · Hold {sig.hold_days ?? 5}d
                           </div>
+                          <TradeChart ticker={sig.ticker}
+                            stopPct={sig.stop_pct ?? 6} targetPct={sig.target_pct ?? 12} />
                           <div style={{ display: 'flex', gap: 8 }}>
                             <button
                               style={{ ...btnPrimary, padding: '5px 14px', fontSize: 12 }}
@@ -1023,6 +1382,57 @@ export default function HILPage() {
             )}
           </div>
 
+          </>
+          )}
+
+          {/* ===== SETTINGS PANEL 2 (brain controls · protected accounts · save) ===== */}
+          {tab === 'settings' && (
+          <>
+          {/* ── Holdings-Brain controls (status) ── */}
+          <div style={card}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={sectionTitle}>🧠 Holdings-Brain controls</div>
+              <button style={{ ...btnSecondary, padding: '4px 12px', fontSize: 12 }}
+                onClick={() => refetchBrainHoldings()}>↺ Refresh</button>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginBottom: 14 }}>
+              The brain takes control of your taxable account, decides keep/drop by thematic conviction, then
+              trades. Protected accounts are never touched. These limits are set server-side (.env).
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '8px 24px', marginBottom: 14 }}>
+              {[
+                ['Managed equity positions', String(brainHoldings?.count ?? '—')],
+                ['Protected / untouched', String(brainExcluded.length)],
+                ['Live order requires', 'Step-up 2FA + compliance'],
+                ['Trades capped', 'per cycle (anti-churn)'],
+              ].map(([k, v]) => (
+                <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '4px 0', borderBottom: '1px solid var(--surface-rule)' }}>
+                  <span style={{ color: 'var(--ink-muted)' }}>{k}</span>
+                  <span style={{ color: 'var(--ink)', fontWeight: 500 }}>{v}</span>
+                </div>
+              ))}
+            </div>
+            {brainExcluded.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 8 }}>
+                  🔒 Protected — never traded
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {brainExcluded.map((e, i) => (
+                    <div key={`${e.symbol}-${i}`} style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      fontSize: 12, padding: '6px 10px', borderRadius: 6,
+                      background: 'rgba(96,165,250,.06)', border: '1px solid rgba(96,165,250,.2)',
+                    }}>
+                      <span style={{ fontWeight: 700, color: 'var(--ink)' }}>{e.symbol}</span>
+                      <span style={{ color: 'var(--ink-faint)' }}>{e.account_name || e.reason}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* ── 9. Save / Discard ── */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
             <button
@@ -1046,6 +1456,8 @@ export default function HILPage() {
               </span>
             )}
           </div>
+          </>
+          )}
         </>
       )}
     </div>

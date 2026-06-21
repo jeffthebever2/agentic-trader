@@ -1,9 +1,14 @@
 """
 Step-up 2FA before placing real-money trades.
 
-Two enrollable methods, chosen per-user in Settings:
-  - TOTP  : 6-digit code from Microsoft/Google Authenticator (pyotp)
-  - Passkey: WebAuthn (Face ID / fingerprint / hardware key)
+Enrollable methods, chosen per-user in Settings:
+  - TOTP    : 6-digit code from Microsoft/Google Authenticator (pyotp)
+  - Passkey : WebAuthn (Face ID / fingerprint / hardware key)
+  - Email   : one-time code mailed to the login address
+  - Passcode: a self-set trading passcode (PBKDF2-hashed + salted, rate-limited).
+              Convenient — no authenticator app — but weaker than rotating TOTP,
+              so it never replaces the broker compliance gates, only the per-trade
+              re-verification step. Keep TOTP enrolled as a fallback.
 
 A successful challenge mints a short-lived, HMAC-signed *step-up token*.
 Trade endpoints require a valid token in the `X-Step-Up-Token` header.
@@ -435,10 +440,106 @@ def set_email_method(email: str) -> None:
     user_store.update_user(email, step_up_method="email")
 
 
+# ── Trading passcode ───────────────────────────────────────────────
+# A self-set passcode the user types to authorize a trade — no authenticator
+# app needed. Stored only as a PBKDF2-HMAC-SHA256 hash with a per-user random
+# salt (never plaintext), so a leaked users store does not reveal the passcode.
+# Online guessing is throttled by an escalating lockout. This is convenience
+# re-verification only; it does not relax any broker compliance gate.
+_PASSCODE_MIN_LEN = 6
+_PASSCODE_PBKDF2_ITERS = 200_000
+_PASSCODE_MAX_FAILS = 5         # free attempts before the lockout escalates
+_PASSCODE_LOCK_BASE = 30        # seconds for the first lockout
+_PASSCODE_LOCK_CAP = 900        # seconds — lockout never exceeds 15 min
+
+
+def _derive_passcode(code: str, salt: bytes) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256", code.encode("utf-8"), salt, _PASSCODE_PBKDF2_ITERS
+    ).hex()
+
+
+def set_passcode(email: str, passcode: str) -> None:
+    """Enroll/replace the trading passcode and make it the active step-up method.
+
+    TOTP/passkey enrollment is left intact so they remain available as a backup.
+    Raises ValueError if the passcode is too short.
+    """
+    code = (passcode or "").strip()
+    if len(code) < _PASSCODE_MIN_LEN:
+        raise ValueError(f"Passcode must be at least {_PASSCODE_MIN_LEN} characters")
+    salt = secrets.token_bytes(16)
+    user_store.update_user(
+        email,
+        passcode_hash=_derive_passcode(code, salt),
+        passcode_salt=salt.hex(),
+        passcode_enabled=True,
+        step_up_method="passcode",
+    )
+    _PASSCODE_FAILS.pop(email.lower(), None)
+
+
+def passcode_disable(email: str) -> None:
+    user = user_store.get_user(email)
+    method = user.get("step_up_method") if user else "none"
+    fields: dict[str, Any] = {
+        "passcode_hash": "", "passcode_salt": "", "passcode_enabled": False,
+    }
+    if method == "passcode":
+        fields["step_up_method"] = "none"
+    user_store.update_user(email, **fields)
+    _PASSCODE_FAILS.pop(email.lower(), None)
+
+
+def passcode_lockout_remaining(email: str) -> int:
+    """Seconds remaining on the brute-force lockout (0 = not locked)."""
+    rec = _PASSCODE_FAILS.get(email.lower())
+    if not rec:
+        return 0
+    rem = int(rec.get("locked_until", 0.0) - time.time())
+    return rem if rem > 0 else 0
+
+
+def _record_passcode_fail(email: str) -> None:
+    e = email.lower()
+    rec = _PASSCODE_FAILS.get(e) or {"count": 0, "locked_until": 0.0}
+    rec["count"] = int(rec.get("count", 0)) + 1
+    if rec["count"] >= _PASSCODE_MAX_FAILS:
+        over = rec["count"] - _PASSCODE_MAX_FAILS
+        lock = min(_PASSCODE_LOCK_BASE * (2 ** over), _PASSCODE_LOCK_CAP)
+        rec["locked_until"] = time.time() + lock
+    _PASSCODE_FAILS[e] = rec
+
+
+def verify_passcode(email: str, code: str) -> bool:
+    """Constant-time passcode check. Records failures for lockout; clears them on
+    success. Callers must consult `passcode_lockout_remaining` first to 429."""
+    user = user_store.get_user(email)
+    if not user:
+        return False
+    salt_hex = user.get("passcode_salt") or ""
+    hash_hex = user.get("passcode_hash") or ""
+    code = (code or "").strip()
+    if not salt_hex or not hash_hex or not code:
+        return False
+    try:
+        derived = _derive_passcode(code, bytes.fromhex(salt_hex))
+    except Exception:
+        return False
+    if hmac.compare_digest(derived, hash_hex):
+        _PASSCODE_FAILS.pop(email.lower(), None)
+        return True
+    _record_passcode_fail(email)
+    return False
+
+
 # In-memory single-use challenge stores (per process; fine for one server).
 _PENDING_REG: dict[str, bytes] = {}
 _PENDING_AUTH: dict[str, bytes] = {}
 _PENDING_EMAIL: dict[str, dict[str, Any]] = {}
+# Per-email passcode failure tracker → {count, locked_until}. In-memory so a
+# restart clears any lockout, matching the email-OTP pending store's scope.
+_PASSCODE_FAILS: dict[str, dict[str, Any]] = {}
 
 
 def step_up_status(email: str) -> dict[str, Any]:
@@ -446,6 +547,7 @@ def step_up_status(email: str) -> dict[str, Any]:
     return {
         "method": user.get("step_up_method", "none"),
         "totp_enabled": bool(user.get("totp_enabled", False)),
+        "passcode_enabled": bool(user.get("passcode_enabled", False)),
         "email_enabled": email_otp_available(),
         "passkeys": [
             {"id": p["id"], "name": p.get("name", "Passkey"), "created": p.get("created")}

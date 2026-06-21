@@ -256,16 +256,17 @@ async def require_admin(
     return user
 
 
-async def require_step_up(
+async def enforce_step_up(
     request: Request,
-    user: dict[str, Any] = Depends(require_admin),
+    user: dict[str, Any],
 ) -> dict[str, Any]:
-    """FastAPI dependency: enforce a valid step-up 2FA token on trade actions.
+    """Validate the step-up 2FA gate for an already-authenticated admin `user`.
 
-    The user must (a) be admin and (b) present a fresh `X-Step-Up-Token`
-    minted by /auth/2fa/step-up/* — UNLESS they have no step-up method
-    enrolled, in which case a 428 tells the client to set one up first.
-    Bypassed only on localhost dev when CF_ACCESS_REQUIRED!=true.
+    This is the reusable core of `require_step_up`. Non-dependency call sites —
+    e.g. the thematic approve endpoint, which is frictionless paper-only but must
+    require 2FA on its live-Fidelity leg — call this directly so the exact same
+    gate (admin feature flag, HIL disclosure, localhost-dev bypass, fresh
+    `X-Step-Up-Token`) is enforced without duplicating or weakening it.
     """
     try:
         from web.api.admin import _read_flags
@@ -294,11 +295,12 @@ async def require_step_up(
         (method == "totp" and st["totp_enabled"])
         or (method == "passkey" and bool(st["passkeys"]))
         or (method == "email" and st.get("email_enabled"))
+        or (method == "passcode" and st.get("passcode_enabled"))
     )
     if method == "none" or not ready:
         raise HTTPException(
             status_code=status.HTTP_428_PRECONDITION_REQUIRED,
-            detail="Step-up 2FA required before trading. Enroll TOTP, email codes, or a passkey in Settings.",
+            detail="Step-up 2FA required before trading. Enroll a trading passcode, TOTP, email codes, or a passkey in Settings.",
         )
     token = request.headers.get("x-step-up-token", "")
     if not twofa.verify_step_up_token(token, user["email"]):
@@ -308,6 +310,20 @@ async def require_step_up(
             headers={"X-Step-Up-Required": st["method"]},
         )
     return user
+
+
+async def require_step_up(
+    request: Request,
+    user: dict[str, Any] = Depends(require_admin),
+) -> dict[str, Any]:
+    """FastAPI dependency: enforce a valid step-up 2FA token on trade actions.
+
+    The user must (a) be admin and (b) present a fresh `X-Step-Up-Token`
+    minted by /auth/2fa/step-up/* — UNLESS they have no step-up method
+    enrolled, in which case a 428 tells the client to set one up first.
+    Bypassed only on localhost dev when CF_ACCESS_REQUIRED!=true.
+    """
+    return await enforce_step_up(request, user)
 
 
 def get_optional_user(request: Request) -> Optional[dict[str, Any]]:

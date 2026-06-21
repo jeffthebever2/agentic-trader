@@ -25,6 +25,7 @@ interface TwoFAStatus {
   verified: boolean
   email_enabled?: boolean
   totp_enabled?: boolean
+  passcode_enabled?: boolean
   passkeys?: Array<{ id: string; name: string }>
 }
 
@@ -289,6 +290,38 @@ export default function SettingsPage() {
   const [totpMsg, setTotpMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const [methodMsg, setMethodMsg] = useState<{ text: string; ok: boolean } | null>(null)
   const [passkeyMsg, setPasskeyMsg] = useState<string | null>(null)
+
+  // Trading passcode
+  const [passcodeOpen, setPasscodeOpen] = useState(false)
+  const [passcode1, setPasscode1] = useState('')
+  const [passcode2, setPasscode2] = useState('')
+  const [passcodeMsg, setPasscodeMsg] = useState<{ text: string; ok: boolean } | null>(null)
+
+  const handlePasscodeSet = async () => {
+    const a = passcode1.trim(), b = passcode2.trim()
+    if (a.length < 6) { setPasscodeMsg({ text: 'Passcode must be at least 6 characters.', ok: false }); return }
+    if (a !== b) { setPasscodeMsg({ text: 'Passcodes do not match.', ok: false }); return }
+    try {
+      await api.post('/auth/2fa/passcode/set', { passcode: a })
+      setPasscodeMsg({ text: '✓ Trading passcode set — now your active trade 2FA.', ok: true })
+      setPasscodeOpen(false); setPasscode1(''); setPasscode2('')
+      refetch2FA()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string }
+      setPasscodeMsg({ text: err?.response?.data?.detail || err?.message || 'Failed to set passcode.', ok: false })
+    }
+  }
+
+  const handlePasscodeDisable = async () => {
+    if (!confirm('Remove the trading passcode?')) return
+    try {
+      await api.post('/auth/2fa/passcode/disable')
+      setPasscodeMsg({ text: 'Trading passcode removed.', ok: true })
+      refetch2FA()
+    } catch (e: unknown) {
+      setPasscodeMsg({ text: `Failed: ${(e as Error).message}`, ok: false })
+    }
+  }
 
   const handleTotpEnroll = async () => {
     try {
@@ -666,7 +699,7 @@ export default function SettingsPage() {
     : (me?.phone_number || me?.phone) ? 'Unverified' : 'Not set'
 
   const methodLabel: Record<string, string> = {
-    none: 'Off', email: 'Email code', totp: 'Authenticator', passkey: 'Passkey',
+    none: 'Off', email: 'Email code', totp: 'Authenticator', passkey: 'Passkey', passcode: 'Trading passcode',
   }
   const currentMethodLabel = methodLabel[twofa?.method || 'none'] || 'Off'
   const methodBadgeStyle: React.CSSProperties = twofa?.method && twofa.method !== 'none'
@@ -967,6 +1000,73 @@ export default function SettingsPage() {
           </div>
         </InlineBlock>
 
+        {/* Trading passcode */}
+        <InlineBlock style={{ marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink)' }}>Trading passcode</div>
+              <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginTop: 2 }}>
+                A passcode you set — type it to approve a trade, no authenticator app needed.{' '}
+                <span style={{ color: '#fbbf24' }}>Convenient but weaker than TOTP; keep TOTP enrolled as a backup.</span>
+              </div>
+            </div>
+            <span style={{
+              fontSize: 11, padding: '2px 8px', borderRadius: 99, fontWeight: 600,
+              background: twofa?.passcode_enabled ? '#064e3b' : 'var(--surface-raised)',
+              color: twofa?.passcode_enabled ? '#34d399' : 'var(--ink-faint)',
+            }}>
+              {twofa?.passcode_enabled ? 'Set' : 'Not set'}
+            </span>
+          </div>
+
+          {passcodeOpen && (
+            <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>
+                Choose a passcode of at least 6 characters. It's stored hashed (never in plain text)
+                and locks out after repeated wrong attempts.
+              </div>
+              <input
+                type="password" autoComplete="new-password" maxLength={64}
+                placeholder="New trading passcode" className="input"
+                value={passcode1} onChange={e => setPasscode1(e.target.value)}
+                style={{ fontFamily: 'monospace', letterSpacing: '.1em' }}
+              />
+              <input
+                type="password" autoComplete="new-password" maxLength={64}
+                placeholder="Confirm passcode" className="input"
+                value={passcode2} onChange={e => setPasscode2(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handlePasscodeSet() }}
+                style={{ fontFamily: 'monospace', letterSpacing: '.1em' }}
+              />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn-primary" style={{ fontSize: 13 }} onClick={handlePasscodeSet}>
+                  {twofa?.passcode_enabled ? 'Update passcode' : 'Set passcode'}
+                </button>
+                <button className="btn-secondary" style={{ fontSize: 13 }}
+                  onClick={() => { setPasscodeOpen(false); setPasscode1(''); setPasscode2(''); setPasscodeMsg(null) }}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!passcodeOpen && (
+            <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+              <button className="btn-secondary" style={{ fontSize: 12 }} onClick={() => { setPasscodeMsg(null); setPasscodeOpen(true) }}>
+                {twofa?.passcode_enabled ? 'Change' : 'Set up'}
+              </button>
+              {twofa?.passcode_enabled && (
+                <button className="btn-secondary" style={{ fontSize: 12, color: '#ef4444' }} onClick={handlePasscodeDisable}>Remove</button>
+              )}
+            </div>
+          )}
+          {passcodeMsg && (
+            <div style={{ fontSize: 12, marginTop: 8, color: passcodeMsg.ok ? '#22c55e' : '#ef4444' }}>
+              {passcodeMsg.text}
+            </div>
+          )}
+        </InlineBlock>
+
         {/* Passkey */}
         <InlineBlock>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -1012,9 +1112,10 @@ export default function SettingsPage() {
             style={{ width: 'auto', padding: '4px 8px', fontSize: 12 }}
           >
             <option value="none">Off (not recommended)</option>
+            <option value="passcode" disabled={!twofa?.passcode_enabled}>Trading passcode</option>
             <option value="email" disabled={!twofa?.email_enabled}>Email code</option>
-            <option value="totp">Authenticator (TOTP)</option>
-            <option value="passkey">Passkey</option>
+            <option value="totp" disabled={!twofa?.totp_enabled}>Authenticator (TOTP)</option>
+            <option value="passkey" disabled={!twofa?.passkeys?.length}>Passkey</option>
           </select>
         </div>
         {methodMsg && (

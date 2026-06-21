@@ -2,19 +2,30 @@
 /**
  * 2FA Step-Up Modal — shown when a protected action requires re-verification.
  * Trigger by calling openStepUp(resolve, reject) from the stepUpStore.
+ *
+ * Method-aware: on open it reads the user's active step-up method and adapts the
+ * endpoint + copy (trading passcode / authenticator TOTP / emailed code). The
+ * caller's `copy` is shown as context above the method-specific instruction.
  */
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { create } from 'zustand'
 import { Lock } from 'lucide-react'
 import api from '@/api/client'
 
 // ── Global store so any component can trigger step-up ─────────────────────────
+// Cache the minted step-up token slightly under the server's 300s TTL so a
+// just-verified token is still fresh when the follow-up trade request lands.
+const STEP_UP_TTL_MS = 290_000
+
 interface StepUpState {
   open: boolean
   method: string   // 'totp' | 'email' | 'passkey'
   title: string
   copy: string
   resolve: ((ok: boolean) => void) | null
+  token: string
+  tokenExp: number   // epoch ms when the cached token expires
+  setToken: (t: string) => void
   openStepUp: (opts?: { title?: string; copy?: string }) => Promise<boolean>
   close: (ok: boolean) => void
 }
@@ -23,14 +34,19 @@ export const useStepUpStore = create<StepUpState>((set, get) => ({
   open: false,
   method: 'totp',
   title: 'Confirm with 2FA',
-  copy: 'Enter the 6-digit code from your authenticator app.',
+  copy: '',
   resolve: null,
+  token: '',
+  tokenExp: 0,
+  setToken(t) {
+    set({ token: t, tokenExp: t ? Date.now() + STEP_UP_TTL_MS : 0 })
+  },
   openStepUp(opts) {
     return new Promise<boolean>(resolve => {
       set({
         open: true,
         title: opts?.title ?? 'Confirm with 2FA',
-        copy: opts?.copy ?? 'Enter the 6-digit code from your authenticator app.',
+        copy: opts?.copy ?? '',
         resolve,
       })
     })
@@ -40,6 +56,45 @@ export const useStepUpStore = create<StepUpState>((set, get) => ({
     set({ open: false, resolve: null })
   },
 }))
+
+/** Imperatively trigger the 2FA modal from outside React (e.g. a mutationFn). */
+export function openStepUp(opts?: { title?: string; copy?: string }): Promise<boolean> {
+  return useStepUpStore.getState().openStepUp(opts)
+}
+
+/** Header bag carrying a fresh step-up token, or empty if none/expired. */
+export function stepUpHeaders(): Record<string, string> {
+  const { token, tokenExp } = useStepUpStore.getState()
+  return token && Date.now() < tokenExp ? { 'X-Step-Up-Token': token } : {}
+}
+
+// ── Per-method config: endpoint + wording + input shape ───────────────────────
+interface MethodCfg {
+  endpoint: string
+  instruction: string
+  type: 'text' | 'password'
+  placeholder: string
+  maxLen: number
+  numeric: boolean
+}
+const METHOD_CFG: Record<string, MethodCfg> = {
+  totp: {
+    endpoint: '/auth/2fa/step-up/totp',
+    instruction: 'Enter the 6-digit code from your authenticator app.',
+    type: 'text', placeholder: '000000', maxLen: 8, numeric: true,
+  },
+  passcode: {
+    endpoint: '/auth/2fa/step-up/passcode',
+    instruction: 'Enter your trading passcode.',
+    type: 'password', placeholder: 'Trading passcode', maxLen: 64, numeric: false,
+  },
+  email: {
+    endpoint: '/auth/2fa/step-up/email',
+    instruction: 'Enter the code we emailed to your login address.',
+    type: 'text', placeholder: '000000', maxLen: 8, numeric: true,
+  },
+}
+const cfgFor = (m: string): MethodCfg => METHOD_CFG[m] ?? METHOD_CFG.totp
 
 // ── Modal component ───────────────────────────────────────────────────────────
 const overlay: React.CSSProperties = {
@@ -66,14 +121,37 @@ export function StepUpModal() {
   const [code, setCode] = useState('')
   const [msg, setMsg] = useState('')
   const [loading, setLoading] = useState(false)
+  const [method, setMethod] = useState('totp')
+
+  // On open, read the active step-up method so we hit the right endpoint and
+  // show the right instruction. For email, send the one-time code immediately.
+  useEffect(() => {
+    if (!open) return
+    setCode(''); setMsg(''); setMethod('totp')
+    let cancelled = false
+    api.get<{ method?: string }>('/auth/2fa/status')
+      .then(r => {
+        if (cancelled) return
+        const m = r.data?.method || 'totp'
+        const use = METHOD_CFG[m] ? m : 'totp'
+        setMethod(use)
+        if (use === 'email') api.post('/auth/2fa/step-up/email/send').catch(() => {})
+      })
+      .catch(() => { if (!cancelled) setMethod('totp') })
+    return () => { cancelled = true }
+  }, [open])
 
   if (!open) return null
+
+  const cfg = cfgFor(method)
 
   const submit = async () => {
     if (!code.trim()) { setMsg('Enter the code.'); return }
     setLoading(true); setMsg('')
     try {
-      await api.post('/auth/2fa/step-up/totp', { code: code.trim() })
+      const res = await api.post(cfg.endpoint, { code: code.trim() })
+      const tok = (res.data as { step_up_token?: string })?.step_up_token
+      useStepUpStore.getState().setToken(tok ?? '')
       setCode('')
       close(true)
     } catch (e: unknown) {
@@ -82,6 +160,12 @@ export function StepUpModal() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const resendEmail = async () => {
+    setMsg('')
+    try { await api.post('/auth/2fa/step-up/email/send'); setMsg('Code re-sent.') }
+    catch { setMsg('Could not resend code.') }
   }
 
   const cancel = () => { setCode(''); setMsg(''); close(false) }
@@ -94,23 +178,36 @@ export function StepUpModal() {
           <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)' }}>{title}</div>
         </div>
         <div style={{ padding: '22px 24px' }}>
-          <div style={{ fontSize: 13, color: 'var(--ink-muted)', lineHeight: 1.5, marginBottom: 14 }}>{copy}</div>
+          {copy && (
+            <div style={{ fontSize: 13, color: 'var(--ink-muted)', lineHeight: 1.5, marginBottom: 8 }}>{copy}</div>
+          )}
+          <div style={{ fontSize: 13, color: 'var(--ink)', lineHeight: 1.5, marginBottom: 14, fontWeight: 500 }}>
+            {cfg.instruction}
+          </div>
           <input
-            type="text"
-            inputMode="numeric"
-            maxLength={8}
-            placeholder="000000"
+            type={cfg.type}
+            {...(cfg.numeric ? { inputMode: 'numeric' as const } : {})}
+            autoComplete={cfg.type === 'password' ? 'current-password' : 'one-time-code'}
+            maxLength={cfg.maxLen}
+            placeholder={cfg.placeholder}
             value={code}
             onChange={e => setCode(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') submit() }}
             autoFocus
             style={{
-              width: '100%', textAlign: 'center', letterSpacing: '.35em',
+              width: '100%', textAlign: 'center',
+              letterSpacing: cfg.numeric ? '.35em' : '.12em',
               fontSize: 24, fontFamily: 'monospace', padding: 12,
               background: 'var(--surface-soft)', border: '1px solid var(--surface-rule)',
               borderRadius: 8, color: 'var(--ink)', boxSizing: 'border-box',
             }}
           />
+          {method === 'email' && (
+            <button onClick={resendEmail}
+              style={{ marginTop: 8, background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 12, padding: 0 }}>
+              Resend code
+            </button>
+          )}
           {msg && <div style={{ fontSize: 12, color: '#ef4444', minHeight: 16, marginTop: 8 }}>{msg}</div>}
         </div>
         <div style={{ padding: '14px 24px', borderTop: '1px solid var(--surface-rule)', display: 'flex', gap: 10, justifyContent: 'flex-end', background: 'var(--surface-soft)' }}>

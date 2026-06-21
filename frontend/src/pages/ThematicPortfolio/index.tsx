@@ -1,9 +1,11 @@
 import { useState, useMemo } from 'react'
+import type { CSSProperties } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/api/client'
 import { Badge } from '@/components/ui/Badge'
 import { Card } from '@/components/ui/Card'
 import { Modal } from '@/components/ui/Modal'
+import { openStepUp, stepUpHeaders } from '@/components/modals/StepUpModal'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Scores {
@@ -400,8 +402,10 @@ function ThemeAllocationBar({ summary }: { summary: Record<string, ThemeSummary>
 interface AutoSignal {
   id: string; ticker: string; name: string; conviction: number; theme: string
   thesis: string; catalyst: string; bull_case: string; bear_case: string
+  crowd_view?: string; sentiment?: number
   target_pct: number; stop_pct: number; hold_days: number
   status: string; source: string; ts: string; raw_score: number
+  score?: number
   source_breakdown?: Record<string, number>
   will_buy?: boolean
   score_threshold?: number
@@ -409,12 +413,258 @@ interface AutoSignal {
   is_spike?: boolean
   confirmed?: boolean
   scan_appearances?: number
+  // Portfolio-policy tags
+  policy_kind?: string            // NEW | REPLACE
+  replace_target?: string | null  // weakest holding to free up (REPLACE)
+  size_factor?: number
+  capacity_note?: string
+  policy_reason?: string
 }
 
-interface SignalsData { ok: boolean; signals: AutoSignal[]; last_scan: string | null }
+interface PolicyInfo {
+  capacity_note?: string
+  suppress_generation?: boolean
+  reason?: string
+  n_existing?: number
+  account_value?: number
+  decisions?: { kind: string; ticker: string; add_target?: string | null; replace_target?: string | null; reason?: string }[]
+}
+
+interface SignalsData { ok: boolean; signals: AutoSignal[]; last_scan: string | null; policy?: PolicyInfo }
 interface ScanStatus { status: string; detail: string; ts: number; last_scan?: string }
 
 // ── AI Signals panel ──────────────────────────────────────────────────────────
+// ── Holdings Brain (AI management of real broker holdings, human-in-the-loop) ───
+interface BrainAction {
+  kind: string
+  reason?: string
+  fraction?: number
+  stop?: number | null
+  target?: number | null
+  conviction?: number
+  risk_flags?: string[]
+  source?: string
+}
+interface BrainHolding {
+  ticker: string
+  shares: number
+  avg_cost: number
+  last: number
+  market_value: number
+  pct_of_account: number
+  unrealized_pct: number
+  name?: string
+}
+interface BrainRow { holding: BrainHolding; action: BrainAction }
+interface BrainPortfolio {
+  posture: string
+  risk_flags: string[]
+  regime?: string
+  n_positions?: number
+  total_market_value?: number
+}
+interface BrainHoldingsResp {
+  ok: boolean
+  broker: string
+  count: number
+  regime: { regime?: string; crash_risk_score?: number; no_trade?: boolean }
+  portfolio: BrainPortfolio
+  holdings: BrainRow[]
+  to_adopt: string[]
+  closed: string[]
+  ai_used: boolean
+}
+interface BrainProposal {
+  id: string
+  ticker: string
+  broker: string
+  action: BrainAction
+  holding: BrainHolding
+  status: string
+  created_at: string
+  priority?: boolean
+}
+interface BrainProposalsResp { ok: boolean; pending: BrainProposal[]; count: number; history: BrainProposal[] }
+
+const brainActionColor = (k: string): string =>
+  (({ EXIT: '#ef4444', TRIM: '#f59e0b', ADD: '#22c55e', SET_STOP: '#3b82f6', ADOPT: '#8b5cf6', HOLD: '#94a3b8' } as Record<string, string>)[k]) ?? '#94a3b8'
+
+const brainNotice: CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', marginBottom: 14,
+  borderRadius: 7, background: 'rgba(99,102,241,.10)', border: '1px solid rgba(99,102,241,.30)',
+  fontSize: 12, color: '#a5b4fc',
+}
+const brainChip: CSSProperties = { fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 6, color: '#fff' }
+
+function brainErrText(e: unknown): string {
+  const ax = e as { response?: { data?: { detail?: string } }; message?: string }
+  return ax?.response?.data?.detail || ax?.message || 'error'
+}
+
+function HoldingsBrainPanel() {
+  const qc = useQueryClient()
+  const [execLive, setExecLive] = useState<Record<string, boolean>>({})
+  const [msg, setMsg] = useState<string>('')
+
+  const fidelityQ = useQuery<{ connected?: boolean; status?: string }>({
+    queryKey: ['fidelity', 'status', 'brain'],
+    queryFn: () => api.get('/fidelity/status').then(r => r.data),
+    staleTime: 60_000, retry: false,
+  })
+  const connected = fidelityQ.data?.connected === true || fidelityQ.data?.status === 'connected'
+
+  const holdingsQ = useQuery<BrainHoldingsResp>({
+    queryKey: ['brain-holdings'],
+    queryFn: () => api.get('/thematic/brain/holdings', { params: { use_ai: false } }).then(r => r.data),
+    enabled: connected, staleTime: 30_000, retry: false,
+  })
+
+  const proposalsQ = useQuery<BrainProposalsResp>({
+    queryKey: ['brain-proposals'],
+    queryFn: () => api.get('/thematic/brain/proposals').then(r => r.data),
+    enabled: connected, staleTime: 15_000,
+  })
+
+  const assessMut = useMutation({
+    mutationFn: () => api.post('/thematic/brain/assess', null, { params: { use_ai: true } }).then(r => r.data),
+    onSuccess: (d: { proposals_pending?: number }) => {
+      setMsg(`Assessment complete — ${d?.proposals_pending ?? 0} new proposal(s).`)
+      qc.invalidateQueries({ queryKey: ['brain-holdings'] })
+      qc.invalidateQueries({ queryKey: ['brain-proposals'] })
+    },
+    onError: (e: unknown) => setMsg(`Assess failed: ${brainErrText(e)}`),
+  })
+
+  const approveMut = useMutation({
+    mutationFn: ({ id, execute }: { id: string; execute: boolean }) =>
+      api.post(`/thematic/brain/proposals/${id}/approve`, { execute }).then(r => r.data),
+    onSuccess: (d: { previewed_only?: boolean; kind?: string; ticker?: string }) => {
+      setMsg(d?.previewed_only
+        ? `Preview OK for ${d.ticker} (${d.kind}). Tick "Execute live" then approve to place the order.`
+        : `Order submitted for ${d?.ticker} (${d?.kind}).`)
+      qc.invalidateQueries({ queryKey: ['brain-proposals'] })
+      qc.invalidateQueries({ queryKey: ['brain-holdings'] })
+    },
+    onError: (e: unknown) => setMsg(`Approve blocked: ${brainErrText(e)}`),
+  })
+
+  const skipMut = useMutation({
+    mutationFn: (id: string) => api.post(`/thematic/brain/proposals/${id}/skip`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['brain-proposals'] }),
+  })
+
+  const portfolio = holdingsQ.data?.portfolio
+  const pending = proposalsQ.data?.pending ?? []
+  const rows = holdingsQ.data?.holdings ?? []
+
+  return (
+    <Card style={{ padding: 20, marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div>
+          <div style={{ fontWeight: 800, fontSize: 16, color: 'var(--ink)' }}>🧠 Holdings Brain</div>
+          <div style={{ fontSize: 12, color: 'var(--ink-faint)', marginTop: 2 }}>
+            AI reviews your real Fidelity holdings (including ones already in the account) and proposes hold / trim / add / exit. You approve every trade.
+          </div>
+        </div>
+        <button
+          className="btn btn-primary"
+          onClick={() => assessMut.mutate()}
+          disabled={!connected || assessMut.isPending}
+          style={{ fontSize: 13, padding: '7px 16px' }}
+        >
+          {assessMut.isPending ? '⏳ Assessing…' : '🧠 Assess Holdings Now'}
+        </button>
+      </div>
+
+      {!connected && (
+        <div style={brainNotice}>
+          <span style={{ fontSize: 16 }}>🔌</span>
+          <span><strong>Fidelity not connected.</strong> Connect in the Broker tab to let the brain read and manage your real holdings.</span>
+        </div>
+      )}
+
+      {msg && <div style={brainNotice}>{msg}</div>}
+
+      {connected && portfolio && (
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center', marginBottom: 14, fontSize: 12, color: 'var(--ink-muted)' }}>
+          <span>Regime: <strong>{portfolio.regime ?? '—'}</strong></span>
+          <span>Posture: <strong style={{ color: portfolio.posture === 'reduce_risk' ? '#ef4444' : portfolio.posture === 'rebalance' ? '#f59e0b' : '#22c55e' }}>{portfolio.posture}</strong></span>
+          <span>Positions: <strong>{portfolio.n_positions ?? rows.length}</strong></span>
+          {(portfolio.risk_flags ?? []).map((f, i) => <Badge key={i} variant="warning">{f}</Badge>)}
+        </div>
+      )}
+
+      {pending.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: 'var(--ink)' }}>Pending proposals ({pending.length})</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {pending.map(p => (
+              <div key={p.id} style={{
+                border: '1px solid var(--surface-rule)', borderRadius: 10, padding: 12,
+                background: 'var(--surface-soft)', borderLeft: `4px solid ${brainActionColor(p.action.kind)}`,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <strong style={{ fontSize: 15 }}>{p.ticker}</strong>
+                  <span style={{ ...brainChip, background: brainActionColor(p.action.kind) }}>{p.action.kind}</span>
+                  {p.priority && <Badge variant="danger">⚠ stop guard</Badge>}
+                  {p.action.fraction ? <span style={{ fontSize: 12, color: 'var(--ink-faint)' }}>{Math.round(p.action.fraction * 100)}%</span> : null}
+                  <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{p.action.source}</span>
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--ink-muted)', margin: '6px 0' }}>{p.action.reason}</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <label style={{ fontSize: 11, color: 'var(--ink-faint)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <input type="checkbox" checked={!!execLive[p.id]} onChange={e => setExecLive(s => ({ ...s, [p.id]: e.target.checked }))} />
+                    Execute live (real order)
+                  </label>
+                  <button className="btn btn-primary" style={{ fontSize: 12, padding: '5px 12px' }}
+                    disabled={approveMut.isPending}
+                    onClick={() => approveMut.mutate({ id: p.id, execute: !!execLive[p.id] })}>
+                    {execLive[p.id] ? 'Approve & place' : 'Preview'}
+                  </button>
+                  <button className="btn" style={{ fontSize: 12, padding: '5px 12px' }} disabled={skipMut.isPending}
+                    onClick={() => skipMut.mutate(p.id)}>Skip</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {connected && rows.length > 0 && (
+        <div style={{ overflowX: 'auto' }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Ticker</th><th className="num">Shares</th><th className="num">Last</th>
+                <th className="num">Unreal.</th><th className="num">% Acct</th><th>Brain</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.holding.ticker}>
+                  <td className="sym">{r.holding.ticker}</td>
+                  <td className="num font-mono">{r.holding.shares}</td>
+                  <td className="num font-mono">${r.holding.last.toFixed(2)}</td>
+                  <td className="num font-mono" style={{ color: r.holding.unrealized_pct >= 0 ? '#22c55e' : '#ef4444' }}>{r.holding.unrealized_pct.toFixed(1)}%</td>
+                  <td className="num font-mono">{r.holding.pct_of_account.toFixed(1)}%</td>
+                  <td><span style={{ ...brainChip, background: brainActionColor(r.action.kind) }}>{r.action.kind}</span></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {connected && holdingsQ.isLoading && (
+        <div style={{ textAlign: 'center', padding: '18px 0', color: 'var(--ink-faint)', fontSize: 13 }}>Loading holdings…</div>
+      )}
+      {connected && !holdingsQ.isLoading && rows.length === 0 && pending.length === 0 && (
+        <div style={{ textAlign: 'center', padding: '18px 0', color: 'var(--ink-faint)', fontSize: 13 }}>No holdings found. Hit "Assess Holdings Now".</div>
+      )}
+    </Card>
+  )
+}
+
 function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
   const qc = useQueryClient()
   const [approvingId, setApprovingId] = useState<string | null>(null)
@@ -452,15 +702,62 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
     },
   })
 
+  const hilQ = useQuery<{ hil?: { dollar_amount?: number; conviction_scale?: boolean; fidelity_trade?: boolean } }>({
+    queryKey: ['thematic-hil-settings'],
+    queryFn: () => api.get('/thematic/auto/hil-settings').then(r => r.data),
+    staleTime: 60_000,
+  })
+  const baseSize = hilQ.data?.hil?.dollar_amount ?? 500
+  const convScale = hilQ.data?.hil?.conviction_scale !== false
+  const autoSize = (conv: number) => convScale
+    ? Math.round(baseSize * (0.4 + (Math.min(Math.max(conv, 1), 10) - 1) / 9 * 1.1))
+    : Math.round(baseSize)
+
+  // Route approved signals to Fidelity (real money). Persisted HIL pref — set
+  // once, then every approve mirrors to Fidelity (behind a per-trade 2FA tap).
+  // Only actually "live" when Fidelity is also connected.
+  const routeFidelity = hilQ.data?.hil?.fidelity_trade === true
+  const liveRouting = routeFidelity && fidelityConnected
+  const hilMut = useMutation({
+    mutationFn: (fidelity_trade: boolean) =>
+      api.post('/thematic/auto/hil-settings', { fidelity_trade }).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['thematic-hil-settings'] }),
+  })
+
   const approveMut = useMutation({
-    mutationFn: ({ id, dollar }: { id: string; dollar: number }) =>
-      api.post(`/thematic/auto/signals/${id}/approve`, { dollar_amount: dollar }).then(r => r.data),
+    mutationFn: async (
+      { id, dollar, live, ticker, approxUsd }:
+      { id: string; dollar?: number; live: boolean; ticker: string; approxUsd: number },
+    ) => {
+      const body: Record<string, unknown> = dollar != null ? { dollar_amount: dollar } : {}
+      let cfg: { headers: Record<string, string> } | undefined
+      if (live) {
+        // Real-money leg: explicit confirm, then a fresh 2FA tap whose token
+        // rides along as X-Step-Up-Token (the server re-verifies it before the
+        // order). Paper-only approvals skip all of this.
+        const ok = window.confirm(
+          `Place a REAL Fidelity limit order for ${ticker} (~$${approxUsd.toLocaleString()})?\n\n` +
+          `This also books the paper position. You'll confirm with 2FA next.`,
+        )
+        if (!ok) throw new Error('cancelled')
+        const verified = await openStepUp({
+          title: `Authorize ${ticker} order`,
+          copy: `Enter your 6-digit code to place a REAL ~$${approxUsd.toLocaleString()} limit order for ${ticker}.`,
+        })
+        if (!verified) throw new Error('cancelled')
+        body.fidelity_trade = true
+        body.execute_fidelity = true
+        cfg = { headers: stepUpHeaders() }
+      }
+      return api.post(`/thematic/auto/signals/${id}/approve`, body, cfg).then(r => r.data)
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['thematic-auto-signals'] })
       qc.invalidateQueries({ queryKey: ['thematic-portfolio'] })
       setApprovingId(null)
       onApproved()
     },
+    onError: (e: Error) => { if (e.message !== 'cancelled') console.error('approve failed:', e.message) },
   })
 
   const skipMut = useMutation({
@@ -470,14 +767,25 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
 
   const status = statusQ.data
   const signals = signalsQ.data?.signals ?? []
+  const policy = signalsQ.data?.policy
   const isRunning = status?.status === 'running'
 
   const convColor = (c: number) => c >= 8 ? '#22c55e' : c >= 6 ? '#f59e0b' : '#94a3b8'
 
   return (
     <Card style={{ padding: 20, marginBottom: 20 }}>
-      {/* Paper-until-real banner */}
-      {!fidelityConnected && (
+      {/* Routing-state banner: paper-only / connected-but-paper / live */}
+      {liveRouting ? (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '8px 12px', marginBottom: 14, borderRadius: 7,
+          background: 'rgba(245,158,11,.12)', border: '1px solid rgba(245,158,11,.40)',
+          fontSize: 12, color: '#fbbf24',
+        }}>
+          <span style={{ fontSize: 16 }}>⚡</span>
+          <span><strong>Live routing ON.</strong> Approving a signal books the paper position <em>and</em> places a REAL Fidelity limit order — auto-sized ${baseSize} base × conviction, one 2FA tap per trade.</span>
+        </div>
+      ) : (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 10,
           padding: '8px 12px', marginBottom: 14, borderRadius: 7,
@@ -485,7 +793,9 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
           fontSize: 12, color: '#a5b4fc',
         }}>
           <span style={{ fontSize: 16 }}>📋</span>
-          <span><strong>Paper trading active.</strong> All approved signals go to paper account. Connect Fidelity in the Broker tab to enable real-money trading.</span>
+          <span>{fidelityConnected
+            ? <><strong>Paper only.</strong> Fidelity is connected — flip “Route to Fidelity” to mirror approved trades with real money.</>
+            : <><strong>Paper trading active.</strong> All approved signals go to the paper book. Connect Fidelity in the Broker tab to enable real-money routing.</>}</span>
         </div>
       )}
 
@@ -501,6 +811,36 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
             <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>
               Last: {new Date((status.ts || 0) * 1000).toLocaleTimeString()}
             </span>
+          )}
+          {policy?.capacity_note && (
+            <span
+              title={policy.reason || ''}
+              style={{
+                fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 999,
+                background: policy.suppress_generation ? 'rgba(245,158,11,.15)' : 'var(--surface-raised)',
+                color: policy.suppress_generation ? '#fbbf24' : 'var(--ink-muted)',
+                border: `1px solid ${policy.suppress_generation ? 'rgba(245,158,11,.4)' : 'var(--surface-rule)'}`,
+              }}
+            >
+              📊 {policy.capacity_note}
+            </span>
+          )}
+          {fidelityConnected && (
+            <label
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer',
+                color: liveRouting ? '#fbbf24' : 'var(--ink-faint)', fontWeight: liveRouting ? 700 : 500,
+              }}
+              title="Mirror approved signals to Fidelity (real money). Each trade still needs a 2FA tap."
+            >
+              <input
+                type="checkbox"
+                checked={routeFidelity}
+                disabled={hilMut.isPending}
+                onChange={e => hilMut.mutate(e.target.checked)}
+              />
+              {liveRouting ? '⚡ Route to Fidelity (LIVE)' : 'Route to Fidelity'}
+            </label>
           )}
           <button
             className="btn btn-primary"
@@ -521,7 +861,9 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
 
       {signals.length === 0 && !isRunning && (
         <div style={{ textAlign: 'center', padding: '24px 0', color: 'var(--ink-faint)', fontSize: 13 }}>
-          No pending signals. Hit Auto-Scan to find momentum plays.
+          {policy?.suppress_generation
+            ? <><div style={{ fontWeight: 700, color: '#fbbf24', marginBottom: 4 }}>🛡️ Managing existing positions</div>{policy.reason || 'Holding — no new trades this cycle.'}</>
+            : 'No pending signals. Hit Auto-Scan to find momentum plays.'}
         </div>
       )}
 
@@ -540,24 +882,19 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
                     {sig.ticker}
                   </span>
                   <span style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{sig.name}</span>
-                  <span style={{
-                    fontSize: 11, fontWeight: 700, padding: '1px 7px', borderRadius: 999,
-                    background: convColor(sig.conviction) + '22', color: convColor(sig.conviction),
-                    border: `1px solid ${convColor(sig.conviction)}44`,
-                  }}>
-                    {sig.conviction}/10
-                  </span>
-                  {/* Raw buzz score — unbounded, threshold is minimum not maximum */}
-                  <span style={{
-                    fontSize: 11, padding: '2px 7px', background: 'var(--surface-raised)', borderRadius: 4,
-                    color: sig.will_buy ? '#22c55e' : '#f87171', fontWeight: 700,
-                    border: `1px solid ${sig.will_buy ? '#22c55e44' : '#f8717133'}`,
-                  }} title={`Raw buzz score: ${sig.raw_score?.toFixed(0)} (min to qualify: ${sig.score_threshold ?? 40})`}>
-                    {sig.buzz_tier ?? (sig.raw_score >= (sig.score_threshold ?? 40) ? 'Moderate' : 'Low')}
-                  </span>
-                  <span style={{ fontSize: 10, color: 'var(--ink-faint)', padding: '1px 5px', background: 'var(--surface-soft)', borderRadius: 3 }}>
-                    {sig.raw_score?.toFixed(0)} pts
-                  </span>
+                  {/* Single unified 0-100 signal score (replaces conviction/10 + buzz). */}
+                  {(() => {
+                    const sc = sig.score ?? Math.round((sig.conviction ?? 7) * 9)
+                    const col = sc >= 80 ? '#22c55e' : sc >= 60 ? '#eab308' : sc >= 40 ? '#f59e0b' : '#f87171'
+                    return (
+                      <span style={{
+                        fontSize: 12, fontWeight: 800, padding: '2px 9px', borderRadius: 999,
+                        background: col + '22', color: col, border: `1px solid ${col}55`,
+                      }} title={`Unified signal score (conviction + momentum). Buzz tier: ${sig.buzz_tier ?? '—'}`}>
+                        {sc}/100
+                      </span>
+                    )
+                  })()}
                   {sig.confirmed && (
                     <span style={{ fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#22c55e22', color: '#22c55e', border: '1px solid #22c55e44' }}>
                       ✓ {sig.scan_appearances}× confirmed
@@ -571,6 +908,11 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
                   {!sig.is_spike && !sig.confirmed && (
                     <span style={{ fontSize: 10, color: 'var(--ink-faint)', padding: '1px 5px', background: 'var(--surface-raised)', borderRadius: 3 }}>
                       {sig.scan_appearances ?? 1}× seen
+                    </span>
+                  )}
+                  {sig.policy_kind === 'REPLACE' && sig.replace_target && (
+                    <span title={sig.policy_reason || ''} style={{ fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 4, background: '#a855f722', color: '#c084fc', border: '1px solid #a855f744' }}>
+                      ♻ replace {sig.replace_target}
                     </span>
                   )}
                   {sig.will_buy === false && !sig.is_spike && (
@@ -622,6 +964,11 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
                 <div style={{ fontSize: 12, color: 'var(--ink-muted)', marginBottom: 4 }}>
                   <strong>Catalyst:</strong> {sig.catalyst}
                 </div>
+                {sig.crowd_view && (
+                  <div style={{ fontSize: 12, marginBottom: 4, color: (sig.sentiment ?? 0) < -0.2 ? '#f87171' : (sig.sentiment ?? 0) > 0.2 ? '#22c55e' : 'var(--ink-muted)' }}>
+                    <strong>🗣 Crowd{sig.sentiment != null ? ` (${sig.sentiment > 0 ? '+' : ''}${sig.sentiment.toFixed(1)})` : ''}:</strong> {sig.crowd_view}
+                  </div>
+                )}
                 <div style={{ display: 'flex', gap: 16, fontSize: 11, color: 'var(--ink-faint)', flexWrap: 'wrap' }}>
                   <span>🎯 +{sig.target_pct}% target</span>
                   <span>🛑 -{sig.stop_pct}% stop</span>
@@ -635,18 +982,21 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minWidth: 180 }}>
                 {approvingId === sig.id ? (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <label style={{ fontSize: 11, color: 'var(--ink-faint)' }}>Dollar amount</label>
+                    <label style={{ fontSize: 11, color: 'var(--ink-faint)' }}>Dollar amount (override auto-size)</label>
                     <input
                       type="number" min="100" step="100"
-                      value={dollarAmounts[sig.id] ?? '500'}
+                      value={dollarAmounts[sig.id] ?? String(baseSize)}
                       onChange={e => setDollarAmounts(prev => ({ ...prev, [sig.id]: e.target.value }))}
                       style={{ padding: '5px 8px', borderRadius: 6, border: '1px solid var(--surface-rule)', background: 'var(--surface)', color: 'var(--ink)', fontSize: 13, width: '100%' }}
                     />
                     <div style={{ display: 'flex', gap: 6 }}>
                       <button className="btn btn-primary" style={{ fontSize: 12, flex: 1, padding: '5px 0' }}
                         disabled={approveMut.isPending}
-                        onClick={() => approveMut.mutate({ id: sig.id, dollar: parseFloat(dollarAmounts[sig.id] ?? '500') || 500 })}>
-                        {approveMut.isPending ? '…' : 'Confirm'}
+                        onClick={() => {
+                          const d = parseFloat(dollarAmounts[sig.id] ?? String(baseSize)) || baseSize
+                          approveMut.mutate({ id: sig.id, dollar: d, live: liveRouting, ticker: sig.ticker, approxUsd: d })
+                        }}>
+                        {approveMut.isPending ? '…' : liveRouting ? 'Confirm · Fidelity' : 'Confirm'}
                       </button>
                       <button className="btn" style={{ fontSize: 12, padding: '5px 10px' }} onClick={() => setApprovingId(null)}>✕</button>
                     </div>
@@ -668,11 +1018,24 @@ function AutoScanPanel({ onApproved }: { onApproved: () => void }) {
                           borderColor: sig.confirmed && sig.will_buy ? '#16a34a'
                             : sig.is_spike ? '#92400e' : '#1d4ed8',
                         }}
-                        onClick={() => setApprovingId(sig.id)}
+                        disabled={approveMut.isPending}
+                        onClick={() => approveMut.mutate({ id: sig.id, live: liveRouting, ticker: sig.ticker, approxUsd: autoSize(sig.conviction) })}
+                        title={liveRouting
+                          ? `LIVE: books paper + places a REAL ~$${autoSize(sig.conviction)} Fidelity order (2FA required)`
+                          : `Auto-sized ~$${autoSize(sig.conviction)} (HIL base $${baseSize}${convScale ? ' × conviction' : ''})`}
                       >
-                        {sig.confirmed && sig.will_buy ? '✓ Trade It'
+                        {approveMut.isPending ? '…'
+                          : sig.confirmed && sig.will_buy ? `${liveRouting ? '⚡' : '✓'} Trade It · ~$${autoSize(sig.conviction)}${liveRouting ? ' · LIVE' : ''}`
                           : sig.is_spike ? '⚡ Spike — Trade Anyway?'
-                          : '↗ Trade It'}
+                          : `↗ Trade It · ~$${autoSize(sig.conviction)}${liveRouting ? ' · LIVE' : ''}`}
+                      </button>
+                      <button
+                        className="btn"
+                        style={{ fontSize: 12, padding: '6px 8px' }}
+                        onClick={() => setApprovingId(sig.id)}
+                        title="Custom dollar amount"
+                      >
+                        $
                       </button>
                       <button
                         className="btn"
@@ -998,6 +1361,8 @@ export default function ThematicPortfolioPage() {
 
       {/* AI Auto-Scan Panel — always visible */}
       <AutoScanPanel onApproved={() => refetch()} />
+
+      <HoldingsBrainPanel />
 
       {data && (
         <>

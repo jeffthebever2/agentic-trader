@@ -72,9 +72,27 @@ def test_regime_and_breakout_helpers_are_pure_and_safe():
 def test_all_new_flags_default_off(monkeypatch):
     for flag in ("THEMATIC_GOOGLE_TRENDS", "THEMATIC_BREAKOUT_CONFIRM", "THEMATIC_ATR_STOPS",
                  "THEMATIC_RISK_SIZING", "THEMATIC_REGIME_GATE", "THEMATIC_DISCOVERY",
-                 "THEMATIC_ANALYST", "THEMATIC_SHORT_OVERLAY", "THEMATIC_EXIT_LOOP"):
+                 "THEMATIC_ANALYST", "THEMATIC_SHORT_OVERLAY", "THEMATIC_EXIT_LOOP",
+                 "THEMATIC_CORRELATION_GUARD", "THEMATIC_OPTIONS_FLOW",
+                 "THEMATIC_TRUE_SHORT_INTEREST", "THEMATIC_LIVE_EXIT_AUTONOMOUS"):
         monkeypatch.delenv(flag, raising=False)
     assert not t._google_trends_enabled() and not t._breakout_confirm_enabled()
     assert not t._atr_stops_enabled() and not t._risk_sizing_enabled()
     assert not t._regime_gate_enabled() and not t._discovery_enabled()
     assert not t._analyst_enabled() and not t._short_overlay_enabled()
+    assert not t._options_flow_enabled() and not t._true_short_interest_enabled()
+
+
+def test_approval_enforces_runtime_risk_gates():
+    src = inspect.getsource(t.approve_signal)
+    assert "_regime_threshold_multiplier()" in src
+    assert "_finra_short_map()" in src
+    assert "_ticker_breakout" in src
+    assert "live_stop_pct" in src and "live_alloc" in src
+
+
+def test_auto_paper_uses_breakout_fast_lane_and_correct_approve_signature():
+    src = inspect.getsource(t._auto_execute_confirmed_signals)
+    assert "_ticker_breakout" in src
+    assert "breakout_confirmed" in src
+    assert "approve_signal(sig[\"id\"], ApproveBody(), None, user_mock)" in src

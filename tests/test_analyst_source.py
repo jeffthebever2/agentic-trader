@@ -24,6 +24,18 @@ def test_recommendation_weight_skew():
     assert t._recommendation_weight({"hold": 5}) == 0
 
 
+def test_earnings_surprise_weight():
+    assert t._earnings_surprise_weight([{"surprisePercentage": 18}]) == 6
+    assert t._earnings_surprise_weight([{"epsActual": 1.20, "epsEstimated": 1.00}]) == 6
+    assert t._earnings_surprise_weight([{"surprisePercentage": -5}]) == 0
+
+
+def test_price_target_weight():
+    assert t._price_target_weight({"targetConsensus": 150, "price": 100}) == 5
+    assert t._price_target_weight({"targetConsensus": 105, "price": 100}) == 0
+    assert t._price_target_weight({"targetConsensus": 160}, price=100) == 6
+
+
 # ── flag-gated combined source ───────────────────────────────────────────────
 def test_analyst_disabled_by_default(monkeypatch):
     monkeypatch.delenv("THEMATIC_ANALYST", raising=False)
@@ -41,6 +53,9 @@ def test_analyst_combines_sources(monkeypatch):
         universe=["NVDA", "MEH"],
         fetch_grades=lambda tk: [{"action": "upgrade"}] if tk == "NVDA" else [],
         fetch_recs=lambda tk: {"strongBuy": 8, "buy": 2} if tk == "NVDA" else {"sell": 5},
+        fetch_earnings=lambda tk: [{"surprisePercentage": 12}] if tk == "NVDA" else [],
+        fetch_targets=lambda tk: {"targetConsensus": 150, "price": 100} if tk == "NVDA" else {},
+        fetch_price=lambda tk: 100,
     ))
     assert out.get("NVDA", 0) > 0
     assert "MEH" not in out          # net non-bullish → not surfaced

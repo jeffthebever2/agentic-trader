@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -138,8 +139,23 @@ _SKIP = {
     "MAJOR","MINOR","OTHER","EVERY","NEVER","ALWAYS","OFTEN","MAYBE",
 }
 
+_CASHTAG_EXTRACT = re.compile(r'\$([A-Za-z]{1,5})\b')
+
+
 def extract_tickers(text: str) -> list[str]:
-    found = _TICKER_RE.findall(text.upper())
+    """Tickers in free text. CASHTAG-FIRST: if the text uses ``$SYMBOL`` markers
+    (tweets/RSS almost always do), trust ONLY those — explicit + unambiguous. This
+    avoids the blocklist whack-a-mole where uppercase prose ("SOLD", "CYCLE",
+    "SPEND", "GETS", "GOING") was mis-read as tickers, polluting buzz AND the
+    intent classifier. Bare-uppercase extraction runs only when no cashtag exists
+    (e.g. plain news headlines), still filtered by _SKIP.
+    """
+    raw = text or ""
+    cash = [m.group(1).upper() for m in _CASHTAG_EXTRACT.finditer(raw)]
+    if cash:
+        # dedupe (one post = one mention per symbol), drop junk/crypto/stopwords
+        return [t for t in dict.fromkeys(cash) if t not in _SKIP and len(t) >= 2]
+    found = _TICKER_RE.findall(raw.upper())
     return [t for t in found if t not in _SKIP and len(t) >= 2]
 
 
@@ -147,25 +163,173 @@ def extract_tickers(text: str) -> list[str]:
 
 SUBREDDITS = ["wallstreetbets", "stocks", "investing", "StockMarket", "SecurityAnalysis"]
 
+# Per-scan social INTENT stash, keyed by ticker → {buy, sell, hold, watch, news,
+# unclear} mention counts + the strongest sell reason. Populated by the social
+# text sources (reddit) via the intent classifier and consumed by _merge_signals
+# to (a) NOT inflate buzz from sellers and (b) penalize / avoid net-sell names.
+# Single web process → module-level is fine (same scope as the other scan caches).
+_SOCIAL_INTENT: dict[str, dict] = {}
+# Multiple sources write _SOCIAL_INTENT now, incl. DDG which runs in an executor
+# THREAD — guard the read-modify-write so concurrent records can't corrupt a bucket.
+_intent_lock = threading.Lock()
+
+# Per-ticker net social SENTIMENT in [-1,+1] for this scan (bullish - bearish
+# conviction), derived in _merge_signals and blended into composite_score so a
+# bearish crowd lowers the final score (the sentiment term was previously LLM-only).
+_SOCIAL_SENTIMENT: dict[str, float] = {}
+
+
+def _reset_social_intent() -> None:
+    with _intent_lock:
+        _SOCIAL_INTENT.clear()
+        _SOCIAL_SENTIMENT.clear()
+
+
+def _record_intent(ticker: str, res, weight: float = 1.0) -> None:
+    """Fold one IntentResult into the per-scan social-intent stash for a ticker.
+
+    Besides the per-label COUNT buckets, accumulate the conviction-weighted
+    bull/bear/neutral sentiment mass (buzz_score.contribution) so the scorer can
+    make buzz reflect MARKET CONVICTION, not raw attention. ``weight`` is this
+    mention's source weight (e.g. seeking-alpha posts count 2x)."""
+    from tradingagents.screening import tweet_intent as ti
+    from tradingagents.screening import buzz_score as bz
+    bucket = {
+        ti.BUY_SIGNAL: "buy", ti.SELL_SIGNAL: "sell", ti.HOLD_SIGNAL: "hold",
+        ti.WATCHLIST_ONLY: "watch", ti.NEWS_ONLY: "news", ti.UNCLEAR: "unclear",
+    }.get(res.label, "unclear")
+    bull_w, bear_w, neut_w = bz.contribution(res, weight=weight)
+    with _intent_lock:
+        rec = _SOCIAL_INTENT.setdefault(
+            ticker, {"buy": 0, "sell": 0, "hold": 0, "watch": 0, "news": 0,
+                     "unclear": 0, "sell_reason": "", "sell_conf": 0.0,
+                     "bull_w": 0.0, "bear_w": 0.0, "neut_w": 0.0})
+        rec[bucket] += 1
+        rec["bull_w"] = rec.get("bull_w", 0.0) + bull_w
+        rec["bear_w"] = rec.get("bear_w", 0.0) + bear_w
+        rec["neut_w"] = rec.get("neut_w", 0.0) + neut_w
+        if res.reduce_buy and res.confidence >= rec.get("sell_conf", 0.0):
+            rec["sell_reason"] = res.reason
+            rec["sell_conf"] = res.confidence
+
+
+def net_social_buy_intent(ticker: str) -> dict:
+    """Public read of a ticker's aggregated social intent for this scan (or {})."""
+    return dict(_SOCIAL_INTENT.get(ticker.upper(), {}))
+
+
+def _blended_sentiment(ticker: str, llm_sentiment) -> float:
+    """Blend the LLM pick's sentiment with the crowd's social sentiment for this
+    scan (buzz_score.blend_sentiment). A bearish crowd drags the composite down."""
+    from tradingagents.screening import buzz_score as bz
+    social = _SOCIAL_SENTIMENT.get((ticker or "").upper())
+    return round(bz.blend_sentiment(llm_sentiment, social), 3)
+
+
+def _lexicon_rows(blob: str, weight: int = 1) -> list:
+    """Extract tickers from a text blob + lexicon-classify intent per ticker.
+    Returns [{ticker, text, lex, weight}] for the shared intent resolver."""
+    from tradingagents.screening import tweet_intent as ti
+    tks = extract_tickers(blob)
+    if not tks:
+        return []
+    intents = ti.aggregate_for_tickers(blob, tks)
+    return [{"ticker": t, "text": blob, "lex": intents.get(t), "weight": weight} for t in tks]
+
+
+async def _resolve_intent_rows(rows: list, *, use_ai: bool = True) -> dict:
+    """Shared intent pipeline for ANY text source (reddit, RSS-tweets, news).
+
+    Lexicon is computed by the caller (in each row's ``lex``). When ``use_ai`` and
+    the free AI is available, the rows the lexicon read weakly are batched into one
+    free-LLM call and reconciled (a SELL from either source blocks the buy). Records
+    every result into _SOCIAL_INTENT and returns ticker→summed-weight of the
+    NON-selling mentions (sellers never pad buzz)."""
+    from tradingagents.screening import tweet_intent as ti
+    ai_map: dict = {}
+    if use_ai and _ai_intent_enabled():
+        thr = _ai_intent_conf_threshold()
+        applicable = [
+            i for i, r in enumerate(rows)
+            if r["lex"] is None or r["lex"].label == ti.UNCLEAR or r["lex"].confidence < thr
+        ]
+        if applicable:
+            ai_res = await _ai_classify_intents([(rows[i]["ticker"], rows[i]["text"]) for i in applicable])
+            for li, ar in ai_res.items():
+                ai_map[applicable[li]] = ar
+    from tradingagents.screening import buzz_score as bz
+    counts: dict[str, float] = {}
+    for i, r in enumerate(rows):
+        t = r["ticker"]
+        w = float(r.get("weight", 1) or 1)
+        lex = r["lex"] or ti.classify_intent(r["text"], ticker=t)
+        final = ti.reconcile_intents(lex, ai_map.get(i))
+        if i in ai_map:   # previously-inconclusive source resolved by AI — log it
+            log.info("AI intent %s: %s (%s)", t, final.label, (final.reason or "")[:80])
+        _record_intent(t, final, weight=w)
+        # Conviction-weight the mention: neutral/holding chatter barely pads buzz,
+        # sellers don't pad it at all (count_weight -> 0 for reduce_buy).
+        cw = bz.count_weight(final)
+        if cw > 0:
+            counts[t] = counts.get(t, 0.0) + w * cw
+    return counts
+
+
+def _lexicon_sell_tickers(text: str) -> set:
+    """Tickers in ``text`` the lexicon reads as SELL/warning (reduce_buy). Records
+    intent to _SOCIAL_INTENT and returns the set to SKIP. Lightweight gate for the
+    news/PR sources that keep their own cashtag+length weighting — a "downgrade /
+    overextended" headline then won't pad their buzz either."""
+    from tradingagents.screening import tweet_intent as ti
+    out: set = set()
+    for r in _lexicon_rows(text):
+        t = r["ticker"]
+        lex = r["lex"] or ti.classify_intent(r["text"], ticker=t)
+        _record_intent(t, lex)
+        if lex.reduce_buy:
+            out.add(t)
+    return out
+
+
+def _lexicon_counts(blob: str, weight: int = 1) -> dict:
+    """Sync lexicon-only intent for NEWS sources (headlines are mostly NEWS_ONLY;
+    no AI call needed). Records intent + returns non-selling buy-counts. Lets an
+    explicit "warning/overextended/downgrade" headline avoid padding buzz."""
+    from tradingagents.screening import tweet_intent as ti
+    from tradingagents.screening import buzz_score as bz
+    out: dict[str, float] = {}
+    for r in _lexicon_rows(blob, weight):
+        t = r["ticker"]
+        lex = r["lex"] or ti.classify_intent(r["text"], ticker=t)
+        _record_intent(t, lex, weight=float(weight))
+        cw = bz.count_weight(lex)
+        if cw > 0:
+            out[t] = out.get(t, 0.0) + weight * cw
+    return out
+
+
 async def _reddit_tickers(client: httpx.AsyncClient, limit: int = 25) -> dict[str, int]:
-    """Return ticker → mention count across hot posts."""
-    counts: dict[str, int] = {}
+    """Return ticker → BUY-INTENT mention count across hot posts.
+
+    Each post is intent-classified per ticker (lexicon + free AI on the iffy ones);
+    SELL/HOLD/WATCH/NEWS mentions are recorded in _SOCIAL_INTENT instead of padding
+    buy buzz — so "selling $NVDA / taking profits" never ranks NVDA like a buy.
+    _SOCIAL_INTENT is reset once per scan in _run_scan (not here — many sources
+    write it now)."""
     headers = {"User-Agent": "AgenticTrader/1.0 (stock research tool)"}
+    rows: list[dict] = []
     for sub in SUBREDDITS:
         try:
             url = f"https://www.reddit.com/r/{sub}/hot.json?limit={limit}"
             r = await client.get(url, headers=headers, timeout=10)
             if r.status_code != 200:
                 continue
-            posts = r.json().get("data", {}).get("children", [])
-            for p in posts:
+            for p in r.json().get("data", {}).get("children", []):
                 d = p.get("data", {})
-                blob = f"{d.get('title','')} {d.get('selftext','')}"
-                for t in extract_tickers(blob):
-                    counts[t] = counts.get(t, 0) + 1
+                rows += _lexicon_rows(f"{d.get('title','')} {d.get('selftext','')}")
         except Exception as e:
             log.warning("Reddit %s: %s", sub, e)
-    return counts
+    return await _resolve_intent_rows(rows, use_ai=True)
 
 
 TWITTER_COOKIES = TMP / "twitter_cookies.json"
@@ -241,8 +405,10 @@ async def _ddg_tickers(client: httpx.AsyncClient) -> dict[str, int]:  # noqa: AR
                         results = list(ddg.news(q, max_results=8))
                         for r in results:
                             blob = f"{r.get('title','')} {r.get('body','')}"
-                            for t in extract_tickers(blob):
-                                _counts[t] = _counts.get(t, 0) + 1
+                            # lexicon intent: a "downgrade/warning/overextended"
+                            # headline won't pad buzz (records to _SOCIAL_INTENT too).
+                            for t, c in _lexicon_counts(blob).items():
+                                _counts[t] = _counts.get(t, 0) + c
                         _t.sleep(0.5)   # small gap between queries
                     except Exception as e:
                         log.debug("DDG query '%s': %s", q, e)
@@ -347,8 +513,9 @@ async def _brave_tickers(client: httpx.AsyncClient) -> dict[str, int]:
                     if t not in _SKIP and 2 <= len(t) <= 5:
                         counts[t] = counts.get(t, 0) + 3   # $TICKER cashtag = high confidence
                 # Plain text: 5+ chars only to cut BOOM/JUNE/AMID noise
+                _sell = _lexicon_sell_tickers(text)
                 for t in extract_tickers(text):
-                    if t not in _SKIP and len(t) >= 5:
+                    if t not in _SKIP and len(t) >= 5 and t not in _sell:
                         counts[t] = counts.get(t, 0) + 1
         except Exception as e:
             log.warning("Brave Search query '%s': %s", q, e)
@@ -388,8 +555,8 @@ async def _google_news_tickers(client: httpx.AsyncClient) -> dict[str, int]:
                     title = item.find("title")
                     desc  = item.find("description")
                     blob  = f"{title.text if title else ''} {desc.text if desc else ''}"
-                    for t in extract_tickers(blob):
-                        counts[t] = counts.get(t, 0) + 1
+                    for t, c in _lexicon_counts(blob).items():
+                        counts[t] = counts.get(t, 0) + c
             except Exception as e:
                 log.warning("Google News '%s': %s", q[:30], e)
     except Exception as e:
@@ -416,8 +583,8 @@ async def _seeking_alpha_tickers(client: httpx.AsyncClient) -> dict[str, int]:
                 for item in soup.find_all("item")[:20]:
                     title = item.find("title")
                     blob  = title.text if title else ""
-                    for t in extract_tickers(blob):
-                        counts[t] = counts.get(t, 0) + 2
+                    for t, c in _lexicon_counts(blob, 2).items():
+                        counts[t] = counts.get(t, 0) + c
             except Exception as e:
                 log.warning("SA feed %s: %s", url, e)
     except Exception as e:
@@ -496,8 +663,14 @@ TRUSTED_TWITTER_FEEDS = [
 ]
 
 async def _trusted_twitter_tickers(client: httpx.AsyncClient) -> dict[str, int]:
-    """Parse rss.app-proxied Twitter feeds from trusted traders. Cashtags weighted highest."""
-    counts: dict[str, int] = {}
+    """Parse rss.app-proxied Twitter feeds from trusted traders — now intent-aware.
+
+    Trader tweets carry REAL buy/sell intent ("trimming $NVDA", "loading $ASTS"), so
+    each tweet runs through the SAME lexicon+free-AI intent pipeline as Reddit: a
+    seller/warning never pads buzz, and net-sell names get the merge penalty. The
+    per-tweet text (title+desc) is classified once; cashtag mentions keep the high
+    signal weight (5) and non-cashtag title words a lower weight (1)."""
+    rows: list[dict] = []
     try:
         from bs4 import BeautifulSoup
         for url in TRUSTED_TWITTER_FEEDS:
@@ -511,20 +684,22 @@ async def _trusted_twitter_tickers(client: httpx.AsyncClient) -> dict[str, int]:
                     title = item.find("title")
                     desc  = item.find("description")
                     blob  = f"{title.text if title else ''} {desc.text if desc else ''}"
-                    # Cashtags = explicit trader picks = highest signal
-                    for m in _CASHTAG_RE.findall(blob.upper()):
-                        if m not in _SKIP and 2 <= len(m) <= 5 and m.isalpha():
-                            counts[m] = counts.get(m, 0) + 5
-                    # Plain ticker-like words from title only (lower signal)
-                    if title:
-                        for t in extract_tickers(title.text):
-                            counts[t] = counts.get(t, 0) + 1
-                log.info("Trusted Twitter RSS %s: %d tickers", url[-20:], len(counts))
+                    # weight by signal: a $cashtag in the tweet = a real trader pick (5).
+                    cashtags = {m for m in _CASHTAG_RE.findall(blob.upper())
+                                if m not in _SKIP and 2 <= len(m) <= 5 and m.isalpha()}
+                    from tradingagents.screening import tweet_intent as ti
+                    tks = extract_tickers(blob)
+                    if not tks:
+                        continue
+                    intents = ti.aggregate_for_tickers(blob, tks)
+                    for t in tks:
+                        rows.append({"ticker": t, "text": blob, "lex": intents.get(t),
+                                     "weight": 5 if t in cashtags else 1})
             except Exception as e:
                 log.warning("Trusted Twitter RSS %s: %s", url[-20:], e)
     except Exception as e:
         log.warning("Trusted Twitter feeds: %s", e)
-    return counts
+    return await _resolve_intent_rows(rows, use_ai=True)
 
 
 # ── Insider & Congressional Trading ──────────────────────────────────────────
@@ -598,8 +773,8 @@ async def _insider_tickers(client: httpx.AsyncClient) -> dict[str, int]:
                         for m in _CASHTAG_RE.findall(blob.upper()):
                             if m not in _SKIP and 2 <= len(m) <= 5:
                                 counts[m] = counts.get(m, 0) + 4
-                        for t in extract_tickers(blob):
-                            counts[t] = counts.get(t, 0) + 1
+                        for t, c in _lexicon_counts(blob).items():
+                            counts[t] = counts.get(t, 0) + c
         except Exception as e:
             log.warning("Congress news: %s", e)
 
@@ -653,8 +828,9 @@ async def _stocktwits_trending(client: httpx.AsyncClient) -> dict[str, int]:
                     if t not in _SKIP and 2 <= len(t) <= 5:
                         counts[t] = counts.get(t, 0) + 4
                 # Plain text tickers: 4+ chars only (cuts PART/WALL/HELP noise)
+                _sell = _lexicon_sell_tickers(text)
                 for t in extract_tickers(text):
-                    if t not in _SKIP and len(t) >= 4:
+                    if t not in _SKIP and len(t) >= 4 and t not in _sell:
                         counts[t] = counts.get(t, 0) + 1
         except Exception as e:
             log.warning("PR RSS %s: %s", url.split("/")[2], e)
@@ -727,8 +903,9 @@ async def _rss_tickers(client: httpx.AsyncClient) -> dict[str, int]:
                     if t not in _SKIP and 2 <= len(t) <= 5:
                         counts[t] = counts.get(t, 0) + 3
                 # Plain text: 4+ chars to avoid PART/WALL/HELP/WORLD noise
+                _sell = _lexicon_sell_tickers(text)
                 for t in extract_tickers(text):
-                    if t not in _SKIP and len(t) >= 4:
+                    if t not in _SKIP and len(t) >= 4 and t not in _sell:
                         counts[t] = counts.get(t, 0) + 1
         except Exception as e:
             log.warning("RSS feed %s: %s", url.split("/")[2], e)
@@ -908,7 +1085,10 @@ async def _merge_signals(
     for t, n in (insider or {}).items():
         _add(t, "insider", n * 1.5)
     for t, n in (trusted_twitter or {}).items():
-        _add(t, "trusted_twitter", n * 3.5)
+        # Diminishing returns: a name in 50 trader tweets must not pin the same flat
+        # cap as one in 5. n*3.5 hit the 60 per-source cap at n>=18, so trusted_twitter
+        # contributed an identical ~60 to every popular ticker and washed out differentiation.
+        _add(t, "trusted_twitter", min(40.0, 8.0 * (float(n) ** 0.5)))
     # New free sources
     for t, n in (stocktwits or {}).items():
         _add(t, "press_releases", n * 3.0)  # corporate press releases (high signal)
@@ -958,6 +1138,42 @@ async def _merge_signals(
                 scores[t] = bonus
                 breakdown[t] = {"scan_memory": bonus}
                 source_presence.setdefault(t, set()).add("scan_memory")
+
+    # ── Sentiment-weighted BUZZ modulation ────────────────────────────────────
+    # Buzz must reflect market CONVICTION, not attention. From the per-scan social
+    # intent (lexicon for the clear posts, free-AI for the ambiguous ones), RAISE
+    # buzz for bullish conviction and LOWER it for bearish (sell calls, profit-
+    # taking, dilution, cut guidance, failed catalysts, downgrades). Decompose into
+    # bull / bear / neutral / volume contributions, log them, and stash a net social
+    # sentiment that feeds composite_score. Replaces the old asymmetric sell-only
+    # penalty (which could lower but never raise, and never fed the composite).
+    from tradingagents.screening import buzz_score as bz
+    _bz_cfg = bz.BuzzConfig.from_env()
+    for t in list(scores.keys()):
+        intent = _SOCIAL_INTENT.get(t)
+        if not intent:
+            continue
+        bd_buzz = bz.compute_buzz(scores[t], intent, cfg=_bz_cfg)
+        scores[t] = round(bd_buzz.buzz, 1)
+        _SOCIAL_SENTIMENT[t] = bd_buzz.net_sentiment
+        b = breakdown.setdefault(t, {})
+        b["bull_contrib"] = round(bd_buzz.bull, 1)
+        b["bear_contrib"] = -round(bd_buzz.bear, 1)
+        b["neutral_contrib"] = round(bd_buzz.neutral, 1)
+        b["volume_contrib"] = round(bd_buzz.volume, 1)
+        b["buzz_sentiment"] = round(bd_buzz.net_sentiment, 3)
+        b["bull_bear_ratio"] = round(bd_buzz.bull_bear_ratio, 2)
+        if bd_buzz.avoid:
+            b["avoid"] = True
+            b["sell_intent_reason"] = intent.get("sell_reason", "net social selling")
+        if bd_buzz.bull > 0 or bd_buzz.bear > 0 or bd_buzz.n_total >= 3:
+            log.info(
+                "buzz %s: base=%.1f bull=+%.1f bear=-%.1f neut=+%.1f vol=%.1f "
+                "ratio=%.2f net_sent=%+.2f buy=%d sell=%d → buzz=%.1f%s",
+                t, bd_buzz.base, bd_buzz.bull, bd_buzz.bear, bd_buzz.neutral,
+                bd_buzz.volume, bd_buzz.bull_bear_ratio, bd_buzz.net_sentiment,
+                bd_buzz.n_bull, bd_buzz.n_bear, bd_buzz.buzz,
+                " [AVOID]" if bd_buzz.avoid else "")
 
     # Drop crypto / junk, require minimum buzz
     _CRYPTO = {"BTC-USD","ETH-USD","SOL-USD","XRP-USD","DOGE-USD","BTC","ETH","SOL"}
@@ -1016,6 +1232,20 @@ async def _merge_signals(
         if len(live) <= 1 and not (live & _HIGH_TRUST_SOLO):
             scores[t] = round(scores[t] * _SOLO_DAMPEN, 1)
             breakdown.setdefault(t, {})["single_source_dampener"] = _SOLO_DAMPEN
+
+    # AI ticker validation (cheap, cached): drop symbols the AI confirms are NOT
+    # real US-listed tickers (uppercase prose like OLDER/CYCLE/SPEND that slipped
+    # past the lexicon blocklist). Fail-open. Runs before the heavier yfinance
+    # price check, cutting its load too.
+    try:
+        ai_valid = await _ai_validate_tickers(list(scores.keys()))
+        dropped = [t for t in scores if t not in ai_valid]
+        if dropped:
+            log.info("AI ticker validation dropped %d non-tickers: %s", len(dropped), dropped[:10])
+        scores = {t: s for t, s in scores.items() if t in ai_valid}
+        breakdown = {t: v for t, v in breakdown.items() if t in scores}
+    except Exception as e:
+        log.debug("AI ticker validation skipped: %s", e)
 
     valid = await _validate_tickers(list(scores.keys()))
     filtered_scores = {t: s for t, s in scores.items() if t in valid}
@@ -1398,22 +1628,593 @@ async def _ai_pick_openrouter(tickers_ranked: list[tuple[str, float]], news_blob
     news_text  = "\n".join(news_blobs[:30])[:3000]
     ticker_str = ", ".join(f"{t}({s:.0f})" for t, s in tickers_ranked[:20])
     prompt = f"Trending tickers: {ticker_str}\nNews: {news_text}\nPick TOP 6 momentum LONG plays. Read the crowd: skip names people are bearish on (sell/dump/crash). Let winners run — set realistic high targets (momentum plays run 50-200%+, not 20%). Return JSON array only with fields: ticker, conviction(1-10), theme, name, thesis, catalyst, bull_case, bear_case, sentiment(-1.0 sell..+1.0 buy), crowd_view(what people say), target_pct(15-300), stop_pct(5-15), hold_days(3-30)."
+    allowed = {_norm_ticker(t) for t, _ in tickers_ranked}
+    # FREE models only (never the user's credit), tried in order, skipping 429s.
+    for model in _openrouter_intent_models()[:_OR_INTENT_MAX_ATTEMPTS]:
+        if not _openrouter_call_ok():
+            log.warning("OpenRouter daily call budget reached — skipping AI pick fallback")
+            break
+        try:
+            _record_openrouter_call()
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "user", "content": prompt}],
+                          "temperature": 0.4, "max_tokens": 2000},
+                )
+            if r.status_code == 429:
+                log.info("AI pick OR %s rate-limited (429) — next model", model)
+                continue
+            content = r.json()["choices"][0]["message"]["content"].strip()
+            content = re.sub(r"^```[a-z]*\n?", "", content); content = re.sub(r"\n?```$", "", content)
+            m = re.search(r"\[.*\]", content, re.DOTALL)
+            picks = _sanitize_picks(json.loads(m.group(0) if m else content), allowed)
+            if picks:
+                log.info("AI pick (OR %s): %d picks", model, len(picks))
+                return picks
+        except Exception as e:
+            log.warning("OpenRouter pick %s failed: %s", model, e)
+    return []
+
+
+# ── AI intent classification (free models: Cloudflare → OpenRouter) ─────────────
+# The lexicon classifier (tweet_intent) runs on EVERY scraped post (free, instant,
+# deterministic). The free LLM is then used "where applicable" — only on the posts
+# the lexicon couldn't read confidently — to resolve them, batched into ONE call
+# per scan so it stays within the free tiers. Failure degrades to the lexicon.
+_AI_INTENT_MAX = 60           # max posts sent to the AI per scan (cost/latency bound)
+
+# Cloudflare Workers AI free tier = 10,000 Neurons/day (resets 00:00 UTC); over it,
+# calls hard-FAIL. So (a) intent uses a CHEAP model — not the 70B pick model — and
+# (b) we track approx neuron spend per UTC day and stop calling CF before the cap,
+# degrading to OpenRouter (separate quota) then the lexicon. Neurons/M (input,output)
+# from CF's price table; default intent model llama-3.2-3b is ~6x cheaper than 70B.
+_CF_NEURON_RATES = {
+    "@cf/meta/llama-3.2-1b-instruct": (2457, 18252),
+    "@cf/meta/llama-3.2-3b-instruct": (4625, 30475),
+    "@cf/ibm-granite/granite-4.0-h-micro": (1542, 10158),
+    "@cf/qwen/qwen3-30b-a3b-fp8": (4625, 30475),
+    "@cf/meta/llama-3.1-8b-instruct-fp8-fast": (4119, 34868),
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast": (26668, 204805),
+}
+_CF_RATE_FALLBACK = (26668, 204805)   # assume expensive if unknown (conservative)
+_NEURON_USAGE_FILE = TMP / "cf_neuron_usage.json"
+
+
+def _cf_daily_neuron_budget() -> float:
+    """Stop calling CF once the day's estimated neurons reach this (headroom under
+    the 10k free cap). Env CF_DAILY_NEURON_BUDGET; 0 disables the guard."""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": prompt}], "temperature": 0.4, "max_tokens": 2000},
-            )
-        content = r.json()["choices"][0]["message"]["content"].strip()
-        content = re.sub(r"^```[a-z]*\n?", "", content); content = re.sub(r"\n?```$", "", content)
-        m = re.search(r"\[.*\]", content, re.DOTALL)
-        picks = json.loads(m.group(0) if m else content)
-        allowed = {_norm_ticker(t) for t, _ in tickers_ranked}
-        return _sanitize_picks(picks, allowed)
+        return max(0.0, float(os.getenv("CF_DAILY_NEURON_BUDGET", "9000")))
+    except (TypeError, ValueError):
+        return 9000.0
+
+
+def _estimate_neurons(model: str, in_tokens: int, out_tokens: int) -> float:
+    ri, ro = _CF_NEURON_RATES.get(model, _CF_RATE_FALLBACK)
+    return in_tokens / 1e6 * ri + out_tokens / 1e6 * ro
+
+
+def _neuron_usage_today() -> float:
+    import datetime as _dt
+    today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        d = json.loads(_NEURON_USAGE_FILE.read_text())
+        return float(d.get(today, 0.0)) if d.get("date") == today else 0.0
+    except Exception:
+        return 0.0
+
+
+def _add_neuron_usage(n: float) -> None:
+    import datetime as _dt
+    today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+    cur = _neuron_usage_today()
+    try:
+        _atomic_write(_NEURON_USAGE_FILE, {"date": today, today: round(cur + n, 1)})
+    except Exception:
+        pass
+
+
+def _cf_intent_model() -> str:
+    """Cheap, JSON-reliable model for the high-volume intent classifier (NOT the
+    70B pick model). Env CLOUDFLARE_INTENT_MODEL; default llama-3.2-3b
+    (~31x daily-cap headroom). granite-4.0-h-micro is the ultra-cheap option."""
+    return os.getenv("CLOUDFLARE_INTENT_MODEL", "@cf/meta/llama-3.2-3b-instruct").strip()
+
+
+# OpenRouter free tier = ~1000 requests/day. Track calls per UTC day and stop
+# before the cap so the fallback never hard-fails (then we ride the lexicon).
+_OR_USAGE_FILE = TMP / "openrouter_usage.json"
+
+
+def _openrouter_daily_budget() -> int:
+    try:
+        return max(0, int(float(os.getenv("OPENROUTER_DAILY_CALL_BUDGET", "900"))))
+    except (TypeError, ValueError):
+        return 900
+
+
+def _openrouter_calls_today() -> int:
+    import datetime as _dt
+    today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        d = json.loads(_OR_USAGE_FILE.read_text())
+        return int(d.get(today, 0)) if d.get("date") == today else 0
+    except Exception:
+        return 0
+
+
+def _record_openrouter_call() -> None:
+    import datetime as _dt
+    today = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        _atomic_write(_OR_USAGE_FILE, {"date": today, today: _openrouter_calls_today() + 1})
+    except Exception:
+        pass
+
+
+def _openrouter_call_ok() -> bool:
+    """True if an OpenRouter call is allowed under today's free-tier call budget."""
+    if not os.getenv("OPENROUTER_API_KEY", "").strip():
+        return False
+    budget = _openrouter_daily_budget()
+    return budget <= 0 or _openrouter_calls_today() < budget
+
+
+# OpenRouter free intent models, tried in order until one responds (the big-name
+# free models — llama-3.3-70b, qwen3-80b — are frequently provider-429'd, so a
+# single hardcoded model is unreliable). Verified 2026-06-20 against the live
+# /models list + test calls: gpt-oss-120b and gemma-4-31b returned clean JSON with
+# correct labels; the 70b/qwen were rate-limited. Free tier is CALL-capped not
+# token-capped, so we prefer the strongest models. Env OPENROUTER_INTENT_MODELS
+# (comma-sep) overrides; OPENROUTER_INTENT_MODEL (singular) is prepended if set.
+_OR_INTENT_MODELS_DEFAULT = [
+    "openai/gpt-oss-120b:free",
+    "google/gemma-4-31b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+]
+_OR_INTENT_MAX_ATTEMPTS = 3   # don't burn the daily budget probing many 429s
+
+
+def _free_only(models: list) -> list:
+    """Keep ONLY OpenRouter ``:free`` models — never spend the user's credit.
+    A non-:free id (even if set via env) is dropped, so the credit balance is
+    never touched by this app."""
+    return [m for m in models if m and m.strip().endswith(":free")]
+
+
+def _openrouter_intent_models() -> list:
+    env = os.getenv("OPENROUTER_INTENT_MODELS", "").strip()
+    models = [m.strip() for m in env.split(",") if m.strip()] if env else list(_OR_INTENT_MODELS_DEFAULT)
+    single = os.getenv("OPENROUTER_INTENT_MODEL", "").strip()
+    if single and single not in models:
+        models.insert(0, single)
+    free = _free_only(models)
+    return free or list(_OR_INTENT_MODELS_DEFAULT)   # never fall back to a paid model
+
+
+def _ai_intent_enabled() -> bool:
+    if os.getenv("THEMATIC_AI_INTENT", "true").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    return bool((os.getenv("CLOUDFLARE_ACCOUNT_ID") and os.getenv("CLOUDFLARE_API_TOKEN"))
+                or os.getenv("OPENROUTER_API_KEY"))
+
+
+def _ai_intent_conf_threshold() -> float:
+    """Send a post to the AI unless the lexicon is at LEAST this confident — i.e.
+    don't let the lexicon make 'iffy' borderline buy/sell calls; defer them to the
+    AI. Default 0.85 (only overwhelmingly explicit reads like an outright "sold my
+    $NVDA" with multiple cues stay lexicon-only). Env THEMATIC_AI_INTENT_THRESHOLD;
+    set 1.0 to route EVERY ticker post to AI, 0.0 to fully trust the lexicon."""
+    try:
+        return max(0.0, min(1.0, float(os.getenv("THEMATIC_AI_INTENT_THRESHOLD", "0.85"))))
+    except (TypeError, ValueError):
+        return 0.85
+
+
+_INTENT_SYS = (
+    "You classify a social post's trading intent toward ONE ticker. Read the actual "
+    "action, not just hype. A bearish ACTION (selling/trimming/took profits/exiting/"
+    "reducing/warning/overextended) beats bullish words. Labels exactly one of: "
+    "BUY_SIGNAL, SELL_SIGNAL, HOLD_SIGNAL, WATCHLIST_ONLY, NEWS_ONLY, UNCLEAR. "
+    "Respond ONLY with a JSON array."
+)
+
+
+def _build_intent_prompt(items: "list[tuple[str,str]]") -> str:
+    lines = [f'{i}. ${tk} :: {text[:240]}' for i, (tk, text) in enumerate(items)]
+    return (
+        "Classify each item's intent toward its $TICKER. For mixed posts, the ACTION "
+        "wins (\"love it but trimming\" = SELL_SIGNAL).\n\n"
+        + "\n".join(lines)
+        + '\n\nReturn ONLY: [{"i":0,"label":"BUY_SIGNAL","sentiment":0.6,"reason":"..."}, ...]'
+        ' — one per item. sentiment is -1.0 (very bearish) .. +1.0 (very bullish);'
+        ' use small magnitudes for mixed / uncertain posts.'
+    )
+
+
+def _parse_intent_json(content: str, items: "list[tuple[str,str]]") -> dict:
+    from tradingagents.screening import tweet_intent as ti
+    content = re.sub(r"^```[a-z]*\n?", "", (content or "").strip())
+    content = re.sub(r"\n?```$", "", content)
+    m = re.search(r"\[.*\]", content, re.DOTALL)
+    if not m:
+        return {}
+    rows = json.loads(m.group(0))
+    valid = {ti.BUY_SIGNAL, ti.SELL_SIGNAL, ti.HOLD_SIGNAL, ti.WATCHLIST_ONLY, ti.NEWS_ONLY, ti.UNCLEAR}
+    out: dict[int, "ti.IntentResult"] = {}
+    for row in rows:
+        try:
+            i = int(row.get("i"))
+            label = str(row.get("label", "")).upper().strip()
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if label not in valid or not (0 <= i < len(items)):
+            continue
+        tk = items[i][0]
+        try:
+            _ai_sent = max(-1.0, min(1.0, float(row.get("sentiment"))))
+        except (TypeError, ValueError):
+            _ai_sent = (0.6 if label == ti.BUY_SIGNAL else -0.6 if label == ti.SELL_SIGNAL else 0.0)
+        out[i] = ti.IntentResult(
+            ticker=tk, label=label, action="ai",
+            sentiment=_ai_sent,
+            confidence=0.75, reason=str(row.get("reason", ""))[:120],
+            increase_buy=(label == ti.BUY_SIGNAL), reduce_buy=(label == ti.SELL_SIGNAL),
+        )
+    return out
+
+
+async def _ai_classify_intents(items: "list[tuple[str,str]]") -> dict:
+    """Classify a batch of (ticker, post_text) via free LLM. Cloudflare first,
+    OpenRouter fallback. Returns {index: IntentResult}; {} on any failure (caller
+    keeps the lexicon read). Capped at _AI_INTENT_MAX items."""
+    if not items or not _ai_intent_enabled():
+        return {}
+    items = items[:_AI_INTENT_MAX]
+    prompt = _build_intent_prompt(items)
+    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    cf_token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+    model = _cf_intent_model()
+    gateway_url = os.getenv("CLOUDFLARE_AI_GATEWAY_URL", "").strip()
+    if account_id and cf_token:
+        # Daily neuron budget guard — skip CF (→ OpenRouter) if this call would
+        # push past the free-cap headroom, so we never hit the hard-fail.
+        max_out = 1500
+        est = _estimate_neurons(model, len(prompt) // 4 + 60, min(max_out, len(items) * 14))
+        budget = _cf_daily_neuron_budget()
+        if budget > 0 and (_neuron_usage_today() + est) > budget:
+            log.warning("CF neuron budget reached (%.0f/%.0f today) — intent → OpenRouter/lexicon",
+                        _neuron_usage_today(), budget)
+        else:
+            try:
+                url = (f"{gateway_url.rstrip('/')}/workers-ai/{model}" if gateway_url
+                       else f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}")
+                async with httpx.AsyncClient(timeout=45) as client:
+                    r = await client.post(url, headers={"Authorization": f"Bearer {cf_token}"},
+                        json={"messages": [{"role": "system", "content": _INTENT_SYS},
+                                           {"role": "user", "content": prompt}],
+                              "max_tokens": max_out, "temperature": 0.1})
+                data = r.json()
+                # Prefer CF's reported usage when present; else our estimate.
+                usage = (data.get("result") or {}).get("usage") or data.get("usage") or {}
+                actual = _estimate_neurons(model,
+                    int(usage.get("prompt_tokens", len(prompt) // 4 + 60)),
+                    int(usage.get("completion_tokens", min(max_out, len(items) * 14))))
+                _add_neuron_usage(actual)
+                content = (data.get("result") or {}).get("response", "") or \
+                          (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                res = _parse_intent_json(content, items)
+                if res:
+                    log.info("AI intent (CF %s): %d/%d posts, ~%.0f neurons (%.0f/day)",
+                             model, len(res), len(items), actual, _neuron_usage_today())
+                    return res
+            except Exception as e:
+                log.warning("AI intent CF failed: %s — trying OpenRouter", e)
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if api_key and _openrouter_call_ok():
+        for model in _openrouter_intent_models()[:_OR_INTENT_MAX_ATTEMPTS]:
+            if not _openrouter_call_ok():
+                break
+            try:
+                _record_openrouter_call()
+                async with httpx.AsyncClient(timeout=30) as client:
+                    r = await client.post("https://openrouter.ai/api/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                        json={"model": model,
+                              "messages": [{"role": "system", "content": _INTENT_SYS},
+                                           {"role": "user", "content": prompt}],
+                              "temperature": 0.1, "max_tokens": 1500})
+                if r.status_code == 429:        # provider overloaded → try next model
+                    log.info("AI intent OR %s rate-limited (429) — next model", model)
+                    continue
+                content = r.json()["choices"][0]["message"]["content"]
+                res = _parse_intent_json(content, items)
+                if res:
+                    log.info("AI intent (OR %s): %d/%d posts (%d/%d calls today)",
+                             model, len(res), len(items), _openrouter_calls_today(), _openrouter_daily_budget())
+                    return res
+            except Exception as e:
+                log.warning("AI intent OR %s failed: %s", model, e)
+    elif api_key:
+        log.warning("OpenRouter daily call budget reached (%d/%d) — intent → lexicon",
+                    _openrouter_calls_today(), _openrouter_daily_budget())
+    return {}
+
+
+# ── Shared free-only AI completion (the one caller all AI features reuse) ────────
+# FREE models only (never the $-credit), daily-budget-guarded on both providers.
+#   prefer="cheap" → CF cheap intent model (3B) first, then OR free list.
+#   prefer="smart" → OR free list (strong models) first, then CF 70B (neuron-budgeted).
+# Sync core (httpx.Client) so the brain's sync llm_fn can use it; async wrapper for
+# the scan path. Returns raw model text, or None on any failure / budget exhaustion.
+_CF_SMART_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+
+
+def _cf_complete_sync(model: str, system: str, prompt: str, max_tokens: int) -> "str | None":
+    account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    cf_token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+    if not (account_id and cf_token):
+        return None
+    est = _estimate_neurons(model, len(system + prompt) // 4 + 40, max_tokens)
+    budget = _cf_daily_neuron_budget()
+    if budget > 0 and (_neuron_usage_today() + est) > budget:
+        log.warning("CF neuron budget reached (%.0f/%.0f) — AI → OpenRouter/skip", _neuron_usage_today(), budget)
+        return None
+    gateway_url = os.getenv("CLOUDFLARE_AI_GATEWAY_URL", "").strip()
+    url = (f"{gateway_url.rstrip('/')}/workers-ai/{model}" if gateway_url
+           else f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}")
+    try:
+        import httpx as _hx
+        with _hx.Client(timeout=45) as c:
+            r = c.post(url, headers={"Authorization": f"Bearer {cf_token}"},
+                       json={"messages": [{"role": "system", "content": system},
+                                          {"role": "user", "content": prompt}],
+                             "max_tokens": max_tokens, "temperature": 0.1})
+        data = r.json()
+        usage = (data.get("result") or {}).get("usage") or data.get("usage") or {}
+        _add_neuron_usage(_estimate_neurons(model,
+            int(usage.get("prompt_tokens", len(system + prompt) // 4 + 40)),
+            int(usage.get("completion_tokens", max_tokens))))
+        return (data.get("result") or {}).get("response", "") or \
+               (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
     except Exception as e:
-        log.error("OpenRouter fallback failed: %s", e)
+        log.warning("CF complete (%s) failed: %s", model, e)
+        return None
+
+
+def _or_complete_sync(system: str, prompt: str, max_tokens: int) -> "str | None":
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        return None
+    import httpx as _hx
+    for model in _openrouter_intent_models()[:_OR_INTENT_MAX_ATTEMPTS]:   # FREE-only list
+        if not _openrouter_call_ok():
+            log.warning("OpenRouter daily call budget reached — AI skipped")
+            break
+        try:
+            _record_openrouter_call()
+            with _hx.Client(timeout=40) as c:
+                r = c.post("https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": model, "messages": [{"role": "system", "content": system},
+                                                        {"role": "user", "content": prompt}],
+                          "temperature": 0.1, "max_tokens": max_tokens})
+            if r.status_code == 429:
+                continue
+            txt = r.json()["choices"][0]["message"]["content"]
+            if txt:
+                return txt
+        except Exception as e:
+            log.warning("OR complete (%s) failed: %s", model, e)
+    return None
+
+
+def _ai_complete_sync(system: str, prompt: str, *, prefer: str = "smart", max_tokens: int = 600) -> "str | None":
+    if prefer == "cheap":
+        return (_cf_complete_sync(_cf_intent_model(), system, prompt, max_tokens)
+                or _or_complete_sync(system, prompt, max_tokens))
+    return (_or_complete_sync(system, prompt, max_tokens)
+            or _cf_complete_sync(_CF_SMART_MODEL, system, prompt, max_tokens))
+
+
+async def _ai_complete(system: str, prompt: str, *, prefer: str = "smart", max_tokens: int = 600) -> "str | None":
+    return await asyncio.to_thread(_ai_complete_sync, system, prompt, prefer=prefer, max_tokens=max_tokens)
+
+
+def _extract_json(text: "str | None"):
+    """Pull the first JSON object/array from a model reply (handles ``` fences)."""
+    if not text:
+        return None
+    t = re.sub(r"^```[a-z]*\n?", "", text.strip())
+    t = re.sub(r"\n?```$", "", t)
+    m = re.search(r"(\{.*\}|\[.*\])", t, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except Exception:
+        return None
+
+
+# ── #2 AI ticker validation — kill bare-word garbage ($OLDER/$CYCLE/$SPEND) ──────
+# The lexicon's blocklist can't catch every uppercase prose word. AI confirms which
+# extracted symbols are REAL US-listed equities. Persistent cache (a ticker's
+# realness never changes) → each symbol is asked at most once, ever. FAIL-OPEN:
+# only symbols the AI explicitly calls invalid are dropped, so an AI outage never
+# discards genuine tickers.
+_TICKER_VALID_FILE = TMP / "ticker_validation.json"
+_ticker_valid_cache: dict | None = None
+
+
+def _load_ticker_cache() -> dict:
+    global _ticker_valid_cache
+    if _ticker_valid_cache is None:
+        try:
+            _ticker_valid_cache = json.loads(_TICKER_VALID_FILE.read_text())
+        except Exception:
+            _ticker_valid_cache = {}
+    return _ticker_valid_cache
+
+
+def _save_ticker_cache() -> None:
+    try:
+        _atomic_write(_TICKER_VALID_FILE, _ticker_valid_cache or {})
+    except Exception:
+        pass
+
+
+async def _ai_validate_tickers(tickers: "list[str]") -> set:
+    """Return the subset of ``tickers`` that are NOT AI-confirmed-invalid.
+
+    Cached symbols use their cached verdict; uncached ones are batched into one
+    free-AI call. Symbols the AI marks invalid are dropped; everything else (valid,
+    unknown, AI-unavailable) is kept (fail-open)."""
+    cache = _load_ticker_cache()
+    uniq = [t.upper() for t in dict.fromkeys(tickers) if t]
+    unknown = [t for t in uniq if t not in cache]
+    if unknown and _ai_intent_enabled():
+        sys = ("You validate stock ticker symbols. Return ONLY a JSON object mapping "
+               "each symbol to true if it is a REAL US-listed equity ticker (NYSE/Nasdaq/"
+               "AMEX), false if it is an English word, abbreviation, or not a real ticker.")
+        prompt = ("Which of these are real US-listed stock tickers? "
+                  + ", ".join(unknown[:60])
+                  + '\n\nReturn ONLY: {"NVDA": true, "OLDER": false, ...}')
+        try:
+            obj = _extract_json(await _ai_complete(sys, prompt, prefer="cheap", max_tokens=500))
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    cache[str(k).upper()] = bool(v)
+                _save_ticker_cache()
+        except Exception as e:
+            log.debug("ticker validation failed: %s", e)
+    # Drop only the explicitly-invalid; keep valid + unknown (fail-open).
+    return {t for t in uniq if cache.get(t, True)}
+
+
+# ── #3 News catalyst materiality — real catalyst vs noise + plain-English why-now ─
+_CATALYST_QUALITY = {"strong", "moderate", "weak", "none"}
+
+
+async def _ai_catalyst_materiality(signals: "list[dict]") -> dict:
+    """Rate each finalist signal's catalyst: is there a REAL, time-relevant driver
+    (earnings/contract/approval/product/guidance) or just vibes? Returns
+    {ticker: {"catalyst_quality": str, "why_now": str}}. One batched free-AI call;
+    {} on failure (callers keep their existing fields)."""
+    if not signals or not _ai_intent_enabled():
+        return {}
+    rows = []
+    for i, s in enumerate(signals[:25]):
+        ctx = f"{s.get('thesis','')} | catalyst: {s.get('catalyst','')} | crowd: {s.get('crowd_view','')}"
+        rows.append(f'{i}. ${s.get("ticker","")} :: {ctx[:240]}')
+    sys = ("You judge whether a stock has a REAL, time-relevant CATALYST (specific "
+           "earnings date, contract/award, FDA/approval, product launch, guidance, "
+           "insider cluster) vs vague momentum/hype. Respond ONLY with a JSON array.")
+    prompt = ("Rate each item's catalyst quality (strong|moderate|weak|none) and give "
+              "a <=110-char why_now.\n\n" + "\n".join(rows)
+              + '\n\nReturn ONLY: [{"i":0,"catalyst_quality":"strong","why_now":"..."}].')
+    out: dict = {}
+    try:
+        arr = _extract_json(await _ai_complete(sys, prompt, prefer="smart", max_tokens=900))
+        if isinstance(arr, list):
+            for row in arr:
+                try:
+                    i = int(row.get("i"))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if not (0 <= i < len(signals[:25])):
+                    continue
+                q = str(row.get("catalyst_quality", "")).lower().strip()
+                out[signals[i]["ticker"]] = {
+                    "catalyst_quality": q if q in _CATALYST_QUALITY else "weak",
+                    "why_now": str(row.get("why_now", ""))[:140],
+                }
+    except Exception as e:
+        log.debug("catalyst materiality failed: %s", e)
+    return out
+
+
+# ── #4 News-driven exit classification — bad news (exit) vs attention fade (hold) ─
+def _ai_exit_check_enabled() -> bool:
+    return os.getenv("THEMATIC_AI_EXIT_CHECK", "true").strip().lower() in ("1", "true", "yes", "on") \
+        and _ai_intent_enabled()
+
+
+async def _fetch_ticker_headlines(ticker: str, n: int = 6) -> "list[str]":
+    """A few recent Google-News headlines for a ticker (best-effort, bounded)."""
+    try:
+        from bs4 import BeautifulSoup
+        url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return []
+        soup = BeautifulSoup(r.text, "xml")
+        return [it.find("title").text.strip() for it in soup.find_all("item")[:n]
+                if it.find("title")]
+    except Exception:
         return []
+
+
+async def _ai_exit_news_check(ticker: str) -> "tuple[bool, str]":
+    """For a buzz-based exit, decide if there's MATERIALLY BAD news (→ confirm exit)
+    or just fading attention (→ hold the position). Returns (bad_news, reason).
+
+    Fails CONSERVATIVE: AI/news unavailable ⇒ (True, ...) so the buzz exit proceeds
+    as it would today — AI can only RESCUE a position by positively clearing it."""
+    if not _ai_exit_check_enabled():
+        return True, "ai-exit-check disabled"
+    heads = await _fetch_ticker_headlines(ticker)
+    if not heads:
+        return True, "no headlines / fetch failed"
+    sys = ("You decide if a stock has MATERIALLY BAD recent news (guidance cut, earnings "
+           "miss, fraud/probe, dilution/offering, downgrade, lawsuit, key exec loss, failed "
+           "trial) vs neutral/positive/quiet. Respond ONLY with JSON.")
+    prompt = (f"Recent {ticker} headlines:\n" + "\n".join(f"- {h}" for h in heads)
+              + '\n\nReturn ONLY: {"bad_news": true|false, "reason": "<=100 chars"}')
+    obj = _extract_json(await _ai_complete(sys, prompt, prefer="smart", max_tokens=200))
+    if not isinstance(obj, dict) or "bad_news" not in obj:
+        return True, "unparseable AI reply"
+    return bool(obj.get("bad_news")), str(obj.get("reason", ""))[:120]
+
+
+# ── #6 AI red-flag deepening — hidden risks the lexicon veto can't pattern-match ──
+async def _ai_red_flag_check(signals: "list[dict]") -> dict:
+    """Read each finalist's full narrative for HIDDEN risk the keyword veto misses
+    (dilution/ATM offering, going-concern, pump-and-dump pattern, accounting probe,
+    customer concentration, cash burn). Returns {ticker: {"red_flag": bool,
+    "risk": str}}. Conservative-but-not-paranoid: only flags concrete risks. {} on
+    failure (the lexicon veto still stands)."""
+    if not signals or not _ai_intent_enabled():
+        return {}
+    rows = []
+    for i, s in enumerate(signals[:25]):
+        nar = f"{s.get('thesis','')} | bull: {s.get('bull_case','')} | bear: {s.get('bear_case','')}"
+        rows.append(f'{i}. ${s.get("ticker","")} :: {nar[:280]}')
+    sys = ("You are a short-seller-minded risk auditor. Flag a stock ONLY if its "
+           "narrative reveals a CONCRETE downside risk: dilution/ATM/offering, going "
+           "concern, pump-and-dump pattern, accounting/SEC probe, fraud, heavy cash "
+           "burn, customer concentration, or imminent lockup. Vague/no risk = not "
+           "flagged. Respond ONLY with a JSON array.")
+    prompt = ("Audit each for a concrete red flag.\n\n" + "\n".join(rows)
+              + '\n\nReturn ONLY: [{"i":0,"red_flag":false,"risk":""},'
+                '{"i":1,"red_flag":true,"risk":"dilution: $500M ATM"}].')
+    out: dict = {}
+    try:
+        arr = _extract_json(await _ai_complete(sys, prompt, prefer="smart", max_tokens=700))
+        if isinstance(arr, list):
+            for row in arr:
+                try:
+                    i = int(row.get("i"))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if 0 <= i < len(signals[:25]) and bool(row.get("red_flag")):
+                    out[signals[i]["ticker"]] = {"red_flag": True, "risk": str(row.get("risk", ""))[:140]}
+    except Exception as e:
+        log.debug("AI red-flag check failed: %s", e)
+    return out
 
 
 # ── Scan orchestrator ─────────────────────────────────────────────────────────
@@ -1471,9 +2272,44 @@ def _thematic_primary_email() -> str:
 # false positives from thin one-off mentions.
 MIN_SIGNAL_SCORE: float = 48.0
 
+# Minimum COMPOSITE (0-100) score for a freshly-scanned signal to be ADMITTED to the
+# pending queue. Distinct from MIN_SIGNAL_SCORE above (which floors the unbounded *raw
+# buzz* for the manual-approve and breakout-fallback gates). The admit decision is made
+# on the composite — conviction + buzz + sentiment — so this is the real buy gate.
+# Env-tunable: raise toward 72-75 for a more selective (fewer, higher-quality) book.
+MIN_COMPOSITE_SCORE: float = float(os.getenv("THEMATIC_MIN_SIGNAL_SCORE", "70") or 70)
+
 # Buzz decay threshold: if current scan score drops to < this fraction of
 # the score at entry, trigger a buzz_decay exit (even if stop/target not hit).
 BUZZ_DECAY_RATIO: float = 0.40
+
+
+def _signal_ttl_hours() -> float:
+    """How long a pending signal survives across scans before it expires —
+    instead of being wiped+rebuilt every scan (which made hot names flip-flop
+    in/out and re-page). Env THEMATIC_SIGNAL_TTL_HOURS, default 24h, 0 = no TTL."""
+    try:
+        return max(0.0, float(os.getenv("THEMATIC_SIGNAL_TTL_HOURS", "24") or 24))
+    except (TypeError, ValueError):
+        return 24.0
+
+
+def _signal_ts_epoch(s: dict) -> float:
+    """Best-effort creation epoch for a signal (ISO ``ts``, else id suffix)."""
+    ts = s.get("ts")
+    if ts:
+        try:
+            import datetime as _dt
+            return _dt.datetime.fromisoformat(str(ts)).timestamp()
+        except Exception:
+            pass
+    sid = str(s.get("id", ""))
+    if "_" in sid:
+        try:
+            return float(sid.rsplit("_", 1)[1])
+        except (TypeError, ValueError):
+            pass
+    return 0.0
 
 
 def _buzz_tier(score: float) -> str:
@@ -1489,9 +2325,9 @@ def composite_score(conviction: int, raw_score: float, sentiment: float = 0.0) -
     """ONE 0-100 signal score (replaces the dual 'conviction X/10 · buzz Y pts').
 
     Conviction (1-10, the analyst's considered call factoring news/insider/buzz)
-    is the backbone and contributes up to 85; live social-momentum strength
-    (unbounded raw buzz) nudges the last 15 via a saturating curve so a huge buzz
-    number can't dominate a weak thesis.
+    is the backbone and contributes up to 75; live social-momentum strength
+    (unbounded raw buzz) adds up to 28 via a gently-saturating curve so genuine
+    multi-source buzz differentiates names without burying a weak thesis.
 
     ``sentiment`` ∈ [-1, +1] is crowd POLARITY (are people bullish or saying
     "sell/dump/crash"?). It scales the score ±25%: a heavily-shorted, "everyone's
@@ -1501,8 +2337,8 @@ def composite_score(conviction: int, raw_score: float, sentiment: float = 0.0) -
     c = max(1, min(10, int(conviction or 0)))
     rs = max(0.0, float(raw_score or 0.0))
     s = max(-1.0, min(1.0, float(sentiment or 0.0)))
-    base = c * 8.5                                   # conv10 → 85
-    buzz_pts = 15.0 * (rs / (rs + 200.0))            # 200→7.5, 600→11.25, →15 asymptote
+    base = c * 7.5                                   # conv10 → 75 (was 85 — conviction was ~85% of score, burying buzz)
+    buzz_pts = 28.0 * (rs / (rs + 55.0))             # rs55→14, 165→21, →28 asymptote — buzz now materially differentiates
     sent_mult = 1.0 + 0.25 * s                       # -1 → 0.75×, 0 → 1.0×, +1 → 1.25×
     score = (base + buzz_pts) * sent_mult
     if s <= -0.5:                                    # crowd says sell → never auto-tradeable
@@ -1554,6 +2390,98 @@ def _set_status(status: str, detail: str = "") -> None:
     _atomic_write(STATUS_FILE, {
         "status": status, "detail": detail, "ts": time.time()
     })
+
+
+# ── Per-source health tracking ──────────────────────────────────────────────
+# Prevents the "scanner silently dead for 17 days" failure: each scan records
+# every source's outcome (ok/empty/error/timeout, ticker count, last success,
+# consecutive failures) so a quietly-broken feed is visible in /status, not
+# hidden behind a stale cache.
+_SOURCE_HEALTH_FILE = TMP / "thematic_source_health.json"
+_SOURCE_DEAD_FAILS = 3            # consecutive failures before a source is "dead"
+_SOURCE_STALE_HOURS = 24.0       # no successful pull in this long while attempted → stale
+
+
+def _record_source_health(gather_results: list, names: list) -> None:
+    """Fold one scan's per-source results into the persistent health file."""
+    now = time.time()
+    try:
+        data = json.loads(_SOURCE_HEALTH_FILE.read_text())
+    except Exception:
+        data = {}
+    for i, name in enumerate(names):
+        if i >= len(gather_results):
+            continue
+        r = gather_results[i]
+        rec = data.get(name, {}) or {}
+        rec["last_attempt"] = now
+        fails = int(rec.get("consecutive_failures", 0))
+        if isinstance(r, asyncio.TimeoutError):
+            rec.update(status="timeout", consecutive_failures=fails + 1)
+        elif isinstance(r, Exception):
+            rec.update(status="error", consecutive_failures=fails + 1, last_error=str(r)[:140])
+        else:
+            try:
+                n = len(r)
+            except Exception:
+                n = 0
+            rec["last_count"] = n
+            if n > 0:                       # real data → healthy
+                rec.update(status="ok", last_success=now, consecutive_failures=0)
+            else:                           # returned but empty — not a hard fail, but visible
+                rec["status"] = "empty"
+        data[name] = rec
+    try:
+        _atomic_write(_SOURCE_HEALTH_FILE, data)
+    except Exception as e:
+        log.debug("source health write: %s", e)
+
+
+def _source_health() -> dict:
+    """Read the per-source health map (or {})."""
+    try:
+        return json.loads(_SOURCE_HEALTH_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _source_health_summary() -> dict:
+    """Compact health view for /status: per-source state + a list of DEAD/STALE
+    sources (consecutive failures ≥ threshold, or no success in STALE_HOURS while
+    still being attempted)."""
+    now = time.time()
+    health = _source_health()
+    sources: dict[str, dict] = {}
+    dead: list[str] = []
+    for name, rec in health.items():
+        fails = int(rec.get("consecutive_failures", 0))
+        last_ok = rec.get("last_success")
+        ok_age_h = round((now - last_ok) / 3600.0, 1) if last_ok else None
+        # DEAD = repeatedly erroring/timing out, OR it used to work and has gone
+        # stale (succeeded before but no data in STALE_HOURS). A source that simply
+        # returns empty and never errored is "no-data", NOT dead (insider/congress/
+        # options-flow are legitimately empty on quiet days).
+        is_dead = fails >= _SOURCE_DEAD_FAILS or (
+            last_ok is not None and (now - last_ok) > _SOURCE_STALE_HOURS * 3600.0
+        )
+        entry = {
+            "status": rec.get("status", "unknown"),
+            "last_count": rec.get("last_count", 0),
+            "consecutive_failures": fails,
+            "last_success_age_hours": ok_age_h,
+            "dead": is_dead,
+        }
+        if rec.get("last_error"):
+            entry["last_error"] = rec["last_error"]
+        sources[name] = entry
+        if is_dead:
+            dead.append(name)
+    return {
+        "sources": sources,
+        "dead_sources": sorted(dead),
+        "healthy_count": sum(1 for s in sources.values() if not s["dead"]),
+        "total_sources": len(sources),
+    }
 
 
 def _scan_status_stale(status: dict, now: float | None = None) -> bool:
@@ -1748,10 +2676,11 @@ async def _notify_thematic_hil_pending(count: int) -> None:
     try:
         from web import users as user_store
         from scripts.sms_alerts import send_sms
-        dashboard_url = os.getenv("PUBLIC_DASHBOARD_URL", "https://app.agentictrader.org")
+        dashboard_url = os.getenv("PUBLIC_DASHBOARD_URL", "https://app.agentictrader.org").rstrip("/")
         msg = (
-            f"Agentic Trader: {count} new thematic signal{'s' if count != 1 else ''} "
-            f"awaiting your approval. Review at {dashboard_url}/#hil"
+            f"🔔 Agentic Trader\n"
+            f"{count} new thematic signal{'s' if count != 1 else ''} awaiting approval\n\n"
+            f"Review 👉 {dashboard_url}/app/hil?tab=approvals"
         )
         all_users = user_store.list_users() if hasattr(user_store, "list_users") else []
         for rec in all_users:
@@ -1761,11 +2690,17 @@ async def _notify_thematic_hil_pending(count: int) -> None:
             phone = (rec.get("phone_number") or os.getenv("PAPER_SMS_NUMBER", "")).strip()
             if not phone:
                 continue
+            # Cooldown so the "N pending" nudge doesn't repeat every scan/burst.
+            from web import alert_cooldown
+            email = rec.get("email", "")
+            if not alert_cooldown.should_alert(f"thematic_count:{email}", "PENDING", score=float(count)):
+                continue
             try:
                 await asyncio.to_thread(send_sms, phone, msg)
-                log.info("Thematic HIL SMS sent to %s", rec.get("email", "?"))
+                alert_cooldown.record_alert(f"thematic_count:{email}", "PENDING", score=float(count))
+                log.info("Thematic HIL SMS sent to %s", email or "?")
             except Exception as sms_err:
-                log.warning("Thematic HIL SMS failed for %s: %s", rec.get("email", "?"), sms_err)
+                log.warning("Thematic HIL SMS failed for %s: %s", email or "?", sms_err)
     except Exception as e:
         log.warning("_notify_thematic_hil_pending: %s", e)
 
@@ -1924,6 +2859,19 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
                     current_raw = latest_scores.get(ticker, 0)
                     if entry_raw > 0 and current_raw < entry_raw * BUZZ_DECAY_RATIO:
                         reason = "buzz_decay"
+                # #4 AI gate: a buzz exit is about FADING ATTENTION. If the AI reads
+                # the headlines and finds no materially-bad news, it's just attention
+                # cooling — hold (its stop/target still guard downside). Bad news →
+                # let the exit stand. Only touches buzz exits, never price exits.
+                if reason in ("buzz_collapse", "buzz_decay"):
+                    try:
+                        bad, why = await _ai_exit_news_check(ticker)
+                        if not bad:
+                            log.info("%s %s cancelled — AI: attention fade, no bad news (%s)",
+                                     ticker, reason, why)
+                            reason = None
+                    except Exception as _ee:
+                        log.debug("AI exit check skipped for %s: %s", ticker, _ee)
 
         if reason:
             pnl_pct = round((price - float(pos.get("entry_price", price))) / float(pos.get("entry_price", price)) * 100, 2) if pos.get("entry_price") else 0
@@ -2030,40 +2978,107 @@ def _sig_score(sig: dict) -> float:
                                  float(sig.get("sentiment", 0) or 0)))
 
 
-async def _notify_thematic_trade_request(email: str, sig: dict, score: float) -> None:
-    """Text a per-signal trade request + approve deep link (seamless HIL flow)."""
+def _fmt_money_compact(n: float) -> str:
+    """$1.2k / $3.4M style for SMS."""
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return "?"
+    for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if abs(n) >= div:
+            return f"${n / div:.1f}{suf}"
+    return f"${n:.0f}"
+
+
+async def _notify_thematic_trade_request(email: str, items: list, *, _single=None) -> int:
+    """Text ONE clean digest covering all fresh trade-requests for a user.
+
+    ``items`` = list of (sig, score). Per-ticker cooldown is applied here, so only
+    materially-new names are included; if none survive, nothing is sent. Returns
+    the number of tickers actually paged about. A single-name page also attaches a
+    chart; multi-name digests omit images (the approve screen has per-name charts).
+    """
     try:
         from web import users as user_store
         from scripts.sms_alerts import send_sms
+        from web import alert_cooldown
+
         rec = user_store.get_user(email) or {}
         if user_store.get_thematic_hil(rec).get("sms_notify") is False:
-            return
+            return 0
         if _in_sms_quiet_hours():
-            log.info("Thematic trade-request SMS suppressed (quiet hours): %s %s", email[:20], sig.get("ticker"))
-            return
+            log.info("Thematic trade-request SMS suppressed (quiet hours): %s", email[:20])
+            return 0
         phone = (rec.get("phone_number") or os.getenv("PAPER_SMS_NUMBER", "")).strip()
         if not phone:
-            return
+            return 0
+
+        # Cooldown filter — keep only tickers not recently paged (or whose score
+        # moved >= ALERT_RESCORE_DELTA). Highest score first.
+        fresh = []
+        for sig, score in items:
+            tk = str(sig.get("ticker", ""))
+            if tk and alert_cooldown.should_alert(f"thematic:{email}", tk, score=score, kind="BUY"):
+                fresh.append((sig, float(score)))
+        if not fresh:
+            log.info("Thematic trade-request SMS suppressed (all on cooldown): %s", email[:20])
+            return 0
+        fresh.sort(key=lambda x: x[1], reverse=True)
+
         base = os.getenv("PUBLIC_DASHBOARD_URL", "https://app.agentictrader.org").rstrip("/")
-        crowd = (sig.get("crowd_view") or "").strip()
-        msg = (
-            f"Agentic Trader — trade request: {sig.get('ticker')} score {score:.0f}/100, "
-            f"target +{sig.get('target_pct', '?')}%. "
-            + (f"Crowd: {crowd[:90]}. " if crowd else "")
-            + f"Approve: {base}/app/hil?tab=approvals"
-        )
-        # Attach a TradingView-style chart when enabled (best-effort; failure just
-        # sends the text without an image).
-        media_url = None
-        try:
-            media_url = await _generate_signal_chart(str(sig.get("ticker", "")), sig)
-        except Exception as ce:
-            log.debug("trade-request chart skipped: %s", ce)
-        await asyncio.to_thread(send_sms, phone, msg, None, media_url)
-        log.info("Thematic trade-request SMS sent to %s (%s, score %.0f, chart=%s)",
-                 email[:20], sig.get("ticker"), score, bool(media_url))
+        link = f"{base}/app/hil?tab=approvals"
+
+        if len(fresh) == 1:
+            sig, score = fresh[0]
+            tk = str(sig.get("ticker", ""))
+            crowd = (sig.get("crowd_view") or "").strip()
+            lines = [
+                "📈 Agentic Trader — trade request",
+                "",
+                f"{tk} · {score:.0f}/100",
+                f"Target +{sig.get('target_pct', '?')}%  ·  Stop -{sig.get('stop_pct', '?')}%",
+            ]
+            if crowd:
+                lines.append(f"💬 {crowd[:100]}")
+            lines += ["", f"Approve 👉 {link}"]
+            msg = "\n".join(lines)
+            media_url = None
+            try:
+                media_url = await _generate_signal_chart(tk, sig)
+            except Exception as ce:
+                log.debug("trade-request chart skipped: %s", ce)
+            await asyncio.to_thread(send_sms, phone, msg, None, media_url)
+        else:
+            rows = [
+                f"• {str(s.get('ticker','')):<5} {sc:>3.0f}/100  +{s.get('target_pct','?')}%"
+                for s, sc in fresh
+            ]
+            top_tk = str(fresh[0][0].get("ticker", ""))
+            # One SMS carries one image → attach the TOP name's chart; the rest
+            # have per-name charts on the approve screen.
+            media_url = None
+            try:
+                media_url = await _generate_signal_chart(top_tk, fresh[0][0])
+            except Exception as ce:
+                log.debug("digest chart skipped: %s", ce)
+            msg = "\n".join([
+                f"📈 Agentic Trader — {len(fresh)} trade requests",
+                "",
+                *rows,
+                "",
+                (f"📊 {top_tk} chart below · charts for the rest on the approve screen"
+                 if media_url else "Charts on the approve screen"),
+                f"Review & approve 👉 {link}",
+            ])
+            await asyncio.to_thread(send_sms, phone, msg, None, media_url)
+
+        for sig, score in fresh:
+            alert_cooldown.record_alert(f"thematic:{email}", str(sig.get("ticker", "")), score=score, kind="BUY")
+        log.info("Thematic trade-request digest sent to %s (%d tickers)", email[:20], len(fresh))
+        return len(fresh)
     except Exception as e:
         log.warning("_notify_thematic_trade_request failed: %s", e)
+        return 0
 
 
 async def _auto_execute_confirmed_signals(signals: list[dict]) -> None:
@@ -2088,6 +3103,7 @@ async def _auto_execute_confirmed_signals(signals: list[dict]) -> None:
                 continue
             threshold = float(hil.get("auto_trade_score", 75.0))
             user_mock = {"email": email}
+            to_notify: list = []   # (sig, score) collected → ONE digest text per user
             for sig in signals:
                 score = _sig_score(sig)
                 if score < threshold:
@@ -2116,9 +3132,12 @@ async def _auto_execute_confirmed_signals(signals: list[dict]) -> None:
                         log.info("Auto-trade paper skip %s for %s: %s", sig["ticker"], email, he.detail)
                     except Exception as e:
                         log.warning("Auto-trade paper error %s for %s: %s", sig["ticker"], email, e)
-                # Live leg: text a trade request the user approves with one tap.
                 if sms_on:
-                    await _notify_thematic_trade_request(email, sig, score)
+                    to_notify.append((sig, score))
+            # Live leg: ONE batched trade-request digest per user (cooldown-filtered
+            # inside) instead of a separate text per ticker.
+            if to_notify:
+                await _notify_thematic_trade_request(email, to_notify)
     except Exception as e:
         log.warning("_auto_execute_confirmed_signals: %s", e)
 
@@ -2244,6 +3263,8 @@ async def _run_scan() -> None:
             source_label += " · Marketaux"
         _set_status("running", f"Scraping {source_label}...")
         try:
+            _reset_social_intent()   # fresh per scan — many sources write it (reddit,
+                                     # RSS-tweets, news); must reset ONCE before the gather.
             _st = _scan_source_timeout()
             def _b(coro):
                 # Bound each source: a hung/rate-limited scraper times out to a
@@ -2305,6 +3326,12 @@ async def _run_scan() -> None:
             for i, name in enumerate(_SOURCE_NAMES):
                 if isinstance(gather_results[i], Exception):
                     log.warning("Source %s exception: %s", name, gather_results[i])
+            # Record per-source health (ok/empty/error/timeout + counts) so a
+            # silently-dead feed shows up in /status instead of staying hidden.
+            _record_source_health(gather_results, _SOURCE_NAMES)
+            _dead = _source_health_summary().get("dead_sources", [])
+            if _dead:
+                log.warning("Thematic source health: DEAD/STALE sources: %s", _dead)
 
             _set_status("running", "Ranking tickers...")
             ranked, source_breakdown = await _merge_signals(
@@ -2391,12 +3418,47 @@ async def _run_scan() -> None:
             # holds even when the live positions scrape fails.
             _existing_portfolio |= _brain_held_tickers()
 
-            # Replace all pending signals with fresh results from this scan
+            # Carry forward still-valid pending signals instead of wiping them.
+            # The old wipe gave every pending a 1-scan lifetime, so a persistently
+            # hot name dropped out then re-appeared the next scan (flip-flop) and
+            # re-paged the user. Now a pending survives until approved/skipped or it
+            # ages past THEMATIC_SIGNAL_TTL_HOURS; its score is refreshed in place.
             data = _load_signals()
-            _already_pending = {s["ticker"] for s in data["signals"] if s.get("status") == "pending"}
-            data["signals"] = [s for s in data["signals"] if s.get("status") != "pending"]
             now = time.time()
             score_dict = dict(ranked)
+            ttl_sec = _signal_ttl_hours() * 3600.0
+            carried_pending: list[dict] = []
+            prior_history: list[dict] = []
+            for s in data["signals"]:
+                if s.get("status") != "pending":
+                    prior_history.append(s)
+                    continue
+                if ttl_sec > 0 and (now - _signal_ts_epoch(s)) > ttl_sec:
+                    s["status"] = "expired"
+                    s["expired_at"] = now
+                    prior_history.append(s)
+                    continue
+                t = s.get("ticker")
+                if t in score_dict:   # refresh live score; keep notified_at/entry ctx
+                    s["raw_score"] = score_dict.get(t, s.get("raw_score", 0))
+                    _bs = _blended_sentiment(t, float(s.get("sentiment", 0) or 0))
+                    s["sentiment"] = _bs
+                    s["score"] = composite_score(
+                        int(s.get("conviction", 7) or 7),
+                        float(s.get("raw_score", 0) or 0),
+                        _bs,
+                    )
+                # Drop a carried signal whose score fell below the buy floor — it's
+                # no longer a valid candidate, so expiring it won't re-add/flip-flop.
+                if float(s.get("score", 0) or 0) < MIN_COMPOSITE_SCORE:
+                    s["status"] = "expired"
+                    s["expired_at"] = now
+                    prior_history.append(s)
+                    continue
+                carried_pending.append(s)
+            _already_pending = {s["ticker"] for s in carried_pending}
+            data["signals"] = carried_pending + prior_history
+            created_this_scan: list[str] = []
             seen: set[str] = set()
 
             # ── Portfolio-manager policy: manage-first, capacity, top-N ──────────
@@ -2451,6 +3513,14 @@ async def _run_scan() -> None:
                     log.debug("Signal skip: %s already pending approval", t)
                     continue
 
+                # BLOCK net-sell names: social chatter is net-selling/warning, so
+                # don't open a BUY here even if residual buzz ranked it (intent
+                # classifier). The avoid flag + reason ride source_breakdown.
+                if source_breakdown.get(t, {}).get("avoid"):
+                    log.info("Signal skip: %s flagged avoid (net social selling: %s)",
+                             t, source_breakdown.get(t, {}).get("sell_intent_reason", ""))
+                    continue
+
                 # Policy gate: when active, only the top actionable tickers pass
                 # (suppress_generation ⇒ empty dict ⇒ nothing passes this cycle).
                 if policy_by_ticker is not None and t.upper() not in policy_by_ticker:
@@ -2463,6 +3533,16 @@ async def _run_scan() -> None:
                 appearances = c.get("appearances", 1)
                 confirmed = c.get("confirmed", False)
 
+                # Composite admit gate — the real buy floor. Reject sub-threshold names
+                # HERE (the single chokepoint every new signal passes) so a low score can't
+                # leak in via top-N policy selection or the policy-unavailable fallback.
+                _sent = _blended_sentiment(t, pick.get("sentiment", 0.0))
+                _comp = composite_score(pick["conviction"], score_dict.get(t, 0), _sent)
+                if _comp < MIN_COMPOSITE_SCORE:
+                    log.info("Signal skip: %s composite %d < admit floor %d",
+                             t, _comp, int(MIN_COMPOSITE_SCORE))
+                    continue
+
                 data["signals"].append({
                     "id":           f"{t}_{int(now)}",
                     "ticker":       t,
@@ -2473,7 +3553,7 @@ async def _run_scan() -> None:
                     "catalyst":     pick["catalyst"],
                     "bull_case":    pick["bull_case"],
                     "bear_case":    pick["bear_case"],
-                    "sentiment":    pick.get("sentiment", 0.0),
+                    "sentiment":    _sent,
                     "crowd_view":   pick.get("crowd_view", ""),
                     "target_pct":   pick["target_pct"],
                     "stop_pct":     pick["stop_pct"],
@@ -2482,7 +3562,7 @@ async def _run_scan() -> None:
                     "source":       "auto_scan",
                     "ts":           scan_ts,
                     "raw_score":    score_dict.get(t, 0),
-                    "score":        composite_score(pick["conviction"], score_dict.get(t, 0), pick.get("sentiment", 0.0)),
+                    "score":        _comp,
                     "source_breakdown": source_breakdown.get(t, {}),
                     "is_spike":     is_spike,
                     "confirmed":    confirmed,
@@ -2494,20 +3574,61 @@ async def _run_scan() -> None:
                     "capacity_note":  _pd.get("capacity_note", ""),
                     "policy_reason":  _pd.get("reason", ""),
                 })
+                created_this_scan.append(t)
 
             # Trim old non-pending signals (keep last 50)
             pending   = [s for s in data["signals"] if s.get("status") == "pending"]
             history   = [s for s in data["signals"] if s.get("status") != "pending"][-50:]
+
+            # #3 Catalyst materiality: AI rates each pending signal's catalyst +
+            # writes a why_now (shown on the HIL card / SMS). A "none" catalyst is a
+            # momentum-on-hope tell → modest score dampen (mirrors the conviction
+            # cap for catalyst-less names). Best-effort; absence changes nothing.
+            try:
+                mat = await _ai_catalyst_materiality(pending)
+                for s in pending:
+                    m = mat.get(s.get("ticker"))
+                    if not m:
+                        continue
+                    s["catalyst_quality"] = m["catalyst_quality"]
+                    s["why_now"] = m["why_now"]
+                    if m["catalyst_quality"] == "none" and not s.get("_catalyst_dampened"):
+                        s["score"] = int(round(float(s.get("score", 0)) * 0.9))
+                        s["_catalyst_dampened"] = True
+            except Exception as _ce:
+                log.debug("catalyst materiality pass skipped: %s", _ce)
+
+            # #6 AI red-flag deepening: hidden risks the keyword veto misses. A flag
+            # caps the score to the bearish ceiling (≤45, same as the lexicon veto)
+            # so it can never clear an auto-trade gate, and stamps the risk for the
+            # HIL card. Best-effort; the lexicon veto remains regardless.
+            try:
+                rf = await _ai_red_flag_check(pending)
+                for s in pending:
+                    r = rf.get(s.get("ticker"))
+                    if not r:
+                        continue
+                    s["red_flag"] = True
+                    s["red_flag_reason"] = r["risk"]
+                    s["score"] = min(int(s.get("score", 0) or 0), 45)
+                    s["sentiment"] = min(float(s.get("sentiment", 0) or 0), -0.5)
+                    log.info("AI red-flag %s: %s — score capped 45", s.get("ticker"), r["risk"][:60])
+            except Exception as _rfe:
+                log.debug("AI red-flag pass skipped: %s", _rfe)
+
             data["signals"] = pending + history
             data["last_scan"] = scan_ts
             data["policy"] = policy_summary
             _save_signals(data)
 
-            # SMS notify users who have thematic HIL enabled + sms_notify=True
-            if pending:
+            # SMS notify only when this scan produced GENUINELY NEW pending signals —
+            # carried-forward ones were already announced (no re-page on every scan).
+            if created_this_scan:
                 asyncio.create_task(_notify_thematic_hil_pending(len(pending)))
 
-            # Auto-trade: execute confirmed signals for users with auto_trade_paper=True
+            # Auto-trade evaluates all pending; the per-signal trade-request SMS and
+            # paper auto-exec inside are themselves cooldown-gated, so carried signals
+            # don't re-page unless their score/kind materially changed.
             if pending:
                 asyncio.create_task(_auto_execute_confirmed_signals(pending))
 
@@ -2537,10 +3658,33 @@ async def twitter_status(_user: dict = Depends(get_current_user)):
     }
 
 
+def _min_scan_interval_min() -> float:
+    """Minimum minutes between manual scans — a re-scan moments after the last
+    just churns the queue and re-pages. Env THEMATIC_MIN_SCAN_INTERVAL_MIN,
+    default 30; 0 disables. The 4h auto-loop is unaffected (well above this)."""
+    try:
+        return max(0.0, float(os.getenv("THEMATIC_MIN_SCAN_INTERVAL_MIN", "30") or 30))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _last_scan_done_epoch() -> float:
+    """Epoch of the last completed scan (SIGNALS_FILE.last_scan), 0 if unknown."""
+    try:
+        ls = _load_signals().get("last_scan")
+        if ls:
+            import datetime as _dt
+            return _dt.datetime.fromisoformat(str(ls)).timestamp()
+    except Exception:
+        pass
+    return 0.0
+
+
 @router.post("/thematic/auto/scan")
 async def trigger_scan(
     background_tasks: BackgroundTasks,
     user: dict = Depends(get_current_user),
+    force: bool = False,
 ):
     status = {}
     if STATUS_FILE.exists():
@@ -2550,6 +3694,21 @@ async def trigger_scan(
             pass
     if status.get("status") == "running" and not _scan_status_stale(status):
         return {"ok": True, "message": "Scan already running", "status": "running"}
+    # Min-interval guard: refuse a manual re-scan too soon after the last completed
+    # one (it only churns the queue + re-pages). Bypass with force=true.
+    if not force:
+        last = _last_scan_done_epoch()
+        gap = _min_scan_interval_min() * 60.0
+        if last and gap > 0 and (time.time() - last) < gap:
+            ago = int((time.time() - last) / 60)
+            wait = max(1, int((gap - (time.time() - last)) / 60))
+            return {
+                "ok": True, "skipped": True, "status": "throttled",
+                "message": (
+                    f"Last scan {ago}m ago (min interval {int(gap / 60)}m). "
+                    f"Retry in ~{wait}m or pass force=true."
+                ),
+            }
     if _scan_status_stale(status):
         log.warning("Thematic scan status stale (ts=%s) — overriding, starting fresh scan", status.get("ts"))
     background_tasks.add_task(_run_scan)
@@ -2558,12 +3717,18 @@ async def trigger_scan(
 
 @router.get("/thematic/auto/status")
 async def scan_status(_user: dict = Depends(get_current_user)):
+    base = {"status": "idle", "detail": "No scan run yet", "ts": 0}
     if STATUS_FILE.exists():
         try:
-            return json.loads(STATUS_FILE.read_text())
+            base = json.loads(STATUS_FILE.read_text())
         except Exception:
             pass
-    return {"status": "idle", "detail": "No scan run yet", "ts": 0}
+    # Per-source health so a silently-dead feed is visible here, not hidden.
+    try:
+        base["source_health"] = _source_health_summary()
+    except Exception:
+        pass
+    return base
 
 
 @router.get("/thematic/auto/signals")
@@ -2714,6 +3879,198 @@ def _adaptive_dollar(account_value: float, score: float, target_pct: float, hil:
     cap = account_value * (float(_CAP) / 100.0)
     floor = float(hil.get("min_dollar", 25.0))
     return round(max(floor, min(dollar, cap)), 2)
+
+
+# ── Portfolio-aware sizing (whole-book optimization, not size-in-isolation) ──────
+_SECTOR_CACHE: dict[str, str] = {}
+_SECTOR_CACHE_FILE = TMP / "sector_cache.json"
+_GICS_SECTORS = {
+    "Technology", "Health Care", "Financials", "Consumer Discretionary",
+    "Consumer Staples", "Energy", "Industrials", "Materials", "Utilities",
+    "Real Estate", "Communication Services",
+}
+
+
+def _load_sector_cache() -> None:
+    if _SECTOR_CACHE:
+        return
+    try:
+        _SECTOR_CACHE.update(json.loads(_SECTOR_CACHE_FILE.read_text()))
+    except Exception:
+        pass
+
+
+def _ai_sector_fill(ticker: str) -> str:
+    """#5 Ask the free AI for a ticker's GICS sector when yfinance has none (common
+    for small-caps the portfolio sizer must still sector-cap). Returns "" if AI off
+    or the reply isn't a recognized sector."""
+    if not _ai_intent_enabled():
+        return ""
+    sys = ("You map a US stock ticker to its GICS sector. Reply with ONLY the sector "
+           "name, exactly one of: Technology, Health Care, Financials, Consumer "
+           "Discretionary, Consumer Staples, Energy, Industrials, Materials, Utilities, "
+           "Real Estate, Communication Services. If unknown, reply Unknown.")
+    txt = (_ai_complete_sync(sys, f"Ticker: {ticker}. Sector?", prefer="cheap", max_tokens=20) or "").strip()
+    for s in _GICS_SECTORS:
+        if s.lower() in txt.lower():
+            return s
+    return ""
+
+
+def _sector_of(ticker: str) -> "str | None":
+    """Best-effort GICS sector for a ticker, cached (persistent). yfinance first;
+    if it has none, the free AI fills it (so the sizer's sector-concentration cap
+    works on small-caps too). None only when both fail."""
+    t = (ticker or "").strip().upper()
+    if not t:
+        return None
+    _load_sector_cache()
+    if t in _SECTOR_CACHE:
+        return _SECTOR_CACHE[t] or None
+    sec = ""
+    try:
+        import yfinance as yf
+        info = getattr(yf.Ticker(t), "info", None) or {}
+        sec = (info.get("sector") or "").strip()
+    except Exception:
+        sec = ""
+    if not sec:
+        sec = _ai_sector_fill(t)        # AI gap-fill for small-caps
+    _SECTOR_CACHE[t] = sec
+    try:
+        _atomic_write(_SECTOR_CACHE_FILE, _SECTOR_CACHE)
+    except Exception:
+        pass
+    return sec or None
+
+
+def _closes_map(tickers: "list[str]", period: str = "6mo") -> "dict[str, list[float]]":
+    """One batched daily-close download for vol/correlation. Best-effort → {}."""
+    out: dict[str, list[float]] = {}
+    uniq = list(dict.fromkeys(t.upper() for t in tickers if t))
+    if not uniq:
+        return out
+    try:
+        import yfinance as yf
+        df = yf.download(uniq, period=period, auto_adjust=True, progress=False, threads=False)
+        if df is None or getattr(df, "empty", True):
+            return out
+        close = df["Close"] if "Close" in getattr(df, "columns", []) else df
+        if hasattr(close, "columns"):           # multi-ticker frame
+            for t in uniq:
+                if t in close.columns:
+                    s = close[t].dropna().tolist()
+                    if len(s) >= 5:
+                        out[t] = s
+        else:                                    # single-ticker series
+            s = close.dropna().tolist()
+            if len(s) >= 5:
+                out[uniq[0]] = s
+    except Exception:
+        pass
+    return out
+
+
+def _adv_dollars_for(ticker: str, period: str = "1mo") -> "float | None":
+    """Average daily DOLLAR volume (mean of last ~20d share volume × last close).
+    Best-effort liquidity input for the sizer; None on any failure → neutral."""
+    t = (ticker or "").strip().upper()
+    if not t:
+        return None
+    try:
+        import math as _m
+        import yfinance as yf
+        df = yf.download(t, period=period, auto_adjust=True, progress=False, threads=False)
+        if df is None or getattr(df, "empty", True):
+            return None
+        cols = getattr(df, "columns", [])
+        if "Volume" not in cols or "Close" not in cols:
+            return None
+        vol, close = df["Volume"], df["Close"]
+        if hasattr(vol, "columns"):       # multi-ticker frame → take first column
+            vol, close = vol.iloc[:, 0], close.iloc[:, 0]
+        v = float(vol.dropna().tail(20).mean())
+        p = float(close.dropna().iloc[-1])
+        adv = v * p
+        return adv if (_m.isfinite(adv) and adv > 0) else None
+    except Exception:
+        return None
+
+
+async def _portfolio_aware_dollar(email, sig, account_value, target_pct, stop_pct, hil):
+    """Whole-portfolio dollar size for a thematic approval.
+
+    Returns ``(dollars, info_dict)`` on success (dollars may be 0.0 if no room —
+    e.g. sector/heat cap binding), or ``(None, None)`` if portfolio context could
+    not be built (caller then falls back to the legacy adaptive sizer). Volatility,
+    correlation, and sector are best-effort, bounded by a timeout, and degrade to a
+    neutral factor — they never block sizing.
+    """
+    try:
+        from tradingagents.portfolio import position_sizer as ps
+        from web.api.thematic_portfolio import PAPER_STATE_FILE
+
+        ticker = str(sig.get("ticker", "")).upper()
+        conviction = int(sig.get("conviction", 7) or 7)
+        score = float(sig.get("score") or 0)
+        av = float(account_value or 0)
+        if av <= 0:
+            return None, None
+
+        st = json.loads(PAPER_STATE_FILE.read_text()) if PAPER_STATE_FILE.exists() else {}
+        positions = st.get("positions", {}) or {}
+        cash = float(st.get("cash", 0) or 0)
+
+        # Bounded best-effort enrichment: sectors (book + candidate) + closes for
+        # vol/correlation. On timeout/failure we keep neutral factors and still
+        # size off conviction/score + the hard portfolio constraints.
+        vol = None
+        max_corr = None
+        adv_dollars = None
+        sectors: dict[str, str | None] = {}
+        book_tickers = [str(tk).upper() for tk in positions.keys()]
+        try:
+            async def _enrich():
+                want = list(dict.fromkeys([ticker] + book_tickers))
+                secs, closes, adv = await asyncio.gather(
+                    asyncio.gather(*[asyncio.to_thread(_sector_of, t) for t in want]),
+                    asyncio.to_thread(_closes_map, want),
+                    asyncio.to_thread(_adv_dollars_for, ticker),
+                )
+                return {t: s for t, s in zip(want, secs)}, closes, adv
+            sectors, closes, adv_dollars = await asyncio.wait_for(_enrich(), timeout=12.0)
+            cand_closes = closes.get(ticker)
+            if cand_closes:
+                vol = ps.realized_vol_pct(cand_closes)
+                book = {t: c for t, c in closes.items() if t != ticker}
+                if book:
+                    from tradingagents.portfolio.correlation import max_correlation
+                    mc = max_correlation(cand_closes, book)
+                    max_corr = mc.get("max_corr") if isinstance(mc, dict) else None
+        except Exception:
+            sectors = {}
+
+        existing = []
+        for tk, p in positions.items():
+            val = float(p.get("entry_price", 0) or 0) * float(p.get("shares", 0) or 0)
+            existing.append(ps.BookPosition(
+                ticker=str(tk).upper(),
+                weight_pct=(val / av * 100.0) if av > 0 else 0.0,
+                sector=sectors.get(str(tk).upper()),
+            ))
+        cand = ps.SizingCandidate(
+            ticker=ticker, conviction=conviction, score=score,
+            expected_return_pct=float(target_pct or 0), stop_pct=float(stop_pct or 0),
+            volatility_pct=vol, sector=sectors.get(ticker), max_corr=max_corr,
+            adv_dollars=adv_dollars,
+        )
+        res = ps.size_position(av, cand, existing, cash_available=cash, cfg=ps.SizerConfig.from_env(hil))
+        log.info("Portfolio-aware size %s: $%.0f (%.1f%%) bound=%s factors=%s",
+                 ticker, res.dollars, res.weight_pct, res.binding_constraint, res.factors)
+        return res.dollars, res.to_dict()
+    except Exception as e:
+        log.warning("portfolio-aware sizing failed (%s) — fallback to adaptive", e)
+        return None, None
 
 
 # ── Breakout confirmation (IREN-class catalyst-mover fast-lane) ──────────────
@@ -3825,13 +5182,36 @@ async def approve_signal(
     _adaptive = bool(hil_settings.get("adaptive_sizing", True))
     _sig_score = float(sig.get("score") or composite_score(conviction, float(sig.get("raw_score", 0) or 0), float(sig.get("sentiment", 0) or 0)))
     _acct_val = _thematic_account_value(user["email"]) if _adaptive else 0.0
+    sizing_info: dict | None = None
     if _explicit_dollar or not use_conviction_scale:
         policy_alloc = base_dollar
     elif _adaptive and _acct_val > 0:
-        # Adaptive: size to the portfolio × signal score × target ambition.
-        policy_alloc = _adaptive_dollar(_acct_val, _sig_score, target_pct, hil_settings)
-        log.info("Adaptive size %s: acct=$%.0f score=%.0f target=%.0f%% → $%.0f",
-                 ticker, _acct_val, _sig_score, target_pct, policy_alloc)
+        # Portfolio-aware: size vs the WHOLE book — conviction × reward/risk ×
+        # inverse-volatility × diversification, hard-capped per-position / per-sector
+        # / portfolio-heat / cash. Falls back to the legacy adaptive sizer only if
+        # portfolio context can't be built (never a silent naive oversize).
+        _pa_dollars, sizing_info = await _portfolio_aware_dollar(
+            user["email"], sig, _acct_val, target_pct, stop_pct, hil_settings
+        )
+        if sizing_info is None:                       # context unavailable → legacy
+            policy_alloc = _adaptive_dollar(_acct_val, _sig_score, target_pct, hil_settings)
+            log.info("Adaptive (fallback) size %s: acct=$%.0f score=%.0f → $%.0f",
+                     ticker, _acct_val, _sig_score, policy_alloc)
+        elif _pa_dollars and _pa_dollars > 0:
+            policy_alloc = _pa_dollars
+        elif body.force:                              # no room, but user forced
+            policy_alloc = _adaptive_dollar(_acct_val, _sig_score, target_pct, hil_settings)
+            log.info("Portfolio-aware found no room for %s but force=true → adaptive $%.0f",
+                     ticker, policy_alloc)
+        else:                                         # no room → block with the reason
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No portfolio room for {ticker}: "
+                    f"{(sizing_info or {}).get('notes') or (sizing_info or {}).get('binding_constraint')}. "
+                    f"Trim/rotate an existing position or pass force=true."
+                ),
+            )
     elif _size_factor > 0:
         policy_alloc = round(base_dollar * _size_factor, 2)
     else:
@@ -4207,6 +5587,7 @@ async def get_brave_usage(_user: dict = Depends(get_current_user)):
 @router.get("/thematic/auto/trending")
 async def get_trending(_user: dict = Depends(get_current_user)):
     """Raw trending data without AI analysis — quick preview. Uses all sources."""
+    _reset_social_intent()   # sources write per-scan intent; reset before the gather
     async with httpx.AsyncClient() as client:
         gather_results = await asyncio.gather(
             _reddit_tickers(client), _ddg_tickers(client), _yahoo_trending(client),

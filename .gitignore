@@ -57,3 +57,10 @@ ds-bundle/
 .design-sync/node_modules
 frontend/dssync-styles.css
 web/static/charts/
+
+# --- local-only / sensitive (hardened 2026-06-21) ---
+.fidelity_session_*
+*.dead_bak_*
+Portfolio_Positions_*.csv
+.design-sync/
+*.dssync.json

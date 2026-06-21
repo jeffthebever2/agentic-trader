@@ -1,8 +1,13 @@
 import time
 import asyncio
+import hashlib
 import logging
 import math
+import os
+from pathlib import Path
+
 from fastapi import APIRouter, Query
+from fastapi.responses import FileResponse, Response
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -205,6 +210,70 @@ async def market_chart(symbol: str = Query("SPY"), period: str = Query("5d"), in
     }
     _chart_cache[key] = result
     return result
+
+
+# ── HIL trade chart (TradingView-style PNG with real entry/stop/target) ──────
+_TRADE_CHART_DIR = Path(__file__).resolve().parent.parent / "static" / "charts"
+_trade_chart_cache: dict = {}     # key -> (path, ts)
+TRADE_CHART_TTL = 900             # 15 min — daily bars; "last" barely moves intraday
+
+
+def _render_trade_chart_sync(symbol, entry, stop, target, stop_pct, target_pct, out_path):
+    """Fetch ~1y daily OHLCV, resolve real levels, render the trade PNG. Sync +
+    network — call via asyncio.to_thread. Returns out_path or None."""
+    data = _flatten_yfinance_columns(_download_symbol(symbol, period="1y", interval="1d"))
+    if getattr(data, "empty", True) or "Close" not in data or len(data) < 20:
+        return None
+    last = float(data["Close"].iloc[-1])
+    e = entry if entry else round(last, 2)
+    s = stop if stop else (round(e * (1 - stop_pct / 100.0), 2) if stop_pct else None)
+    t = target if target else (round(e * (1 + target_pct / 100.0), 2) if target_pct else None)
+    from tradingagents.portfolio.chart import compute_levels, render_trade_chart
+    levels = compute_levels(data["High"].tolist(), data["Low"].tolist(), data["Close"].tolist())
+    return render_trade_chart(
+        symbol, data, entry=e, stop=s, target=t, out_path=out_path, levels=levels,
+    )
+
+
+@router.get("/market/trade-chart.png")
+async def trade_chart_png(
+    ticker: str = Query(...),
+    entry: float | None = Query(None),
+    stop: float | None = Query(None),
+    target: float | None = Query(None),
+    stop_pct: float | None = Query(None),
+    target_pct: float | None = Query(None),
+):
+    """On-demand trade chart for the HIL approval cards. Pass absolute
+    entry/stop/target, or stop_pct/target_pct (entry defaults to last close).
+    404s (so the <img> hides) on any fetch/render failure. Cached 15 min."""
+    sym = (ticker or "").strip().upper()
+    if not sym or not sym.replace("-", "").replace(".", "").isalnum() or len(sym) > 12:
+        return Response(status_code=404)
+
+    def _r(v):
+        try:
+            return round(float(v), 4) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    e, s, t, sp, tp = _r(entry), _r(stop), _r(target), _r(stop_pct), _r(target_pct)
+    key = f"{sym}|{e}|{s}|{t}|{sp}|{tp}"
+    now = time.time()
+    cached = _trade_chart_cache.get(key)
+    headers = {"Cache-Control": "public, max-age=900"}
+    if cached and (now - cached[1]) < TRADE_CHART_TTL and os.path.exists(cached[0]):
+        return FileResponse(cached[0], media_type="image/png", headers=headers)
+    try:
+        _TRADE_CHART_DIR.mkdir(parents=True, exist_ok=True)
+        out = str(_TRADE_CHART_DIR / f"hil_{hashlib.sha1(key.encode()).hexdigest()[:16]}.png")
+        res = await asyncio.to_thread(_render_trade_chart_sync, sym, e, s, t, sp, tp, out)
+    except Exception as ex:
+        log.debug("trade-chart %s: %s", sym, ex)
+        res = None
+    if not res:
+        return Response(status_code=404)
+    _trade_chart_cache[key] = (out, now)
+    return FileResponse(out, media_type="image/png", headers=headers)
 
 
 @router.get("/market/sparklines")

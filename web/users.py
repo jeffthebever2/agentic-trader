@@ -169,10 +169,13 @@ def get_or_create_user(email: str) -> dict[str, Any]:
             "sms_verified": False,    # set after a successful test send
             "last_login_notice_at": 0, # throttles helpful security emails
             # ── Step-up 2FA before placing real trades ──
-            "step_up_method": "none",  # "none" | "totp" | "passkey"
+            "step_up_method": "none",  # "none" | "totp" | "passkey" | "email" | "passcode"
             "totp_secret": "",         # base32 secret, set during enrollment
             "totp_enabled": False,     # True after first valid code confirms enroll
             "passkeys": [],            # list of {id, public_key, sign_count, name, created}
+            "passcode_hash": "",       # PBKDF2-HMAC-SHA256 hex of the trading passcode
+            "passcode_salt": "",       # per-user random salt (hex) for the passcode hash
+            "passcode_enabled": False, # True once a trading passcode is set
         }
         data[email] = record
         _save(data)

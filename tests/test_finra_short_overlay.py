@@ -30,6 +30,14 @@ def test_short_pressure_levels():
     assert t._short_pressure_level(float("nan")) == "unknown"
 
 
+def test_true_short_interest_levels():
+    assert t._short_interest_level({"shortPercentOfFloat": 0.30}) == "extreme"
+    assert t._short_interest_level({"shortFloat": 18}) == "high"  # percent form
+    assert t._short_interest_level({"daysToCover": 8}) == "extreme"
+    assert t._short_interest_level({"borrowFee": 25}) == "high"
+    assert t._short_interest_level({}) == "normal"
+
+
 def test_overlay_disabled_by_default(monkeypatch):
     monkeypatch.delenv("THEMATIC_SHORT_OVERLAY", raising=False)
     assert t._finra_short_map(fetch=lambda: _FILE) == {}
@@ -40,6 +48,17 @@ def test_overlay_cached_map(monkeypatch):
     t._finra_short_cache.update({"day": "", "map": {}})
     m = t._finra_short_map(fetch=lambda: _FILE, day="2026-06-19")
     assert m["HEAVY"] == 0.7
+
+
+def test_true_short_interest_map_flagged(monkeypatch):
+    monkeypatch.setenv("THEMATIC_TRUE_SHORT_INTEREST", "true")
+    t._true_short_cache.update({"day": "", "map": {}})
+    m = t._true_short_interest_map(
+        universe=["SQUEEZE", "NORMAL"],
+        fetch=lambda tk: {"shortPercentOfFloat": 0.27} if tk == "SQUEEZE" else {"shortPercentOfFloat": 0.05},
+        day="2026-06-19",
+    )
+    assert m == {"SQUEEZE": "extreme"}
 
 
 def test_overlay_not_additive_to_score():

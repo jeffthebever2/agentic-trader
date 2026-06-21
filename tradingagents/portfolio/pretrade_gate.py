@@ -25,6 +25,7 @@ class PreTradeGate:
         max_spread_bps:        reject if (ask-bid)/mid > this in basis points (default 75)
     """
 
+    # Keep in sync with tradingagents.data.quote_gateway.TRUSTED_SOURCES.
     TRUSTED_SOURCES = frozenset({
         "alpaca",
         "alpaca_iex",
@@ -32,6 +33,7 @@ class PreTradeGate:
         "fidelity",
         "fidelity_realtime",
         "finnhub",
+        "fmp",            # Financial Modeling Prep — the configured trusted provider
         "ibkr",
         "iex",
         "polygon",

@@ -36,6 +36,7 @@ from web.api.ml import router as ml_router
 from web.api.rl import router as rl_router
 from web.api.webull_portfolio import router as webull_router
 from web.api.fidelity import router as fidelity_router
+from web.api.performance import router as performance_router
 from web.api.holdings_brain import router as holdings_brain_router
 from web.api.scanner import router as scanner_router
 from web.api.market import router as market_router
@@ -307,6 +308,7 @@ app.include_router(ml_router, prefix="/api")
 app.include_router(rl_router, prefix="/api")
 app.include_router(webull_router, prefix="/api")
 app.include_router(fidelity_router, prefix="/api")
+app.include_router(performance_router, prefix="/api")
 app.include_router(holdings_brain_router, prefix="/api")
 app.include_router(scanner_router, prefix="/api")
 app.include_router(market_router, prefix="/api")
@@ -517,7 +519,9 @@ async def _fidelity_keepalive_loop():
             from pathlib import Path as _Path
             from web.api.fidelity import (
                 _ensure_browser, _save_storage, _set_session_cache, SUMMARY_URL,
-                _auto_relogin, _is_authenticated_url, _ORDER_IN_FLIGHT, _user_key,
+                _auto_relogin, _is_authenticated_url, _ORDER_IN_FLIGHT,
+                _LOGIN_IN_FLIGHT, _is_manual_login_required, _user_key,
+                _revalidate_positions, _revalidate_accounts,
             )
             root = _Path(__file__).parent.parent
 
@@ -540,8 +544,10 @@ async def _fidelity_keepalive_loop():
                 parts = sf.stem.rsplit("_", 1)
                 digest = parts[-1] if len(parts) == 2 else ""
                 email = digest_to_email.get(digest, digest)  # use email if known
-                if _user_key(email) in _ORDER_IN_FLIGHT:
-                    continue  # don't touch the browser while an order is placing
+                if _user_key(email) in _ORDER_IN_FLIGHT or _user_key(email) in _LOGIN_IN_FLIGHT:
+                    continue  # don't touch the browser during an order or interactive login
+                if _is_manual_login_required(email):
+                    continue  # device untrusted → don't open a browser / hit Fidelity (rate-limit)
                 try:
                     ctx = await _ensure_browser(email)
                     page = await ctx.new_page()
@@ -554,6 +560,20 @@ async def _fidelity_keepalive_loop():
                             await _save_storage(email)
                             _set_session_cache(email, True)
                             _log.debug("Session kept alive: %s", email[:20])
+                            # Warm the holdings/balances snapshots so the Broker page
+                            # loads instantly from cache (no 20-40s scrape on click).
+                            try:
+                                await _revalidate_positions(email)
+                                await _revalidate_accounts(email)
+                                # Seed today's portfolio-performance snapshot from the
+                                # just-warmed cache (dedups to one per trading day;
+                                # read-only). Opt out with PERF_SNAPSHOT_ENABLED=false.
+                                import os as _po
+                                if _po.getenv("PERF_SNAPSHOT_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on"):
+                                    from web.api.performance import capture_snapshot as _cap
+                                    await _cap(email, from_cache=True)
+                            except Exception as _ce:
+                                _log.debug("keepalive cache warm %s: %s", email[:20], _ce)
                         else:
                             _set_session_cache(email, False)
                             _log.info("Session expired (keepalive check): %s — attempting silent re-login", email[:20])
@@ -762,9 +782,53 @@ async def _autonomous_live_exit_loop():
 _background_tasks: list[asyncio.Task] = []
 
 
+async def _performance_snapshot_loop():
+    """Once per trading day (after market close) capture a Fidelity account snapshot
+    for each connected user, so portfolio-performance history accrues automatically.
+    Env-gated PERF_SNAPSHOT_ENABLED (default off). Manual capture is always available
+    via POST /api/performance/sync."""
+    import os as _os
+    if _os.getenv("PERF_SNAPSHOT_ENABLED", "false").strip().lower() not in ("1", "true", "yes", "on"):
+        return
+    import datetime as _dt2, hashlib as _hl, json as _json
+    from pathlib import Path as _Path
+    _log = logging.getLogger("performance")
+    await asyncio.sleep(45)  # let the server + sessions warm up
+    from web.api.performance import capture_snapshot, _load_snapshots
+    while True:
+        try:
+            now = _dt2.datetime.now()
+            # capture after 16:05 local on weekdays (US market closed) — one per day
+            after_close = now.weekday() < 5 and (now.hour > 16 or (now.hour == 16 and now.minute >= 5))
+            if after_close:
+                root = _Path(__file__).parent.parent
+                today = _dt2.date.today().isoformat()
+                digest_to_email: dict[str, str] = {}
+                users_file = root / "tmp" / "users.json"
+                if users_file.exists():
+                    for em in _json.loads(users_file.read_text()):
+                        e = (em or "").strip().lower()
+                        if e:
+                            digest_to_email[_hl.sha256(e.encode()).hexdigest()[:16]] = e
+                for sf in root.glob(".fidelity_session_*.json"):
+                    digest = sf.stem.rsplit("_", 1)[-1]
+                    email = digest_to_email.get(digest)
+                    if not email:
+                        continue
+                    snaps = _load_snapshots(email)
+                    if any(s.date == today and s.ok for s in snaps):
+                        continue  # already captured today
+                    res = await capture_snapshot(email)
+                    _log.info("daily perf snapshot %s: %s", email[:20], res)
+        except Exception as e:
+            logging.getLogger("performance").warning("perf snapshot loop error: %s", e)
+        await asyncio.sleep(3600)  # re-check hourly
+
+
 @app.on_event("startup")
 async def _startup():
     _background_tasks.append(asyncio.create_task(_paper_autostart_loop()))
+    _background_tasks.append(asyncio.create_task(_performance_snapshot_loop()))
     _background_tasks.append(asyncio.create_task(_thematic_scan_loop()))
     _background_tasks.append(asyncio.create_task(_fidelity_keepalive_loop()))
     _background_tasks.append(asyncio.create_task(_fd_janitor_loop()))

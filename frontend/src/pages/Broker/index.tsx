@@ -83,7 +83,7 @@ function pnlColor(n: number): string {
 }
 
 function fmtPct(n: number): string {
-  return (n >= 0 ? '+' : '') + (n * 100).toFixed(2) + '%'
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
 }
 
 // ── Shared style snippets ────────────────────────────────────────────────────
@@ -138,26 +138,6 @@ const btnSecondary: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-const tblHead: React.CSSProperties = {
-  fontSize: 11,
-  fontWeight: 600,
-  color: 'var(--ink-faint)',
-  textTransform: 'uppercase',
-  letterSpacing: '.04em',
-  padding: '8px 12px',
-  borderBottom: '1px solid var(--surface-rule)',
-  textAlign: 'left',
-  whiteSpace: 'nowrap',
-}
-
-const tblCell: React.CSSProperties = {
-  fontSize: 12,
-  color: 'var(--ink)',
-  padding: '8px 12px',
-  borderBottom: '1px solid var(--surface-rule)',
-  fontFamily: 'var(--font-mono)',
-  whiteSpace: 'nowrap',
-}
 
 function StatusBadge({ connected }: { connected: boolean }) {
   return (
@@ -194,7 +174,7 @@ function WebullLoginForm({ onSuccess }: { onSuccess: () => void }) {
   const [needsMfa, setNeedsMfa] = useState(false)
 
   const requestMfa = useMutation({
-    mutationFn: () => api.post('/webull/request-mfa'),
+    mutationFn: () => api.post('/webull/request-mfa', { username: email.trim() }),
   })
 
   const loginMut = useMutation({
@@ -214,7 +194,12 @@ function WebullLoginForm({ onSuccess }: { onSuccess: () => void }) {
 
   function handleLogin() {
     setError('')
-    loginMut.mutate({ username: email, password, pin: pin || undefined, mfa_code: mfaCode || undefined })
+    loginMut.mutate({
+      username: email.trim(),
+      password,
+      trading_pin: pin || undefined,
+      mfa_code: mfaCode || undefined,
+    })
   }
 
   return (
@@ -296,7 +281,7 @@ function WebullPinCard({ onUnlocked }: { onUnlocked: () => void }) {
   const [error, setError] = useState('')
 
   const pinMut = useMutation({
-    mutationFn: () => api.post('/webull/trade-pin', { pin: pinVal }),
+    mutationFn: () => api.post('/webull/trade-pin', { trading_pin: pinVal }),
     onSuccess: (res) => {
       if (res.data?.success) { onUnlocked() }
       else setError(res.data?.error ?? 'PIN rejected')
@@ -345,25 +330,25 @@ function WebullPositions() {
         <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>No open positions.</div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table className="data-table">
             <thead>
               <tr>
                 {['Symbol','Qty','Cost','Last','Mkt Value','Unr. P&L','Unr. %',''].map(h => (
-                  <th key={h} style={tblHead}>{h}</th>
+                  <th key={h} className={['Qty','Cost','Last','Mkt Value','Unr. P&L','Unr. %'].includes(h) ? 'num' : undefined}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {positions.map(p => (
                 <tr key={p.symbol}>
-                  <td style={{ ...tblCell, fontWeight: 600 }}>{p.symbol}</td>
-                  <td style={tblCell}>{p.quantity}</td>
-                  <td style={tblCell}>{fmt$(p.cost_basis)}</td>
-                  <td style={tblCell}>{fmt$(p.last_price)}</td>
-                  <td style={tblCell}>{fmt$(p.market_value)}</td>
-                  <td style={{ ...tblCell, color: pnlColor(p.unrealized_pnl) }}>{fmt$(p.unrealized_pnl)}</td>
-                  <td style={{ ...tblCell, color: pnlColor(p.unrealized_pnl_pct) }}>{fmtPct(p.unrealized_pnl_pct)}</td>
-                  <td style={tblCell}></td>
+                  <td className="sym">{p.symbol}</td>
+                  <td className="num font-mono">{p.quantity}</td>
+                  <td className="num font-mono">{fmt$(p.cost_basis)}</td>
+                  <td className="num font-mono">{fmt$(p.last_price)}</td>
+                  <td className="num font-mono">{fmt$(p.market_value)}</td>
+                  <td className="num font-mono" style={{ color: pnlColor(p.unrealized_pnl) }}>{fmt$(p.unrealized_pnl)}</td>
+                  <td className="num font-mono" style={{ color: pnlColor(p.unrealized_pnl_pct) }}>{fmtPct(p.unrealized_pnl_pct)}</td>
+                  <td></td>
                 </tr>
               ))}
             </tbody>
@@ -403,25 +388,25 @@ function WebullOrders() {
         <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>No orders.</div>
       ) : (
         <div style={{ overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <table className="data-table">
             <thead>
               <tr>
                 {['Symbol','Action','Type','Qty','Filled','Price','Avg Fill','Status','Time',''].map(h => (
-                  <th key={h} style={tblHead}>{h}</th>
+                  <th key={h} className={['Qty','Filled','Price','Avg Fill'].includes(h) ? 'num' : undefined}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {orders.map((o, i) => (
                 <tr key={i}>
-                  <td style={{ ...tblCell, fontWeight: 600 }}>{o.symbol}</td>
-                  <td style={{ ...tblCell, color: o.action === 'BUY' ? '#4ade80' : '#f87171' }}>{o.action}</td>
-                  <td style={tblCell}>{o.order_type}</td>
-                  <td style={tblCell}>{o.quantity}</td>
-                  <td style={tblCell}>{o.filled_qty}</td>
-                  <td style={tblCell}>{o.price ? fmt$(o.price) : '—'}</td>
-                  <td style={tblCell}>{o.avg_fill ? fmt$(o.avg_fill) : '—'}</td>
-                  <td style={tblCell}>
+                  <td className="sym">{o.symbol}</td>
+                  <td style={{ color: o.action === 'BUY' ? '#4ade80' : '#f87171', fontWeight: 600 }}>{o.action}</td>
+                  <td>{o.order_type}</td>
+                  <td className="num font-mono">{o.quantity}</td>
+                  <td className="num font-mono">{o.filled_qty}</td>
+                  <td className="num font-mono">{o.price ? fmt$(o.price) : '—'}</td>
+                  <td className="num font-mono">{o.avg_fill ? fmt$(o.avg_fill) : '—'}</td>
+                  <td>
                     <span style={{
                       fontSize: 11, fontWeight: 600, padding: '2px 7px', borderRadius: 999,
                       background: o.status === 'Filled' ? '#4ade8022' : 'var(--surface-raised)',
@@ -429,8 +414,8 @@ function WebullOrders() {
                         : o.status === 'Cancelled' ? '#f87171' : 'var(--ink-faint)',
                     }}>{o.status}</span>
                   </td>
-                  <td style={{ ...tblCell, fontSize: 11, color: 'var(--ink-faint)' }}>{o.create_time}</td>
-                  <td style={tblCell}></td>
+                  <td style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{o.create_time}</td>
+                  <td></td>
                 </tr>
               ))}
             </tbody>
@@ -446,12 +431,12 @@ function WebullOrders() {
 const OrderSchema = z.object({
   symbol:     z.string().min(1, 'Required').max(5).regex(/^[A-Z]+$/, 'Uppercase only'),
   action:     z.enum(['BUY', 'SELL']),
-  order_type: z.enum(['Market', 'Limit']),
+  order_type: z.enum(['Limit']),
   qty:        z.string().min(1, 'Required').refine(v => {
     const n = Number(v)
     return Number.isInteger(n) && n > 0 && n <= 10_000
   }, 'Must be integer 1–10,000'),
-  price:      z.string().optional(),
+  price:      z.string().min(1, 'Required').refine(v => Number(v) > 0, 'Must be greater than 0'),
   tif:        z.enum(['GTC', 'Day']),
 })
 type OrderForm = z.infer<typeof OrderSchema>
@@ -468,7 +453,7 @@ function WebullPlaceOrder() {
     formState: { errors, isSubmitting },
   } = useForm<OrderForm>({
     resolver: zodResolver(OrderSchema),
-    defaultValues: { action: 'BUY', order_type: 'Market', tif: 'GTC' },
+    defaultValues: { action: 'BUY', order_type: 'Limit', tif: 'GTC' },
   })
 
   // eslint-disable-next-line react-hooks/incompatible-library
@@ -494,13 +479,10 @@ function WebullPlaceOrder() {
     const body: Record<string, unknown> = {
       ticker:        values.symbol.toUpperCase(),
       action:        values.action,
-      order_type:    values.order_type === 'Limit' ? 'LMT' : 'MKT',
+      order_type:    'LMT',
       qty:           Number(values.qty),
       time_in_force: values.tif,
-    }
-    if (values.order_type === 'Limit' && values.price) {
-      const p = Number(values.price)
-      if (p > 0) body.price = p
+      price:         Number(values.price),
     }
     orderMut.mutate(body)
   }
@@ -533,7 +515,6 @@ function WebullPlaceOrder() {
           <div>
             <div style={label11}>Order Type</div>
             <select style={inputStyle} {...register('order_type')}>
-              <option value="Market">Market</option>
               <option value="Limit">Limit</option>
             </select>
             {errors.order_type && <div style={fieldErr}>{errors.order_type.message}</div>}
@@ -803,12 +784,22 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
   const [chartStyle, setChartStyle] = useState('1')
 
 
-  const posQ = useQuery<{ positions: FidelityPosition[]; grand_totals: FidelitySummary }>({
+  const posQ = useQuery<{ positions: FidelityPosition[]; grand_totals: FidelitySummary; cached?: boolean; stale?: boolean; age_seconds?: number }>({
     queryKey: ['fidelity', 'positions'],
     queryFn: () => api.get('/fidelity/positions').then(r => r.data),
     refetchInterval: 60_000,
   })
 
+  // The normal load is served instantly from the backend snapshot cache. An
+  // explicit Refresh forces a fresh Fidelity scrape (?refresh=1).
+  const refreshMut = useMutation({
+    mutationFn: () => api.get('/fidelity/positions', { params: { refresh: 1 }, timeout: 60_000 }).then(r => r.data),
+    onSuccess: (data) => {
+      qc.setQueryData(['fidelity', 'positions'], data)
+      qc.invalidateQueries({ queryKey: ['fidelity', 'status'] })
+    },
+  })
+  const refreshing = refreshMut.isPending || posQ.isFetching
   const refreshedAt = posQ.dataUpdatedAt ? new Date(posQ.dataUpdatedAt) : null
 
   const fidStatusQ = useQuery<FidelityStatus>({
@@ -839,7 +830,7 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden', minHeight: 0 }}>
       {/* Stats bar */}
-      <div style={{ background: 'var(--surface)', borderBottom: '1px solid var(--surface-rule)', padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 0, flexShrink: 0, minHeight: 54 }}>
+      <div className="fidelity-statsbar" style={{ background: 'var(--surface)', borderBottom: '1px solid var(--surface-rule)', padding: '10px 20px', display: 'flex', alignItems: 'center', gap: 0, flexShrink: 0, minHeight: 54 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingRight: 20, borderRight: '1px solid var(--surface-rule)', marginRight: 20, flexShrink: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)' }}>Fidelity</div>
           <span style={{
@@ -873,7 +864,7 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
           </div>
         )}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
-          <button style={btnSecondary} onClick={() => qc.invalidateQueries({ queryKey: ['fidelity'] })}>↻ Refresh</button>
+          <button style={btnSecondary} onClick={() => refreshMut.mutate()} disabled={refreshing}>{refreshing ? 'Refreshing…' : '↻ Refresh'}</button>
           <button style={{ ...btnSecondary, color: '#ef4444' }} onClick={() => logoutMut.mutate()} disabled={logoutMut.isPending}>
             {logoutMut.isPending ? 'Disconnecting…' : 'Disconnect'}
           </button>
@@ -881,20 +872,22 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
       </div>
 
       {/* Body: holdings sidebar + chart */}
-      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', minHeight: 0 }}>
+      <div className="fidelity-body" style={{ flex: 1, overflow: 'hidden', display: 'flex', minHeight: 0 }}>
         {/* Holdings sidebar */}
-        <div style={{ width: 288, borderRight: '1px solid var(--surface-rule)', display: 'flex', flexDirection: 'column', flexShrink: 0, background: 'var(--surface)' }}>
+        <div className="fidelity-holdings" style={{ width: 288, borderRight: '1px solid var(--surface-rule)', display: 'flex', flexDirection: 'column', flexShrink: 0, background: 'var(--surface)' }}>
           <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '.06em' }}>Holdings</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {refreshedAt && (
+              {refreshing ? (
+                <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>updating…</span>
+              ) : refreshedAt ? (
                 <span style={{ fontSize: 10, color: 'var(--ink-faint)' }}>
                   {refreshedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
                 </span>
-              )}
-              <button onClick={() => qc.invalidateQueries({ queryKey: ['fidelity', 'positions'] })}
-                style={{ fontSize: 14, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 700, lineHeight: 1, padding: 0 }}
-                title="Refresh positions">↻ Refresh</button>
+              ) : null}
+              <button onClick={() => refreshMut.mutate()} disabled={refreshing}
+                style={{ fontSize: 14, color: 'var(--accent)', background: 'none', border: 'none', cursor: refreshing ? 'default' : 'pointer', fontWeight: 700, lineHeight: 1, padding: 0, opacity: refreshing ? 0.5 : 1 }}
+                title="Force a fresh Fidelity scrape">↻ Refresh</button>
             </div>
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -954,7 +947,7 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
         </div>
 
         {/* Chart area */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
+        <div className="fidelity-chart" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
           {/* Chart toolbar */}
           <div style={{ padding: '8px 16px', borderBottom: '1px solid var(--surface-rule)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0, background: 'var(--surface)' }}>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flex: 1, minWidth: 0, overflow: 'hidden' }}>
@@ -1034,7 +1027,7 @@ function FidelityPanel() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden', minHeight: 0, margin: -24 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden', minHeight: 0 }}>
       {showLogin
         ? <FidelityLoginForm onConnected={handleConnected} />
         : <FidelityTradingPanel onDisconnect={() => setForceLogin(true)} />

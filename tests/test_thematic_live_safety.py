@@ -23,9 +23,11 @@ def test_thematic_fidelity_approval_preserves_execution_quote_evidence():
         body,
         stop_pct=5.0,
         target_pct=10.0,
+        dollar_amount=750.0,
     )
 
     assert payload["ticker"] == "AAPL"
+    assert payload["dollar_amount"] == pytest.approx(750.0)
     assert payload["execute"] is True
     assert payload["also_paper_trade"] is False
     assert payload["quote_time"] == "2026-06-06T14:00:00"

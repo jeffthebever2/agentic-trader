@@ -10,7 +10,7 @@ export const loginWebull        = (body: Record<string, unknown>) => api.post('/
 export const logoutWebull       = () => api.post('/webull/logout')
 export const requestWebullMfa   = (body: Record<string, unknown>) => api.post('/webull/request-mfa', body)
 export const refreshWebull      = () => api.post('/webull/refresh')
-export const setWebullTradePin  = (pin: string) => api.post('/webull/trade-pin', { pin })
+export const setWebullTradePin  = (pin: string) => api.post('/webull/trade-pin', { trading_pin: pin })
 
 // ── Fidelity ──────────────────────────────────────────────────────────────
 export const getFidelityStatus    = () => api.get('/fidelity/status').then(r => r.data)

@@ -1,6 +1,7 @@
 """Pure correlation concentration guard. Catches hidden concentration the per-name
 / per-theme caps miss (a book of names that all gap together). Network-free."""
 from tradingagents.portfolio import correlation as c
+import web.api.thematic_auto as t
 
 
 def test_pct_returns_and_pearson_identical():
@@ -42,3 +43,30 @@ def test_fail_open_on_thin_data():
 def test_garbage_safe():
     assert c.pearson([float("nan")] * 8, [1, 2, 3, 4, 5, 6, 7, 8]) is None
     assert c.correlation_ok([], {"X": [1, 2, 3, 4, 5, 6]}) is True
+
+
+def test_thematic_correlation_guard_default_off(monkeypatch):
+    monkeypatch.delenv("THEMATIC_CORRELATION_GUARD", raising=False)
+
+    ok, reason = t._correlation_guard_for_book(
+        "AAA",
+        ["BBB"],
+        fetch_bars=lambda tk: {"closes": [1, 2, 3, 4, 5, 6]},
+    )
+
+    assert ok is True
+    assert "disabled" in reason
+
+
+def test_thematic_correlation_guard_blocks_cluster(monkeypatch):
+    monkeypatch.setenv("THEMATIC_CORRELATION_GUARD", "true")
+    cand = [10, 11, 12, 13, 14, 15, 16]
+    same = [20, 22, 24, 26, 28, 30, 32]
+
+    def _bars(ticker):
+        return {"closes": cand if ticker == "AAA" else same}
+
+    ok, reason = t._correlation_guard_for_book("AAA", ["BBB"], fetch_bars=_bars, max_corr=0.85)
+
+    assert ok is False
+    assert "correlation" in reason

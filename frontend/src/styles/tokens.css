@@ -1202,3 +1202,13 @@ body.theme-dark #ta-sidebar {
 .data-table .num, .data-table td.num, .data-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .data-table .sym { font-weight: 700; color: var(--ink); }
 body.theme-dark .data-table thead th { background: var(--surface); }
+
+
+/* Portfolio Performance — mobile */
+@media (max-width: 860px) {
+  #panel-performance { padding: 14px !important; }
+  #panel-performance * { min-width: 0 !important; }
+}
+@media (max-width: 640px) {
+  #panel-performance { padding: 10px !important; }
+}

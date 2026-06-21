@@ -86,3 +86,57 @@ def test_webull_endpoint_requires_live_trading_enabled(monkeypatch):
 
     assert exc.value.status_code == 403
     assert "LIVE_TRADING_ENABLED" in str(exc.value.detail)
+
+
+class _FakeWebull:
+    _access_token = "access"
+    _trade_token = "trade"
+    _account_id = "acct"
+    _token_expire = None
+
+    def __init__(self):
+        self.placed = None
+
+    def get_quote(self, symbol):
+        return {"price": "100.01", "bid": "100.00", "ask": "100.02"}
+
+    def place_order(self, **kwargs):
+        self.placed = kwargs
+        return {"orderId": "order-1"}
+
+
+@pytest.mark.unit
+def test_webull_endpoint_enriches_missing_quote_from_broker(monkeypatch):
+    fake = _FakeWebull()
+    monkeypatch.setattr(webull_portfolio, "LIVE_TRADING_HARD_BLOCKED", False)
+    monkeypatch.setattr(webull_portfolio, "live_trading_enabled", lambda: True)
+    monkeypatch.setattr(webull_portfolio, "_get_wb", lambda email: fake)
+
+    req = _request(quote_time=None, quote_source=None)
+    result = asyncio.run(webull_portfolio.wb_place_order(req, {"email": "u@example.com"}))
+
+    assert result["success"] is True
+    assert fake.placed == {
+        "stock": "AAPL",
+        "action": "BUY",
+        "orderType": "LMT",
+        "enforce": "GTC",
+        "quant": 10,
+        "price": 100.0,
+    }
+
+
+@pytest.mark.unit
+def test_webull_endpoint_blocks_when_broker_quote_unusable(monkeypatch):
+    fake = _FakeWebull()
+    fake.get_quote = lambda symbol: {"price": 0}
+    monkeypatch.setattr(webull_portfolio, "LIVE_TRADING_HARD_BLOCKED", False)
+    monkeypatch.setattr(webull_portfolio, "live_trading_enabled", lambda: True)
+    monkeypatch.setattr(webull_portfolio, "_get_wb", lambda email: fake)
+
+    req = _request(quote_time=None, quote_source=None)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(webull_portfolio.wb_place_order(req, {"email": "u@example.com"}))
+
+    assert exc.value.status_code == 502
+    assert fake.placed is None

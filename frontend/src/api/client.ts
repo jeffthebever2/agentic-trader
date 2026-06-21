@@ -2,7 +2,9 @@ import axios, { type AxiosError } from 'axios'
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 30_000,
+  // 60s default — Playwright-backed broker endpoints (positions/summary scrape)
+  // routinely take 20-40s. Order placement overrides this to 180s per-call.
+  timeout: 60_000,
   withCredentials: true,   // preserve session cookies (same as old fetch)
 })
 

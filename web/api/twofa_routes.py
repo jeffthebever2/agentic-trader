@@ -41,6 +41,12 @@ class CodeBody(BaseModel):
     code: str = Field(..., min_length=4, max_length=10)
 
 
+class StepUpCodeBody(BaseModel):
+    # Wider than CodeBody so a multi-char trading passcode is accepted; a short
+    # wrong guess returns 401 (invalid) rather than a 422 validation error.
+    code: str = Field(..., min_length=1, max_length=64)
+
+
 @router.post("/auth/2fa/totp/activate")
 async def totp_activate(body: CodeBody, user: dict[str, Any] = Depends(get_current_user)):
     if not twofa.totp_activate(user["email"], body.code):
@@ -89,7 +95,7 @@ async def passkey_remove(passkey_id: str, user: dict[str, Any] = Depends(get_cur
 
 
 class MethodBody(BaseModel):
-    method: str = Field(..., pattern="^(none|totp|passkey|email)$")
+    method: str = Field(..., pattern="^(none|totp|passkey|email|passcode)$")
 
 
 @router.post("/auth/2fa/method")
@@ -102,8 +108,31 @@ async def set_method(body: MethodBody, user: dict[str, Any] = Depends(get_curren
         raise HTTPException(status_code=400, detail="No passkey registered")
     if body.method == "email" and not st["email_enabled"]:
         raise HTTPException(status_code=400, detail="Email sending is not configured")
+    if body.method == "passcode" and not st.get("passcode_enabled"):
+        raise HTTPException(status_code=400, detail="No trading passcode set")
     user_store.update_user(user["email"], step_up_method=body.method)
     return {"ok": True, "method": body.method}
+
+
+# ── Trading passcode enrollment ────────────────────────────────────
+class PasscodeBody(BaseModel):
+    passcode: str = Field(..., min_length=6, max_length=64)
+
+
+@router.post("/auth/2fa/passcode/set")
+async def passcode_set(body: PasscodeBody, user: dict[str, Any] = Depends(get_current_user)):
+    """Set (or replace) the trading passcode; makes it the active step-up method."""
+    try:
+        twofa.set_passcode(user["email"], body.passcode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "method": "passcode"}
+
+
+@router.post("/auth/2fa/passcode/disable")
+async def passcode_disable(user: dict[str, Any] = Depends(get_current_user)):
+    twofa.passcode_disable(user["email"])
+    return {"ok": True}
 
 
 # ── Step-up challenge (run right before a trade) ───────────────────
@@ -111,6 +140,26 @@ async def set_method(body: MethodBody, user: dict[str, Any] = Depends(get_curren
 async def step_up_totp(body: CodeBody, user: dict[str, Any] = Depends(get_current_user)):
     if not twofa.totp_verify(user["email"], body.code):
         raise HTTPException(status_code=401, detail="Invalid code")
+    return {"step_up_token": twofa.issue_step_up_token(user["email"])}
+
+
+@router.post("/auth/2fa/step-up/passcode")
+async def step_up_passcode(body: StepUpCodeBody, user: dict[str, Any] = Depends(get_current_user)):
+    locked = twofa.passcode_lockout_remaining(user["email"])
+    if locked > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many attempts — try again in {locked}s.",
+        )
+    if not twofa.verify_passcode(user["email"], body.code):
+        # Surface a fresh lockout immediately if this attempt tripped it.
+        again = twofa.passcode_lockout_remaining(user["email"])
+        if again > 0:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Too many attempts — try again in {again}s.",
+            )
+        raise HTTPException(status_code=401, detail="Invalid passcode")
     return {"step_up_token": twofa.issue_step_up_token(user["email"])}
 
 

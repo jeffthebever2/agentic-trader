@@ -28,11 +28,11 @@ export const useThemeStore = create<ThemeState>()(
 )
 
 function applyTheme(mode: ThemeMode) {
-  if (mode === 'dark') {
-    document.body.classList.add('theme-dark')
-  } else {
-    document.body.classList.remove('theme-dark')
-  }
+  // Guard: this runs at module load (below) and document.body may not exist yet
+  // (script in <head>, SSR, or a bundler eval context). No body → nothing to do.
+  const body = typeof document !== 'undefined' ? document.body : null
+  if (!body) return
+  body.classList.toggle('theme-dark', mode === 'dark')
 }
 
 // Apply on store init

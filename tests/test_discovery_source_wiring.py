@@ -42,6 +42,19 @@ def test_discovery_fetch_failure_graceful(monkeypatch):
     assert out == {}
 
 
+def test_default_discovery_universe_uses_liquid_file(monkeypatch, tmp_path):
+    liquid = tmp_path / "tickers_liquid.txt"
+    liquid.write_text("AAA\nBBB\nIREN\n", encoding="utf-8")
+    monkeypatch.setattr(t, "ROOT", tmp_path)
+    monkeypatch.delenv("THEMATIC_DISCOVERY_UNIVERSE", raising=False)
+    monkeypatch.setenv("THEMATIC_DISCOVERY_MAX_UNIVERSE", "2")
+
+    universe = t._discovery_universe()
+
+    assert universe[:2] == ["IREN", "CIFR"]  # catalyst seeds stay first
+    assert "AAA" in universe and "BBB" in universe
+
+
 def test_no_buzz_discovery_name_ranks_without_dampener(monkeypatch):
     async def _identity(tickers):
         return {x.upper() for x in tickers}

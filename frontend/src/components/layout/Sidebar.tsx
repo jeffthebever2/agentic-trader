@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutGrid, Search, BarChart3, TrendingUp, Clock,
   Landmark, BarChart2, Lightbulb, ClipboardCheck, ShieldCheck, Settings,
-  Zap, ScrollText, Layers,
+  Zap, ScrollText, Layers, Activity,
 } from 'lucide-react'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAuth } from '@/hooks/useAuth'
@@ -30,6 +30,7 @@ const NAV: NavItem[] = [
   { to: '/backtest', id: 'nav-backtest',  label: 'Research & Backtest', icon: <TrendingUp    {...IC} />, adminOnly: true },
   { to: '/history',  id: 'nav-history',  label: 'History',              icon: <Clock         {...IC} />, adminOnly: true },
   { to: '/broker',   id: 'nav-broker',   label: 'Real Broker',          icon: <Landmark      {...IC} /> },
+  { to: '/performance', id: 'nav-performance', label: 'Performance',       icon: <Activity      {...IC} /> },
   { to: '/ml',       id: 'nav-ml',       label: 'Models & Stats',       icon: <BarChart2     {...IC} />, adminOnly: true },
   { to: '/logs',     id: 'nav-logs',     label: 'Logs',                 icon: <ScrollText    {...IC} />, adminOnly: true },
   { to: '/rl',       id: 'nav-rl',       label: 'RL Agent',             icon: <Lightbulb    {...IC} />, adminOnly: true },

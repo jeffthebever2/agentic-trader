@@ -11,6 +11,7 @@ const PaperPage    = lazy(() => import('@/pages/Paper'))
 const BacktestPage = lazy(() => import('@/pages/Backtest'))
 const HistoryPage  = lazy(() => import('@/pages/History'))
 const BrokerPage   = lazy(() => import('@/pages/Broker'))
+const PerformancePage = lazy(() => import('@/pages/Performance'))
 const MLPage       = lazy(() => import('@/pages/ML'))
 const RLPage       = lazy(() => import('@/pages/RL'))
 const SettingsPage = lazy(() => import('@/pages/Settings'))
@@ -51,6 +52,7 @@ function AppRoutes() {
             <Route path="/backtest" element={<ErrorBoundary><BacktestPage /></ErrorBoundary>} />
             <Route path="/history"  element={<ErrorBoundary><HistoryPage /></ErrorBoundary>} />
             <Route path="/broker"   element={<ErrorBoundary><BrokerPage /></ErrorBoundary>} />
+            <Route path="/performance" element={<ErrorBoundary><PerformancePage /></ErrorBoundary>} />
             <Route path="/ml"       element={<ErrorBoundary><MLPage /></ErrorBoundary>} />
             <Route path="/rl"       element={<ErrorBoundary><RLPage /></ErrorBoundary>} />
             <Route path="/settings" element={<ErrorBoundary><SettingsPage /></ErrorBoundary>} />

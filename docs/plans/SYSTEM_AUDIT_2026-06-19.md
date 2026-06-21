@@ -230,3 +230,67 @@ garbage-safe; all flags default OFF. Suite **975 green**, frontend build clean.
 2. **Live backtest / parameter tuning** — needs a market-data feed + historical signal store (not in this environment). All thresholds (RVOL 3×, corr 0.85, risk 1%, regime bands) are sensible priors to be tuned on real data.
 3. **Broad discovery universe** — wire `THEMATIC_DISCOVERY_UNIVERSE` to the liquid-tickers file for full-market no-buzz discovery (currently a curated watchlist).
 4. **Wire correlation guard into the sizing path** — engine is built + tested; the approve path should call `correlation_ok` with the book's cached closes before sizing up a correlated add.
+
+---
+
+## 10. Phase 3 — Completion Check + Fixes (2026-06-19)
+
+The follow-up audit found the Phase 2 report was **not complete** in four
+high-confidence areas. Fixes below are implemented as conservative, flag-gated or
+fail-open controls; no autonomous live selling was added.
+
+| Gap found | Fix implemented | Safety posture |
+|---|---|---|
+| Discovery still defaulted to a tiny curated watchlist unless the operator manually set `THEMATIC_DISCOVERY_UNIVERSE`. | `_discovery_universe()` now loads the repo's `tickers_liquid.txt` by default, keeps the IREN-class catalyst seeds first, supports `THEMATIC_DISCOVERY_UNIVERSE_FILE`, and caps breadth via `THEMATIC_DISCOVERY_MAX_UNIVERSE` (default 350) to avoid source timeouts. | Still behind `THEMATIC_DISCOVERY=false` by default. |
+| Correlation guard existed only as a pure helper/test; approval never called it. | Added `_correlation_guard_for_book()` and wired it into thematic approval before paper trade insertion. | New `THEMATIC_CORRELATION_GUARD` flag, default OFF; fail-open on missing price history. |
+| Regime gate, FINRA short overlay, and breakout fast-lane were enforced in `GET /signals` display logic, not approval. | `approve_signal()` now mirrors runtime buy gates: regime-adjusted score threshold, extreme FINRA short-pressure veto, and breakout-confirmed spike release. `force=true` remains an explicit operator override and records warnings. | Blocks by default when flags are enabled; default behavior unchanged while flags are OFF. |
+| Auto-paper execution ignored breakout-confirmed spikes and had a stale internal `approve_signal` call signature after the request parameter was added. | `_auto_execute_confirmed_signals()` now allows breakout-confirmed spike candidates and calls `approve_signal(sig["id"], ApproveBody(), None, user_mock)`. | Auto-paper still routes through approval gates; live leg remains HIL/step-up only. |
+| ATR/risk sizing improved paper entries but live Fidelity still received flat stop percent and policy dollar allocation. | When paper price data is available and flags are enabled, the live Fidelity request now receives the ATR-adjusted stop percent and risk-sized dollar allocation. | Fidelity still applies its own compliance/cash/position caps. Exact share-count parity is not guaranteed because Fidelity sizes using its fresh quote. |
+
+**Re-audit result:** focused feature/audit suite: **78 passed**. Full suite:
+**980 passed, 1 skipped, 1 warning, 50 subtests passed**.
+
+### Remaining Risks After Phase 3
+1. **Autonomous live exit execution** remains intentionally unimplemented; this
+   still requires explicit real-money selling approval.
+2. **Live backtest / parameter tuning** still needs a market-data feed and
+   historical signal store.
+3. **Unusual options flow** is still missing; the audit identified it as the only
+   signal that clearly led IREN before the Microsoft headline.
+4. **True short interest / borrow / utilization / days-to-cover** are still not
+   present; FINRA short volume is a risk proxy, not a full short-interest feed.
+5. **Analyst coverage remains partial**: FMP grade changes and Finnhub
+   recommendation trends are present, but earnings surprises and price-target
+   revisions are not yet wired as separate features.
+6. **trendspyg is optional/runtime-imported** and not guaranteed installed in every
+   deployment; enable only after dependency/runtime validation.
+
+---
+
+## 11. Phase 4 — Remaining-Risk Fixes (2026-06-19)
+
+User requested fixing the remaining non-production items. Implemented as gated
+plumbing and pure evaluation code; no dangerous feature is enabled by default.
+
+| Prior remaining item | Fix implemented | Flag / control |
+|---|---|---|
+| Autonomous live exits | Added `/api/thematic/brain/live-exits/arm`, a short-lived step-up-gated authorization for an explicit Fidelity account, plus `run_autonomous_live_exit_executor()` and a separate background loop. It executes only existing priority `exit_guard` EXIT proposals for stop/crash/target/trailing breaches. | `THEMATIC_LIVE_EXIT_AUTONOMOUS=false`, arm TTL 5-240 min, explicit account required, existing Fidelity compliance/live/protected-account/order-lock gates still apply. |
+| Live backtesting / parameter tuning | Added pure replay/tuning module `tradingagents.backtesting.thematic_replay`: loads saved score-history JSONL, requires explicit event-time index mapping, and evaluates score thresholds over injected price history. | No live side effects; prevents accidental future alignment by requiring `(ts, ticker) -> price index`. |
+| Unusual options flow | Added optional Tradier-backed options-chain source plus pure call-skew/unusual-volume scoring. Merged as `options_flow`, a high-trust quality confirmation source. | `THEMATIC_OPTIONS_FLOW=false`; requires `TRADIER_API_TOKEN`; optional `TRADIER_OPTIONS_EXPIRATION`. |
+| True short interest / borrow pressure | Added structural short-interest/borrow pressure classifier and optional FMP fetcher. It annotates/vetoes extreme pressure but never adds to rank. | `THEMATIC_TRUE_SHORT_INTEREST=false`; non-additive risk overlay. |
+| Earnings surprises + price-target revisions | Extended analyst confirmation with FMP earnings-surprise and price-target consensus/summary weights in addition to grade changes and Finnhub recommendations. | Existing `THEMATIC_ANALYST=false`; requires `FMP_API_KEY` for FMP lanes. |
+
+**Re-audit result:** focused suite for new feeds, replay, live-exit safety, and
+existing live-order guardrails: **46 passed**. Full suite:
+**996 passed, 1 skipped, 1 warning, 50 subtests passed**.
+
+### Remaining Operational Limits After Phase 4
+1. These capabilities are still **OFF by default** and require deliberate
+   deployment configuration plus paper/live validation.
+2. Options flow is a chain-derived proxy unless connected to a true real-time
+   flow/tape provider; Tradier chain data gives volume/OI/skew, not institutional
+   order attribution.
+3. Structural short-interest quality depends on the vendor payload available under
+   the configured FMP plan.
+4. The live-exit executor can still fail at the broker-automation layer; existing
+   confirmation checks avoid marking unknown submissions as successful.

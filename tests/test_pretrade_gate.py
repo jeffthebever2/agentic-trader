@@ -176,3 +176,19 @@ def test_gate_result_frozen():
     r = GateResult(ok=True, reason="ok", detail={})
     with pytest.raises((AttributeError, TypeError)):
         r.ok = False  # type: ignore
+
+
+# ── Trusted-source: FMP is the configured execution provider ──────────────────
+
+def test_fmp_single_source_passes_trusted_gate():
+    """Regression: 'fmp' must be trusted so a single-provider FMP quote clears the
+    require_trusted_source gate (no 2-source consensus needed)."""
+    g = _gate(require_trusted_source=True, max_quote_age_seconds=3600)
+    r = g.check("NVDA", _fresh(1), 209.0, quote_source="fmp",
+                backup_sources=[], consensus_ok=True, market_open=True, now=NOW)
+    assert r.ok, r.reason
+
+
+def test_pretrade_and_gateway_trusted_lists_in_sync():
+    from tradingagents.data.quote_gateway import TRUSTED_SOURCES as GW
+    assert GW <= PreTradeGate.TRUSTED_SOURCES, "gateway trusted sources must be a subset of the gate's"

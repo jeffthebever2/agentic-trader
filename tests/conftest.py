@@ -53,6 +53,41 @@ def _isolate_supabase(monkeypatch):
         pass
 
 
+@pytest.fixture(autouse=True)
+def _isolate_alert_cooldown(monkeypatch, tmp_path):
+    """Keep the per-ticker alert cooldown out of the real tmp/alert_cooldown.json.
+
+    Each test gets its own empty cooldown file so cooldown state never leaks
+    between tests (a recorded alert in one test would otherwise suppress an
+    expected SMS in another).
+    """
+    try:
+        from web import alert_cooldown
+        monkeypatch.setattr(alert_cooldown, "_FILE", tmp_path / "alert_cooldown.json")
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _ai_off_by_default(monkeypatch, tmp_path):
+    """AI intent/validation/catalyst/red-flag calls are network — default them OFF
+    in tests (placeholder API keys would otherwise enable real calls in unrelated
+    thematic tests). Tests that exercise the AI path opt in explicitly.
+    Also isolate the AI-backed caches to a temp dir so nothing persists."""
+    monkeypatch.setenv("THEMATIC_AI_INTENT", "false")
+    monkeypatch.setenv("THEMATIC_AI_EXIT_CHECK", "false")
+    monkeypatch.setenv("HOLDINGS_BRAIN_LLM", "false")
+    try:
+        import web.api.thematic_auto as _ta
+        monkeypatch.setattr(_ta, "_TICKER_VALID_FILE", tmp_path / "ticker_valid.json")
+        monkeypatch.setattr(_ta, "_ticker_valid_cache", None)
+        monkeypatch.setattr(_ta, "_SECTOR_CACHE_FILE", tmp_path / "sector_cache.json")
+        monkeypatch.setattr(_ta, "_NEURON_USAGE_FILE", tmp_path / "neu.json")
+        monkeypatch.setattr(_ta, "_OR_USAGE_FILE", tmp_path / "or.json")
+    except Exception:
+        pass
+
+
 @pytest.fixture()
 def mock_llm_client():
     client = MagicMock()

@@ -25,6 +25,10 @@ export interface TwoFAStatus {
   method: string | null
   enabled: boolean
   verified: boolean
+  totp_enabled?: boolean
+  passcode_enabled?: boolean
+  email_enabled?: boolean
+  passkeys?: Array<{ id: string; name: string }>
 }
 
 // ── Paper Trading ─────────────────────────────────────────────────────────
@@ -244,3 +248,72 @@ export interface RuntimeDiagnostics {
   memory_mb?: number
   cpu_pct?: number
 }
+
+// ── Portfolio Performance ──────────────────────────────────────────────────
+export interface PerfDayRef { date: string; pnl: number; pct: number; ending_value: number }
+export interface PerfMetrics {
+  has_data: boolean
+  as_of?: string
+  current_value?: number
+  cash?: number
+  invested_value?: number
+  today_pnl?: number | null
+  today_pct?: number | null
+  total_pnl?: number
+  total_return_pct?: number
+  best_day?: PerfDayRef | null
+  worst_day?: PerfDayRef | null
+  trading_days?: number
+  green_days?: number
+  red_days?: number
+  win_rate?: number
+  avg_green?: number
+  avg_red?: number
+  max_drawdown_pct?: number
+  mtd_pct?: number
+  ytd_pct?: number
+  total_deposits?: number
+  total_withdrawals?: number
+  total_dividends?: number
+  range?: string
+  snapshot_count?: number
+  last_sync?: Record<string, unknown> | null
+}
+export interface PerfRow {
+  date: string
+  ending_value: number
+  starting_value: number | null
+  cash: number
+  invested_value: number
+  deposits: number
+  withdrawals: number
+  dividends: number
+  realized_gl: number
+  unrealized_gl: number
+  daily_pnl: number | null
+  daily_pct: number | null
+  cumulative_pct: number
+  color: 'green' | 'red' | 'gray'
+  ok: boolean
+  n_positions: number
+}
+export interface PerfPosition {
+  symbol: string
+  qty: number
+  last_price: number
+  market_value: number
+  cost_basis: number
+  unrealized_gl: number
+  unrealized_gl_pct: number
+  account: string
+}
+export interface PerfCashFlow { date: string; kind: string; amount: number; note: string }
+export interface PerfContribution { symbol: string; contribution: number; unrealized_gl: number; market_value: number; realized_gl?: number }
+export interface PerfAttribution {
+  date: string
+  top_winners: PerfContribution[]
+  top_losers: PerfContribution[]
+  contributions: PerfContribution[]
+  trades: Array<Record<string, unknown>>
+}
+export interface PerfDay { row: PerfRow; positions: PerfPosition[]; attribution: PerfAttribution }

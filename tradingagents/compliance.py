@@ -34,6 +34,15 @@ PROHIBITED_ORDER_TYPES = (
     "options",      # options
 )
 PROHIBITED_MARKET_ACTIONS = PROHIBITED_ORDER_TYPES
+# Order types that stay blocked even when market sells are explicitly allowed.
+ALWAYS_PROHIBITED_ORDER_TYPES = ("short", "margin", "options")
+
+
+def market_sell_allowed() -> bool:
+    """True only when ALLOW_MARKET_SELL is explicitly enabled. Market BUYS are
+    never allowed; this gate is scoped to sells/exits (slippage on an exit is a
+    smaller, opt-in risk than on an entry)."""
+    return os.environ.get("ALLOW_MARKET_SELL", "").strip().lower() in ("1", "true", "yes", "on")
 
 MAX_SINGLE_ORDER_DOLLARS: float = 50_000.0    # hard cap per order
 MAX_POSITION_PCT_OF_ACCOUNT: float = 10.0     # max 10% of account per position
@@ -73,8 +82,15 @@ def validate_live_order(order: dict[str, Any] | None = None) -> ComplianceDecisi
     if action not in ("buy", "sell"):
         return ComplianceDecision(allowed=False, reason=f"Action '{action}' not allowed. Only Buy and Sell.")
 
+    # Market SELL is permitted only when explicitly enabled (ALLOW_MARKET_SELL);
+    # market BUY and short/margin/options are always blocked.
+    is_market_sell = "market" in order_type and action == "sell" and market_sell_allowed()
     for blocked in PROHIBITED_ORDER_TYPES:
         if blocked in order_type:
+            if blocked == "market" and is_market_sell and not any(
+                p in order_type for p in ALWAYS_PROHIBITED_ORDER_TYPES
+            ):
+                continue  # allowed market sell
             return ComplianceDecision(allowed=False, reason=f"Order type '{order_type}' is prohibited.")
 
     if quantity <= 0:
@@ -83,8 +99,11 @@ def validate_live_order(order: dict[str, Any] | None = None) -> ComplianceDecisi
     if not symbol or not symbol.isalpha() or len(symbol) > 5:
         return ComplianceDecision(allowed=False, reason=f"Symbol '{symbol}' invalid.")
 
-    if order_type == "limit" and limit_px > 0 and quantity > 0:
-        order_value = limit_px * quantity
+    # Per-order dollar cap. Market sells have no limit price → use the trusted
+    # quote price for the cap so a market exit can't exceed the $50k limit either.
+    ref_px = limit_px if limit_px > 0 else float(order.get("quote_price", 0) or 0)
+    if ref_px > 0 and quantity > 0:
+        order_value = ref_px * quantity
         if order_value > MAX_SINGLE_ORDER_DOLLARS:
             return ComplianceDecision(
                 allowed=False,

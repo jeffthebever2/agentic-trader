@@ -64,7 +64,10 @@ def render_trade_chart(
 
     df: pandas DataFrame with a DatetimeIndex and Open/High/Low/Close[/Volume].
     Draws candles + MA50/200 + entry(green)/stop(red)/target(blue) lines + fib
-    levels. Fails soft so a render error never blocks the trade-request SMS."""
+    levels, plus honest forward reward/risk bands (entry→target green, stop→entry
+    red) and the real reward:risk in the title. entry/stop/target are drawn exactly
+    as passed — a missing level is omitted, never fabricated. Fails soft so a render
+    error never blocks the trade-request SMS."""
     try:
         import matplotlib
         matplotlib.use("Agg")  # headless
@@ -120,52 +123,57 @@ def render_trade_chart(
         label_x = n + future
         ax.set_xlim(-1, label_x + future * 0.30)   # room for right-edge labels
 
-        # ── Expected-path arrow: a shallow dip to the buy zone, then up to target
-        # (the 'down then up' pattern). Always resolves to the target for a long. ──
-        tgt = float(target) if (target and math.isfinite(float(target)) and float(target) > 0) else last * 1.25
+        # Use the REAL order levels exactly as given — never fabricate one that
+        # wasn't passed (an invented target/stop would mislead a real-money review).
+        def _lvl(v):
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                return None
+            return f if (math.isfinite(f) and f > 0) else None
+        e, s, t = _lvl(entry), _lvl(stop), _lvl(target)
+        base = e if e is not None else last     # reward/risk measured from entry
 
-        # Expand the y-axis so the TARGET (often far above the recent range) and the
-        # full projection arrow are visible — like the reference charts' headroom.
+        # Expand the y-axis so the real target/stop sit on-chart with headroom.
         try:
-            _lo = min(float(df["Low"].min()), float(stop) if stop else last, tgt)
-            _hi = max(float(df["High"].max()), tgt)
+            ys = [float(df["Low"].min()), float(df["High"].max()), last]
+            ys += [v for v in (e, s, t) if v is not None]
+            _lo, _hi = min(ys), max(ys)
             _pad = (_hi - _lo) * 0.06 or 1.0
             ax.set_ylim(_lo - _pad, _hi + _pad)
         except Exception:
             pass
-        # Dip to a SHALLOW buy zone (~3-4% pullback), never down to the stop and
-        # never above current — a minor pullback before the run, not a stop-out.
-        _stop_floor = float(stop) if (stop and math.isfinite(float(stop)) and 0 < float(stop) < last) else 0.0
-        dip = max(last * 0.965, _stop_floor + (last - _stop_floor) * 0.35 if _stop_floor else last * 0.965)
-        dip = min(dip, last * 0.995)               # always slightly below current
-        dip_x, top_x = x_now + future * 0.28, x_now + future * 0.92
-        ax.plot([x_now, dip_x], [last, dip], color="#0f172a", lw=3.2,
-                solid_capstyle="round", zorder=12)                       # leg 1: dip
-        ax.annotate("", xy=(top_x, tgt), xytext=(dip_x, dip),
-                    arrowprops=dict(arrowstyle="-|>", color="#0f172a", lw=3.2,
-                                    mutation_scale=30), zorder=12)        # leg 2: up to target
 
-        # ── Big, plain right-edge labels ──
-        def _label(y, text, color):
-            try:
-                v = float(y)
-            except (TypeError, ValueError):
+        # ── Honest reward / risk bands (no fabricated price path) ──
+        # Shade the forward region only: green between entry→target (reward) and
+        # red between stop→entry (risk). This shows the planned trade's actual
+        # reward:risk geometry instead of a made-up "dip then rip" trajectory.
+        if t is not None and t > base:
+            ax.fill_between([x_now, label_x], base, t, color="#16a34a", alpha=0.10, zorder=0)
+        if s is not None and s < base:
+            ax.fill_between([x_now, label_x], s, base, color="#ef4444", alpha=0.10, zorder=0)
+
+        # ── Big, plain right-edge labels (only for levels we actually have) ──
+        def _label(v, text, color):
+            if v is None:
                 return
-            if math.isfinite(v) and v > 0:
-                ax.annotate(f"  {text} ${v:,.2f}", xy=(label_x, v), va="center", ha="left",
-                            fontsize=13, fontweight="bold", color=color, annotation_clip=False)
-        _label(tgt, "TARGET", "#2563eb")
-        _label(entry, "ENTRY", "#16a34a")
-        _label(stop, "STOP", "#ef4444")
+            ax.annotate(f"  {text} ${v:,.2f}", xy=(label_x, v), va="center", ha="left",
+                        fontsize=13, fontweight="bold", color=color, annotation_clip=False)
+        _label(t, "TARGET", "#2563eb")
+        _label(e, "ENTRY", "#16a34a")
+        _label(s, "STOP", "#ef4444")
 
-        # ── Clear title + one-line plain-language summary ──
-        gain = f"   →  +{(tgt / last - 1) * 100:.0f}% to target" if last > 0 else ""
-        ax.set_title(f"{ticker}    ${last:,.2f}{gain}", fontsize=17, fontweight="bold",
+        # ── Title + one-line summary with the real reward:risk ──
+        rr = (t - e) / (e - s) if (e is not None and s is not None and t is not None and e > s) else None
+        gain = f"   →  +{(t / base - 1) * 100:.0f}% to target" if (t is not None and base > 0) else ""
+        rr_txt = f"   •   R:R {rr:.1f}" if rr is not None else ""
+        ax.set_title(f"{ticker}    ${last:,.2f}{gain}{rr_txt}", fontsize=17, fontweight="bold",
                      loc="left", pad=16, color="#0f172a")
         bits = []
-        if entry: bits.append(f"Entry ${float(entry):,.2f}")
-        if stop:  bits.append(f"Stop ${float(stop):,.2f}")
-        if target: bits.append(f"Target ${float(target):,.2f}")
+        if e is not None: bits.append(f"Entry ${e:,.2f}")
+        if s is not None: bits.append(f"Stop ${s:,.2f}")
+        if t is not None: bits.append(f"Target ${t:,.2f}")
+        if rr is not None: bits.append(f"R:R {rr:.1f}")
         if bits:
             fig.text(0.5, 0.94, "   •   ".join(bits), ha="center", fontsize=12, color="#334155")
 

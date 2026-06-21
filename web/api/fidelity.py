@@ -43,6 +43,50 @@ def _get_session_cache(email: str) -> bool | None:
     return None  # cache miss or expired
 
 
+# ── Holdings snapshot cache (stale-while-revalidate) ──────────────────────────
+# DISPLAY reads (/fidelity/positions, /fidelity/accounts) serve the LAST scraped
+# snapshot instantly from disk, then refresh in the background — so the page never
+# blocks on a 20-40s Playwright scrape. The keepalive loop also refreshes these
+# every 10 min, so the snapshot stays warm with zero user activity.
+# SAFETY: this caches DISPLAY reads ONLY. The real-money sizing path calls
+# _get_fidelity_balances() directly and always scrapes FRESH — never sized off cache.
+_POS_CACHE_TTL = float(os.getenv("FIDELITY_CACHE_TTL_SECONDS", "600") or 600)  # older → revalidate
+_POS_REFRESH_INFLIGHT: set[str] = set()  # keys currently revalidating (dedup)
+
+
+def _snapshot_path(email: str, kind: str) -> Path:
+    digest = hashlib.sha256(_user_key(email).encode()).hexdigest()[:16]
+    return ROOT / "tmp" / f"fidelity_{kind}_{digest}.json"
+
+
+def _read_snapshot(email: str, kind: str) -> "dict | None":
+    try:
+        p = _snapshot_path(email, kind)
+        if p.exists():
+            return json.loads(p.read_text())
+    except Exception as e:
+        log.debug("snapshot read (%s): %s", kind, e)
+    return None
+
+
+def _write_snapshot(email: str, kind: str, data: dict) -> None:
+    try:
+        payload = dict(data)
+        payload["scraped_at"] = _time.time()
+        path = _snapshot_path(email, kind)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload))
+        tmp.replace(path)  # atomic
+    except Exception as e:
+        log.warning("snapshot write (%s): %s", kind, e)
+
+
+def _snapshot_meta(cached: dict) -> dict:
+    age = _time.time() - float(cached.get("scraped_at", 0) or 0)
+    return {"cached": True, "age_seconds": round(age, 1), "stale": age > _POS_CACHE_TTL}
+
+
 def _get_order_lock(key: str) -> asyncio.Lock:
     """Return (or create) a per-(user,ticker) lock to prevent duplicate orders."""
     if key not in _ORDER_LOCKS:
@@ -194,6 +238,13 @@ class _order_in_flight:
     def __exit__(self, *exc):
         _ORDER_IN_FLIGHT.discard(self.key)
         return False
+
+
+# Users with an interactive (WS) login in progress. While set, background loops
+# and status polls must NOT navigate or reset that user's shared browser context
+# — doing so closes the page the login flow is driving (TargetClosedError →
+# Fidelity shows "Sorry, we can't complete this action right now").
+_LOGIN_IN_FLIGHT: set[str] = set()
 
 LOGIN_URL = "https://digital.fidelity.com/ftgw/digital/login/full-page"
 PORTFOLIO_URL = "https://digital.fidelity.com/ftgw/digital/portfolio/positions"
@@ -368,6 +419,16 @@ async def _save_context_storage(context, path: Path):
 
 
 async def _is_logged_in(email: str) -> bool:
+    # During an interactive login, never touch the shared browser context — a
+    # status-poll navigation here would close the page the login is driving.
+    if _user_key(email) in _LOGIN_IN_FLIGHT:
+        return _get_session_cache(email) is True
+    # Device known-untrusted / session known-dead and NOT silently recoverable:
+    # do NOT open a browser or navigate to Fidelity on every status poll / loop
+    # tick. That repeated login-page traffic is exactly what rate-limits the
+    # account. Report not-connected until an interactive login clears the gate.
+    if _is_manual_login_required(email):
+        return False
     # Return cached state if fresh — avoids 20-30s Playwright navigation on every status poll
     cached = _get_session_cache(email)
     if cached is not None:
@@ -440,6 +501,39 @@ def _fidelity_creds_path(email: str) -> Path:
     return ROOT / f".fidelity_creds_{digest}.json"
 
 
+def _manual_login_required_path(email: str) -> Path:
+    digest = hashlib.sha256(_user_key(email).encode()).hexdigest()[:16]
+    return ROOT / f".fidelity_manual_login_{digest}.flag"
+
+
+def _is_manual_login_required(email: str) -> bool:
+    """True once silent re-login has *proven* the device isn't trusted.
+
+    Persisted to disk (survives server restarts) so launchd/autofix restarts
+    can't wipe the state and resume hammering Fidelity's login — repeated
+    credential submissions with no human to enter the TOTP get the account
+    rate-limited/locked. Only an interactive login (which seeds device trust)
+    clears it. See [[project_fidelity_auto_relogin_2026-06-16]].
+    """
+    return _manual_login_required_path(email).exists()
+
+
+def _set_manual_login_required(email: str) -> None:
+    try:
+        _manual_login_required_path(email).write_text(str(_time.time()))
+    except Exception:
+        pass
+
+
+def _clear_manual_login_required(email: str) -> None:
+    try:
+        p = _manual_login_required_path(email)
+        if p.exists():
+            p.unlink()
+    except Exception:
+        pass
+
+
 def _credential_storage_enabled() -> bool:
     """Opt-in. Storing a recoverable password is off unless explicitly enabled."""
     return os.getenv("FIDELITY_STORE_CREDENTIALS", "false").strip().lower() == "true"
@@ -486,29 +580,123 @@ def _load_credentials(email: str) -> dict | None:
     return None
 
 
-async def _check_trust_device(page) -> None:
-    """Tick any 'remember/trust this device' checkbox so future logins skip 2FA.
+async def _tick_trust_in_frame(frame) -> bool:
+    """Find + tick the 'remember/trust this device' checkbox within ONE frame.
 
-    Fidelity shows this either as a checkbox on the 2FA page (before submitting
-    the code) or as a button after auth. Safe to call when none is present.
+    Fidelity's 2FA page renders a PVD design-system checkbox
+    (id="dom-trust-device-checkbox") whose native <input class="pvd-checkbox__checkbox">
+    is visually hidden for screen-reader styling
+    (clip:rect(1px 1px 1px 1px); position:absolute; height/width:1px; overflow:hidden).
+    A plain Playwright .check() fails the actionability *visibility* wait on that
+    hidden input and silently does nothing. We read state with .is_checked() (no
+    visibility required) and tick with .check(force=True), then fall back to
+    clicking the visible <label for="...">. Returns True only if the box ends
+    checked. Safe to call when no such control is present in this frame.
     """
-    # Checkboxes: select then ensure checked (label text varies)
+    # Exact Fidelity id first, then generic fallbacks for other/legacy layouts.
     for sel in (
-        "input[type='checkbox'][id*='remember' i]",
+        "#dom-trust-device-checkbox",
         "input[type='checkbox'][id*='trust' i]",
+        "input[type='checkbox'][id*='remember' i]",
+        "input[type='checkbox'][name*='trust' i]",
         "input[type='checkbox'][name*='remember' i]",
-        "label:has-text('Don\\'t ask') input[type='checkbox']",
-        "label:has-text('Remember') input[type='checkbox']",
-        "label:has-text('Trust') input[type='checkbox']",
+        "input[type='checkbox'][aria-label*='remember' i]",
+        "input[type='checkbox'][aria-label*='trust' i]",
     ):
         try:
-            loc = page.locator(sel).first
-            await loc.wait_for(state="attached", timeout=1500)
-            if not await loc.is_checked():
-                await loc.check(timeout=1500)
-            return
+            loc = frame.locator(sel).first
+            await loc.wait_for(state="attached", timeout=2500)
         except Exception:
             continue
+        # is_checked() reads the input's state without requiring it to be visible.
+        try:
+            if await loc.is_checked():
+                log.info("Trust-device already checked (%s)", sel)
+                return True
+        except Exception:
+            pass
+        # 1) force-check the hidden native input (force=True bypasses the
+        #    visibility/actionability wait that clip-hidden inputs always fail).
+        try:
+            await loc.check(force=True, timeout=2500)
+            if await loc.is_checked():
+                log.info("Trust-device checkbox ticked (%s)", sel)
+                return True
+        except Exception:
+            pass
+        # 2) fall back to clicking the visible <label for="..."> (toggles the
+        #    input; only reached while still unchecked, so it turns it on).
+        try:
+            cid = await loc.get_attribute("id")
+            if cid:
+                await frame.locator(f"label[for='{cid}']").first.click(timeout=2500)
+                if await loc.is_checked():
+                    log.info("Trust-device ticked via label (%s)", cid)
+                    return True
+        except Exception:
+            pass
+    # 3) accessibility-role + label-text fallback (layout-independent): the
+    #    "remember/trust/don't ask" checkbox by its accessible name.
+    for name_rx in (r"remember", r"trust this", r"don't ask", r"do not ask"):
+        try:
+            loc = frame.get_by_role("checkbox", name=__import__("re").compile(name_rx, __import__("re").I)).first
+            await loc.wait_for(state="attached", timeout=1500)
+            if await loc.is_checked():
+                return True
+            await loc.check(force=True, timeout=2000)
+            if await loc.is_checked():
+                log.info("Trust-device ticked via role/name (%s)", name_rx)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _check_trust_device(page) -> bool:
+    """Tick 'remember/trust this device' so future logins skip 2FA — across ALL
+    frames.
+
+    The previous version searched only the main frame. Fidelity sometimes renders
+    the 2FA step (and its trust checkbox) inside an IFRAME, so every selector
+    missed and the device was never trusted → 2FA demanded on every login, and
+    silent re-login could never succeed. We now try the main frame AND each child
+    frame. Returns True if the box ends checked anywhere.
+    """
+    frames = []
+    try:
+        frames = list(page.frames)          # includes the main frame
+    except Exception:
+        frames = []
+    if page not in frames:
+        frames = [page] + frames
+    for fr in frames:
+        try:
+            if await _tick_trust_in_frame(fr):
+                return True
+        except Exception:
+            continue
+    log.warning("Trust-device checkbox not found/ticked — 2FA may be required next login")
+    return False
+
+
+def _fidelity_totp_code() -> "str | None":
+    """Current 6-digit TOTP from the OPTIONAL ``FIDELITY_TOTP_SECRET`` env (the
+    base32 authenticator seed). Lets silent re-login answer 2FA fully unattended.
+
+    Returns None when unset/invalid (silent re-login then falls back to requiring
+    an interactive login). The secret is never logged. Only enables broker SESSION
+    auth — every real order still passes compliance + per-trade step-up 2FA, so
+    this does not weaken order authorization.
+    """
+    secret = os.getenv("FIDELITY_TOTP_SECRET", "").strip().replace(" ", "")
+    if not secret:
+        return None
+    try:
+        import pyotp
+        return pyotp.TOTP(secret).now()
+    except Exception as e:
+        log.warning("FIDELITY_TOTP_SECRET present but TOTP generation failed: %s", e)
+        return None
 
 
 def _get_relogin_lock(email: str) -> asyncio.Lock:
@@ -525,13 +713,20 @@ async def _auto_relogin(email: str) -> bool:
     (relies on a previously trusted device). Never prompts; if 2FA is required
     it gives up and returns False so the caller surfaces a manual-login error.
     """
+    # Device proven untrusted — do NOT keep submitting credentials on a timer;
+    # there is no human in silent mode to enter the TOTP, so every attempt just
+    # burns a Fidelity login and risks a rate-limit/lockout. Stay parked until an
+    # interactive login seeds device trust (which clears this flag).
+    if _is_manual_login_required(email):
+        log.debug("Silent re-login skipped — manual login required (device not trusted): %s", email[:20])
+        return False
     creds = _load_credentials(email)
     if not creds:
         return False
     key = _user_key(email)
-    # Never reset/relogin the browser while an order is in flight — it would close
-    # the context the order is using (TargetClosedError).
-    if key in _ORDER_IN_FLIGHT:
+    # Never reset/relogin the browser while an order OR an interactive login is in
+    # flight — it would close the context they're driving (TargetClosedError).
+    if key in _ORDER_IN_FLIGHT or key in _LOGIN_IN_FLIGHT:
         return _get_session_cache(email) is True
     # Respect failure backoff so stale creds can't hammer Fidelity into a lockout.
     bo = _RELOGIN_BACKOFF.get(key)
@@ -571,9 +766,50 @@ async def _auto_relogin(email: str) -> bool:
                 await asyncio.sleep(3)
                 state = await _login_fill(page, creds["username"], creds["password"])
                 if state == "need_totp":
-                    log.warning("Silent re-login needs 2FA (device not trusted) — manual login required: %s", email[:20])
-                    _note_failure()
-                    return False
+                    # Autonomous 2FA: if a TOTP seed is configured, answer the
+                    # challenge ourselves AND tick trust-device so the NEXT silent
+                    # re-login won't even need a code. Without a seed we can't
+                    # proceed unattended — park until an interactive login.
+                    code = _fidelity_totp_code()
+                    if not code:
+                        log.warning("Silent re-login needs 2FA and no FIDELITY_TOTP_SECRET set — manual login required: %s", email[:20])
+                        _set_manual_login_required(email)
+                        _note_failure()
+                        return False
+                    await _check_trust_device(page)   # tick BEFORE submitting the code
+                    filled = await _try_fill(page, [
+                        "input[name='OTP']",
+                        "input[id*='otp' i]",
+                        "input[id*='totp' i]",
+                        "input[placeholder*='code' i]",
+                        "input[type='number']",
+                        "input[maxlength='6']",
+                        "input[maxlength='8']",
+                        "input[type='text']",
+                    ], code, timeout=8000)
+                    if not filled:
+                        log.warning("Silent re-login: TOTP field not found — manual login required: %s", email[:20])
+                        _set_manual_login_required(email)
+                        _note_failure()
+                        return False
+                    await _try_click(page, [
+                        "button[type='submit']",
+                        "button[data-testid='submitBtn']",
+                        "button[id*='continue' i]",
+                        "button[id*='submit' i]",
+                        "button[id*='verify' i]",
+                    ], timeout=5000)
+                    await asyncio.sleep(3)
+                    state = await _detect_page_state(page)
+                    if state != "authenticated":
+                        await _check_trust_device(page)   # post-submit interstitial
+                    if state == "need_totp":
+                        # Generated code rejected (clock skew / wrong seed) — don't
+                        # loop on a bad secret; require an interactive login.
+                        log.warning("Silent re-login: generated TOTP rejected — manual login required: %s", email[:20])
+                        _set_manual_login_required(email)
+                        _note_failure()
+                        return False
                 if state == "login_error":
                     _note_failure(wipe=True)
                     return False
@@ -631,8 +867,10 @@ async def _login_fill(page, username: str, password: str) -> str:
     ], password, timeout=8000)
     if not filled_pw:
         return "login_page"
-    # Tick trust-device BEFORE submitting so the credential step itself is trusted.
-    await _check_trust_device(page)
+    # NOTE: the trust-device checkbox lives ONLY on the 2FA page, never on this
+    # credential page. Calling _check_trust_device here just burned ~16s waiting
+    # for a checkbox that can't exist and logged a misleading "not found". The
+    # real tick happens in the need_totp branch of the WS auth flow.
     await _try_click(page, [
         "#dom-login-button",
         "button[data-testid='loginBtn']",
@@ -727,6 +965,11 @@ async def ws_fidelity_auth(websocket: WebSocket):
 
     await send({"step": "logging_in", "message": "Starting browser…"})
 
+    # Freeze background browser resets (keepalive / auto-relogin / status polls)
+    # for the whole interactive login — otherwise they close the shared Playwright
+    # context mid-login (TargetClosedError → "can't complete this action" loop).
+    _login_key = _user_key(user_email)
+    _LOGIN_IN_FLIGHT.add(_login_key)
     try:
         await _reset_browser_state(user_email)
         ctx = await _ensure_browser(user_email)
@@ -741,11 +984,14 @@ async def ws_fidelity_auth(websocket: WebSocket):
             # --- Username + password (shared with silent re-login) ---
             await send({"step": "logging_in", "message": "Entering credentials…"})
             state = await _login_fill(page, username, password)
+            log.info("WS login %s: post-fill state=%s url=%s", user_email[:16], state, page.url)
 
             # --- TOTP / 2FA ---
             if state == "need_totp":
+                log.info("WS login %s: 2FA required → prompting client for code", user_email[:16])
                 # Tick the trust-device box on the 2FA page so future logins skip 2FA.
-                await _check_trust_device(page)
+                trusted = await _check_trust_device(page)
+                log.info("WS login %s: trust-device ticked=%s", user_email[:16], trusted)
                 await send({
                     "step": "need_totp",
                     "message": "Two-factor authentication required.",
@@ -781,6 +1027,13 @@ async def ws_fidelity_auth(websocket: WebSocket):
                     await send({"step": "error", "message": "Could not find verification code input field."})
                     return
 
+                # Tick trust-device again NOW (code is filled, checkbox is on this
+                # page) so the choice is included in the verify submission — the
+                # most reliable timing. The earlier pre-prompt tick can miss when
+                # the control renders only after the code field is populated.
+                trusted2 = await _check_trust_device(page)
+                log.info("WS login %s: trust-device ticked (pre-submit)=%s", user_email[:16], trusted2)
+
                 # Click submit / continue
                 await _try_click(page, [
                     "button[type='submit']",
@@ -792,6 +1045,10 @@ async def ws_fidelity_auth(websocket: WebSocket):
 
                 await asyncio.sleep(3)
                 state = await _detect_page_state(page)
+                # Some flows show a SEPARATE "remember this device?" interstitial
+                # after the code is accepted — tick its checkbox if present.
+                if state != "authenticated":
+                    await _check_trust_device(page)
 
                 # Wrong TOTP: Fidelity stays on MFA page or shows error — never authenticated.
                 if state == "need_totp":
@@ -824,11 +1081,17 @@ async def ws_fidelity_auth(websocket: WebSocket):
                 state = await _detect_page_state(page)
 
             if state != "authenticated":
+                log.warning("WS login %s: did not complete, final state=%s url=%s", user_email[:16], state, page.url)
                 await send({"step": "error", "message": f"Login did not complete. Current URL: {page.url}"})
                 return
 
+            log.info("WS login %s: AUTHENTICATED", user_email[:16])
             await _save_storage(user_email)
             _set_session_cache(user_email, True)
+            # This interactive login ticked the trust-device box, so silent
+            # re-login can resume: clear the manual-login gate and any backoff.
+            _clear_manual_login_required(user_email)
+            _RELOGIN_BACKOFF.pop(_user_key(user_email), None)
             # Store creds (encrypted) so the server can silently re-login when
             # the session later expires — no manual login on trade approval.
             _save_credentials(user_email, username, password)
@@ -845,6 +1108,8 @@ async def ws_fidelity_auth(websocket: WebSocket):
     except Exception as e:
         log.exception("ws_fidelity_auth unhandled error")
         await send({"step": "error", "message": str(e)})
+    finally:
+        _LOGIN_IN_FLIGHT.discard(_login_key)
 
 
 # ── REST endpoints (require active session) ────────────────────
@@ -934,17 +1199,18 @@ async def fidelity_debug_grid(admin: dict = Depends(require_admin)):
         await page.close()
 
 
-@router.get("/fidelity/positions")
-async def fidelity_positions(admin: dict = Depends(require_admin)):
+async def _scrape_positions(email: str) -> dict:
+    """Cold Playwright scrape of the Fidelity positions grid — the slow path the
+    snapshot cache shields. Raises HTTPException on auth/load failure."""
     from fastapi import HTTPException
-    ctx = await _ensure_browser(admin["email"])
+    ctx = await _ensure_browser(email)
     page = await ctx.new_page()
     try:
         await _nav(page, PORTFOLIO_URL, sleep=6)
 
         if _is_login_url(page.url):
             # Session died mid-flight — try a silent re-login, then re-navigate once.
-            if await _handle_login_redirect(admin["email"], page):
+            if await _handle_login_redirect(email, page):
                 await _nav(page, PORTFOLIO_URL, sleep=6)
             if _is_login_url(page.url):
                 raise HTTPException(status_code=401, detail="Not authenticated with Fidelity. Log in at /broker.")
@@ -1012,9 +1278,12 @@ async def fidelity_positions(admin: dict = Depends(require_admin)):
                     return;
                 }
 
-                // Skip non-position rows
+                // Skip non-position rows (core money-market funds are cash, not equity)
+                const _mm = ['SPAXX','FDRXX','FZFXX','SPRXX','FCASH','FMPXX','FGTXX','FNSXX','FZCXX','QACDS','FDLXX','FZDXX'];
+                const _tk = ticker.toUpperCase().replace(/[^A-Z0-9]/g, '');
                 if (!ticker || ticker.length > 10 || !/^[A-Z]/.test(ticker) ||
-                    SKIP.some(s => ticker.startsWith(s))) return;
+                    SKIP.some(s => ticker.startsWith(s)) ||
+                    _mm.some(m => _tk.startsWith(m))) return;
 
                 const desc = lines.find((l, i) => i > 0 && l.length > 2 && !/^Not Priced|^\\$|^[+-]/.test(l)) || '';
                 const d = dataMap[ri] || {};
@@ -1046,7 +1315,7 @@ async def fidelity_positions(admin: dict = Depends(require_admin)):
         }
         """)
 
-        await _save_storage(admin["email"])
+        await _save_storage(email)
         positions = result.get("positions", [])
         grand = result.get("grandTotals", {})
         # Grid never rendered AND nothing parsed → treat as a transient load
@@ -1061,6 +1330,51 @@ async def fidelity_positions(admin: dict = Depends(require_admin)):
                 "count": len(positions), "grid_loaded": grid_loaded}
     finally:
         await page.close()
+
+
+async def _revalidate_positions(email: str) -> None:
+    """Background snapshot refresh (deduped per user). A failure KEEPS the last good
+    snapshot rather than clobbering it with an empty/error result."""
+    key = "pos:" + _user_key(email)
+    if key in _POS_REFRESH_INFLIGHT:
+        return
+    _POS_REFRESH_INFLIGHT.add(key)
+    try:
+        data = await _scrape_positions(email)
+        _write_snapshot(email, "positions", data)
+    except Exception as e:
+        log.info("positions revalidate skipped for %s (keeping snapshot): %s",
+                 _session_owner_hash(email), e)
+    finally:
+        _POS_REFRESH_INFLIGHT.discard(key)
+
+
+@router.get("/fidelity/positions")
+async def fidelity_positions(admin: dict = Depends(require_admin), refresh: bool = False):
+    """Holdings for the Broker page. Serves the last snapshot INSTANTLY from disk
+    (no browser) and refreshes in the background; ``?refresh=1`` forces a fresh
+    scrape. Only the first-ever load (no snapshot yet) blocks on a scrape."""
+    from fastapi import HTTPException
+    email = admin["email"]
+    if not refresh:
+        cached = _read_snapshot(email, "positions")
+        if cached is not None:
+            meta = _snapshot_meta(cached)
+            if meta["stale"]:
+                asyncio.create_task(_revalidate_positions(email))  # refresh in bg
+            return {**cached, **meta}
+    # No snapshot yet, or a forced refresh → scrape now (and cache it).
+    try:
+        data = await _scrape_positions(email)
+    except HTTPException:
+        if not refresh:
+            cached = _read_snapshot(email, "positions")
+            if cached is not None:
+                return {**cached, **_snapshot_meta(cached)}  # serve last good on failure
+        raise
+    _write_snapshot(email, "positions", data)
+    return {**data, "cached": False, "age_seconds": 0.0, "stale": False,
+            "scraped_at": _time.time()}
 
 
 @router.get("/fidelity/summary")
@@ -1398,15 +1712,24 @@ async def _get_fidelity_balances(email: str) -> dict:
                 if (label && value) tiles[label] = value;
             });
 
-            // Fall back to pinned-row Cash scraping
+            // Fall back to pinned-row Cash scraping.
+            // Fidelity holds uninvested cash in a CORE money-market fund (e.g. SPAXX)
+            // that renders as a position row "SPAXX**", NOT a row labelled "Cash".
+            // Treat those core funds as available cash too, else buying power reads $0
+            // (or only a tiny settled-cash row) and sizing never reflects the SPAXX balance.
+            const MMKT = ['SPAXX','FDRXX','FZFXX','SPRXX','FCASH','FMPXX','FGTXX','FNSXX','FZCXX','QACDS','FDLXX','FZDXX'];
             const cashRows = [];
             document.querySelectorAll('.ag-pinned-left-cols-container .ag-row[row-index]').forEach(row => {
                 const sym = row.querySelector('[col-id="sym"]')?.innerText?.trim() || '';
-                if (sym.startsWith('Cash') || sym === 'CASH') {
+                const ticker = (sym.split('\\n')[0] || '').trim();
+                const tU = ticker.toUpperCase().replace(/[^A-Z0-9& ]/g, '');
+                const isCash = ticker.startsWith('Cash') || tU === 'CASH'
+                    || tU.startsWith('CASH & CASH') || MMKT.some(m => tU.startsWith(m));
+                if (isCash) {
                     const ri = row.getAttribute('row-index');
                     const center = document.querySelector(`.ag-center-cols-container .ag-row[row-index="${ri}"]`);
                     const val = center?.querySelector('[col-id="curVal"]')?.innerText?.trim().split('\\n')[0] || '';
-                    cashRows.push({label: sym, value: val});
+                    cashRows.push({label: ticker, value: val});
                 }
             });
 
@@ -1527,16 +1850,7 @@ def _log_fidelity_trade(record: dict) -> None:
 
 # ── Accounts endpoint ──────────────────────────────────────────────────────────
 
-@router.get("/fidelity/accounts")
-async def fidelity_accounts(admin: dict = Depends(require_admin)):
-    """Return account balances + available cash from Fidelity."""
-    from fastapi import HTTPException
-    connected = await _is_logged_in(admin["email"])
-    if not connected:
-        raise HTTPException(status_code=401, detail="Not authenticated with Fidelity. Log in first.")
-    balances = await _get_fidelity_balances(admin["email"])
-    if "error" in balances:
-        raise HTTPException(status_code=401, detail=balances["error"])
+def _accounts_payload(balances: dict) -> dict:
     return {
         "ok":             True,
         "total_value":    balances.get("total_value"),
@@ -1545,6 +1859,57 @@ async def fidelity_accounts(admin: dict = Depends(require_admin)):
         "accounts":       balances.get("account_options", []),
         "summary_tiles":  balances.get("summary_tiles", {}),
     }
+
+
+async def _revalidate_accounts(email: str) -> None:
+    """Background refresh of the cached accounts/balances DISPLAY snapshot. The
+    execution sizing path always scrapes balances fresh and never reads this."""
+    key = "acct:" + _user_key(email)
+    if key in _POS_REFRESH_INFLIGHT:
+        return
+    _POS_REFRESH_INFLIGHT.add(key)
+    try:
+        balances = await _get_fidelity_balances(email)
+        if "error" not in balances:
+            _write_snapshot(email, "accounts", _accounts_payload(balances))
+    except Exception as e:
+        log.info("accounts revalidate skipped for %s: %s", _session_owner_hash(email), e)
+    finally:
+        _POS_REFRESH_INFLIGHT.discard(key)
+
+
+@router.get("/fidelity/accounts")
+async def fidelity_accounts(admin: dict = Depends(require_admin), refresh: bool = False):
+    """Account balances + available cash for DISPLAY. Serves the last snapshot
+    instantly and refreshes in the background; ``?refresh=1`` forces fresh. The
+    real-money sizing path does NOT use this endpoint — it scrapes balances fresh."""
+    from fastapi import HTTPException
+    email = admin["email"]
+    if not refresh:
+        cached = _read_snapshot(email, "accounts")
+        if cached is not None:
+            meta = _snapshot_meta(cached)
+            if meta["stale"]:
+                asyncio.create_task(_revalidate_accounts(email))
+            return {**cached, **meta}
+    connected = await _is_logged_in(email)
+    if not connected:
+        if not refresh:
+            cached = _read_snapshot(email, "accounts")
+            if cached is not None:
+                return {**cached, **_snapshot_meta(cached)}
+        raise HTTPException(status_code=401, detail="Not authenticated with Fidelity. Log in first.")
+    balances = await _get_fidelity_balances(email)
+    if "error" in balances:
+        if not refresh:
+            cached = _read_snapshot(email, "accounts")
+            if cached is not None:
+                return {**cached, **_snapshot_meta(cached)}
+        raise HTTPException(status_code=401, detail=balances["error"])
+    payload = _accounts_payload(balances)
+    _write_snapshot(email, "accounts", payload)
+    return {**payload, "cached": False, "age_seconds": 0.0, "stale": False,
+            "scraped_at": _time.time()}
 
 
 # ── Thematic trade endpoint ────────────────────────────────────────────────────
@@ -2429,8 +2794,11 @@ async def fidelity_thematic_sync(admin: dict = Depends(require_admin)):
             const positions = [];
             Object.entries(symMap).forEach(([ri, symText]) => {
                 const ticker = symText.split('\\n')[0].trim();
+                const _mm = ['SPAXX','FDRXX','FZFXX','SPRXX','FCASH','FMPXX','FGTXX','FNSXX','FZCXX','QACDS','FDLXX','FZDXX'];
+                const _tk = ticker.toUpperCase().replace(/[^A-Z0-9]/g, '');
                 if (!ticker || ticker.length > 10 || !/^[A-Z]/.test(ticker) ||
-                    SKIP.some(s => ticker.startsWith(s))) return;
+                    SKIP.some(s => ticker.startsWith(s)) ||
+                    _mm.some(m => _tk.startsWith(m))) return;
                 const d = dataMap[ri] || {};
                 const lstLines = (d.lstPrStk || '').split('\\n');
                 const cstLines = (d.cstBasStk || '').split('\\n');

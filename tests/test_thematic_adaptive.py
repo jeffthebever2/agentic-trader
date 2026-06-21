@@ -18,9 +18,10 @@ def test_crowd_sell_hard_capped():
 
 
 def test_neutral_sentiment_is_backward_compatible():
-    # sentiment default 0 → unchanged from the original conviction+buzz formula.
+    # sentiment default 0 → conviction backbone only (no buzz). Backbone is c*7.5
+    # (rebalanced 2026-06-21 from c*8.5 so raw buzz materially differentiates).
     assert t.composite_score(10, 0) == t.composite_score(10, 0, 0.0)
-    assert t.composite_score(10, 0, 0.0) == 85
+    assert t.composite_score(10, 0, 0.0) == 75
 
 
 def test_score_clamped_0_100():
