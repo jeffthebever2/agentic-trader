@@ -63,6 +63,8 @@ web = [
     "pyotp>=2.9.0",
     "qrcode[pil]>=8.0.0",
     "webauthn>=2.0.0",
+    # Optional Webull broker integration
+    "webull>=0.6.1",
 ]
 
 [project.scripts]
