@@ -183,6 +183,30 @@ def _reset_social_intent() -> None:
     with _intent_lock:
         _SOCIAL_INTENT.clear()
         _SOCIAL_SENTIMENT.clear()
+    _SEEN_HEADLINES.clear()
+
+
+# ── Cross-source headline dedup ───────────────────────────────────────────────
+# One press release syndicates to Google News + PR RSS + generic RSS + Seeking
+# Alpha within minutes. Counting each copy stacks per-source points AND fakes the
+# multi-source confirmation bonus — four copies of one headline is ONE signal,
+# not four. First source to see a headline counts it; later copies are skipped.
+_SEEN_HEADLINES: set[str] = set()
+
+
+def _headline_is_dupe(text: str) -> bool:
+    """True if this headline was already counted THIS SCAN by any news source.
+    Fingerprint = normalized first 10 words, so syndication suffixes ("- Yahoo
+    Finance") and tracking cruft don't defeat the match. Registers the headline
+    as seen when new. Too-short texts are never deduped (unsafe fingerprint)."""
+    key = re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+    key = " ".join(key.split()[:10])
+    if len(key) < 20:
+        return False
+    if key in _SEEN_HEADLINES:
+        return True
+    _SEEN_HEADLINES.add(key)
+    return False
 
 
 def _record_intent(ticker: str, res, weight: float = 1.0) -> None:
@@ -254,7 +278,21 @@ async def _resolve_intent_rows(rows: list, *, use_ai: bool = True) -> dict:
             if r["lex"] is None or r["lex"].label == ti.UNCLEAR or r["lex"].confidence < thr
         ]
         if applicable:
-            ai_res = await _ai_classify_intents([(rows[i]["ticker"], rows[i]["text"]) for i in applicable])
+            # The AI call (CF 45s client timeout + OpenRouter fallbacks) can exceed
+            # the per-source scan budget, which used to time out the WHOLE source and
+            # throw away even the lexicon counts (trusted_twitter contributed zero for
+            # days). Bound it to a fraction of the source budget and fall back to
+            # lexicon-only on timeout — partial intent beats no source at all.
+            ai_budget = max(5.0, _scan_source_timeout() * 0.5)
+            try:
+                ai_res = await asyncio.wait_for(
+                    _ai_classify_intents([(rows[i]["ticker"], rows[i]["text"]) for i in applicable]),
+                    timeout=ai_budget,
+                )
+            except asyncio.TimeoutError:
+                log.warning("AI intent timed out after %.0fs — lexicon-only for %d posts",
+                            ai_budget, len(applicable))
+                ai_res = {}
             for li, ar in ai_res.items():
                 ai_map[applicable[li]] = ar
     from tradingagents.screening import buzz_score as bz
@@ -318,17 +356,41 @@ async def _reddit_tickers(client: httpx.AsyncClient, limit: int = 25) -> dict[st
     write it now)."""
     headers = {"User-Agent": "AgenticTrader/1.0 (stock research tool)"}
     rows: list[dict] = []
-    for sub in SUBREDDITS:
+
+    async def _fetch_sub(sub: str) -> list[dict]:
+        out: list[dict] = []
         try:
             url = f"https://www.reddit.com/r/{sub}/hot.json?limit={limit}"
             r = await client.get(url, headers=headers, timeout=10)
-            if r.status_code != 200:
-                continue
-            for p in r.json().get("data", {}).get("children", []):
-                d = p.get("data", {})
-                rows += _lexicon_rows(f"{d.get('title','')} {d.get('selftext','')}")
+            if r.status_code == 200:
+                for p in r.json().get("data", {}).get("children", []):
+                    d = p.get("data", {})
+                    out += _lexicon_rows(f"{d.get('title','')} {d.get('selftext','')}")
+                return out
+            # Reddit 403s unauthenticated JSON from some IPs (source silently went
+            # "empty"); the public RSS feed still serves — fall back to it.
+            rss = await client.get(
+                f"https://www.reddit.com/r/{sub}/hot/.rss?limit={limit}",
+                headers=headers, timeout=10,
+            )
+            if rss.status_code != 200:
+                log.warning("Reddit %s: json=%s rss=%s", sub, r.status_code, rss.status_code)
+                return out
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(rss.text, "xml")
+            for entry in soup.find_all("entry"):
+                title = entry.find("title")
+                content = entry.find("content")
+                content_text = BeautifulSoup(content.text, "html.parser").get_text(" ") if content else ""
+                out += _lexicon_rows(f"{title.text if title else ''} {content_text}")
         except Exception as e:
             log.warning("Reddit %s: %s", sub, e)
+        return out
+
+    # Sequential on purpose: concurrent hits on reddit.com rate-limit the RSS
+    # fallback to 429s (observed live). 5 subs × ~1s is well inside the budget.
+    for sub in SUBREDDITS:
+        rows += await _fetch_sub(sub)
     return await _resolve_intent_rows(rows, use_ai=True)
 
 
@@ -554,6 +616,8 @@ async def _google_news_tickers(client: httpx.AsyncClient) -> dict[str, int]:
                 for item in soup.find_all("item")[:10]:
                     title = item.find("title")
                     desc  = item.find("description")
+                    if _headline_is_dupe(title.text if title else ""):
+                        continue
                     blob  = f"{title.text if title else ''} {desc.text if desc else ''}"
                     for t, c in _lexicon_counts(blob).items():
                         counts[t] = counts.get(t, 0) + c
@@ -583,6 +647,8 @@ async def _seeking_alpha_tickers(client: httpx.AsyncClient) -> dict[str, int]:
                 for item in soup.find_all("item")[:20]:
                     title = item.find("title")
                     blob  = title.text if title else ""
+                    if _headline_is_dupe(blob):
+                        continue
                     for t, c in _lexicon_counts(blob, 2).items():
                         counts[t] = counts.get(t, 0) + c
             except Exception as e:
@@ -673,9 +739,21 @@ async def _trusted_twitter_tickers(client: httpx.AsyncClient) -> dict[str, int]:
     rows: list[dict] = []
     try:
         from bs4 import BeautifulSoup
-        for url in TRUSTED_TWITTER_FEEDS:
+
+        async def _fetch(url: str):
             try:
-                r = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                return url, await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            except Exception as e:
+                return url, e
+
+        # Fetch all feeds concurrently — serial fetches (5 × up to 10s) plus the AI
+        # intent call used to blow the per-source scan budget.
+        fetched = await asyncio.gather(*[_fetch(u) for u in TRUSTED_TWITTER_FEEDS])
+        for url, r in fetched:
+            try:
+                if isinstance(r, Exception):
+                    log.warning("Trusted Twitter RSS %s: %s", url[-20:], r)
+                    continue
                 if r.status_code != 200:
                     log.warning("Trusted Twitter RSS %s: %s", url[-20:], r.status_code)
                     continue
@@ -823,6 +901,8 @@ async def _stocktwits_trending(client: httpx.AsyncClient) -> dict[str, int]:
             if r.status_code != 200:
                 continue
             for text in _INNER.findall(r.text):
+                if _headline_is_dupe(text):
+                    continue
                 # Cashtags ($NVDA) = high confidence
                 for t in _CASH.findall(text):
                     if t not in _SKIP and 2 <= len(t) <= 5:
@@ -898,6 +978,8 @@ async def _rss_tickers(client: httpx.AsyncClient) -> dict[str, int]:
             # Only extract from text content, never from XML tag names
             texts: list[str] = _INNER.findall(r.text)
             for text in texts:
+                if _headline_is_dupe(text):
+                    continue
                 # Cashtags ($NVDA) = high confidence signal
                 for t in _CASH.findall(text):
                     if t not in _SKIP and 2 <= len(t) <= 5:
@@ -1047,6 +1129,10 @@ async def _merge_signals(
     scores: dict[str, float] = {}
     breakdown: dict[str, dict[str, float]] = {}
     source_presence: dict[str, set] = {}  # ticker → set of source names
+    # Adaptive per-source weights learned from forward returns of past signals
+    # (signal_outcomes module) — a source whose picks keep going up counts more,
+    # one whose picks keep going nowhere counts less. {} until enough history.
+    adaptive_wt = _load_source_weights()
 
     def _add(ticker: str, source: str, pts: float) -> None:
         ticker = _norm_ticker(ticker)
@@ -1056,7 +1142,7 @@ async def _merge_signals(
         # thread spamming a ticker 500×) would otherwise dominate the raw score and
         # clear the buy gate on a single source's volume. Capping makes breadth
         # (confirmation across many sources) win over one source's raw count.
-        pts = max(0.0, float(pts or 0))
+        pts = max(0.0, float(pts or 0)) * adaptive_wt.get(source, 1.0)
         prev = breakdown.get(ticker, {}).get(source, 0.0)
         new_total = min(prev + pts, _MAX_PER_SOURCE_PTS)
         delta = new_total - prev
@@ -2229,6 +2315,90 @@ _paper_state_lock = asyncio.Lock()
 SCORE_HISTORY_FILE = TMP / "thematic_score_history.jsonl"
 _SCORE_HISTORY_MAX = 500  # max lines before pruning
 
+# ── Signal outcome tracking + adaptive source weights ─────────────────────────
+# Every scan records its top tickers with a price snapshot; later scans fill in
+# 1d/5d forward returns; per-source hit-rates become clamped weight multipliers
+# applied in _merge_signals. See tradingagents/screening/signal_outcomes.py.
+OUTCOMES_FILE       = TMP / "thematic_signal_outcomes.jsonl"
+SOURCE_WEIGHTS_FILE = TMP / "thematic_source_weights.json"
+_source_weights_cache: dict = {"mtime": None, "weights": {}}
+
+
+def _adaptive_weights_enabled() -> bool:
+    return os.getenv("THEMATIC_ADAPTIVE_WEIGHTS", "true").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _load_source_weights() -> dict[str, float]:
+    """Learned per-source multipliers, mtime-cached; {} (all 1.0) if disabled,
+    missing, or unreadable — the scorer must never depend on this file."""
+    if not _adaptive_weights_enabled():
+        return {}
+    try:
+        mtime = SOURCE_WEIGHTS_FILE.stat().st_mtime
+    except OSError:
+        return {}
+    if _source_weights_cache["mtime"] != mtime:
+        from tradingagents.screening import signal_outcomes as so
+        _source_weights_cache["weights"] = so.load_weights(SOURCE_WEIGHTS_FILE)
+        _source_weights_cache["mtime"] = mtime
+    return _source_weights_cache["weights"]
+
+
+def _closed_trades_for_weights() -> list[dict]:
+    """Closed thematic trades that carry a source breakdown — real-money/paper
+    outcomes fold into the source weights at a higher observation weight."""
+    try:
+        state = json.loads(PAPER_STATE_FILE.read_text())
+        return [
+            {"sources": t.get("sources") or {}, "pnl_pct": float(t.get("pnl_pct", 0) or 0)}
+            for t in (state.get("trades") or [])
+            if isinstance(t, dict) and t.get("sources")
+        ]
+    except Exception:
+        return []
+
+
+def _update_signal_outcomes(ranked: list, breakdown: dict) -> None:
+    """Post-scan (sync, run via to_thread): snapshot prices for the newly ranked
+    tickers + any rows awaiting evaluation, fill forward returns, recompute and
+    persist the adaptive source weights. Best-effort — never raises."""
+    try:
+        from datetime import datetime as _dt
+        from tradingagents.screening import signal_outcomes as so
+        cfg = so.OutcomeConfig.from_env()
+        now = _dt.now()
+        rows = so.load_rows(OUTCOMES_FILE)
+        need = so.pending_tickers(rows, now, cfg) | {str(t).upper() for t, _ in ranked[: cfg.top_n]}
+        prices: dict[str, float] = {}
+        if need:
+            import yfinance as yf
+            data = yf.download(sorted(need), period="1d", auto_adjust=True, progress=False, threads=True)
+            closes = data.get("Close") if hasattr(data, "get") else None
+            if closes is not None:
+                if hasattr(closes, "columns"):
+                    for sym in closes.columns:
+                        try:
+                            prices[str(sym).upper()] = float(closes[sym].dropna().iloc[-1])
+                        except Exception:
+                            pass
+                elif len(need) == 1:
+                    try:
+                        prices[next(iter(need))] = float(closes.dropna().iloc[-1])
+                    except Exception:
+                        pass
+        filled = so.update_forward_returns(rows, prices, now, cfg)
+        rows = so.record_scan(rows, ranked, breakdown, prices, now, cfg)
+        rows = so.trim_rows(rows, now, cfg)
+        so.save_rows(OUTCOMES_FILE, rows)
+        weights = so.source_weights(rows, _closed_trades_for_weights(), cfg)
+        if weights:
+            so.save_weights(SOURCE_WEIGHTS_FILE, weights, now, so.compute_source_stats(rows, None, cfg))
+        moved = {k: v for k, v in weights.items() if abs(v - 1.0) >= 0.05}
+        log.info("Signal outcomes: %d rows, %d horizons filled, weights(moved)=%s",
+                 len(rows), filled, moved or "none-yet")
+    except Exception as e:
+        log.warning("Signal outcome update failed (non-fatal): %s", e)
+
 # Portfolio brain caps
 PORTFOLIO_MAX_PER_THEME = 3
 PORTFOLIO_MAX_SPECULATIVE = 8
@@ -2319,6 +2489,41 @@ def _buzz_tier(score: float) -> str:
     if score >= 80:  return "Moderate"
     if score >= 40:  return "Weak"
     return "Low"
+
+
+def _conviction_clamp_enabled() -> bool:
+    return os.getenv("THEMATIC_CONVICTION_CLAMP", "true").strip().lower() in ("1", "true", "yes", "on")
+
+
+def conviction_ceiling(confirmed: bool, quality_sources: int, insider_and_social: bool) -> int:
+    """Deterministic evidence ladder for LLM conviction — pure.
+
+    Conviction is 75% of the composite score and comes from a FREE 3b/70b model
+    that will happily say 9/10 off one hot Reddit thread. High conviction must be
+    EARNED by corroboration the model can't hallucinate:
+
+      ≤7  — always allowed (the model's ordinary working range)
+       8  — needs scan confirmation (seen ≥2 scans) OR ≥2 quality sources
+       9  — needs confirmation AND ≥2 quality sources
+      10  — needs confirmation AND (≥3 quality sources OR insider+social combo)
+    """
+    if confirmed and (quality_sources >= 3 or insider_and_social):
+        return 10
+    if confirmed and quality_sources >= 2:
+        return 9
+    if confirmed or quality_sources >= 2:
+        return 8
+    return 7
+
+
+def clamp_conviction(conviction: int, source_breakdown: dict, confirmed: bool) -> int:
+    """Apply conviction_ceiling using a ticker's per-source breakdown."""
+    c = max(1, min(10, int(conviction or 0)))
+    srcs = {k for k, v in (source_breakdown or {}).items()
+            if isinstance(v, (int, float)) and v > 0}
+    quality = len(srcs & _QUALITY_SOURCES)
+    insider_and_social = "insider" in srcs and bool(srcs & {"reddit", "trusted_twitter", "twitter"})
+    return min(c, conviction_ceiling(bool(confirmed), quality, insider_and_social))
 
 
 def composite_score(conviction: int, raw_score: float, sentiment: float = 0.0) -> int:
@@ -2887,6 +3092,8 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
                 "hold_days":  hold_days,
                 "ts":         now_ts,
                 "executed":   False,
+                # entry-time source attribution → adaptive source weights
+                "sources":    pos.get("sources") or {},
             }
             if execute:
                 shares = pos.get("shares", 0)
@@ -2919,6 +3126,7 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
                     "exit_time": ex.get("ts", ""),
                     "exit_reason": ex.get("reason", ""),
                     "_source": "thematic",
+                    "sources": ex.get("sources") or {},
                 })
         # Keep trades list bounded (last 200 entries)
         state["trades"] = state["trades"][-200:]
@@ -3390,6 +3598,17 @@ async def _run_scan() -> None:
             scan_ts = _dt.datetime.now().isoformat()
             _append_score_history(scan_ts, ranked, source_breakdown)
 
+            # Outcome tracking + adaptive source weights (best-effort, bounded —
+            # a slow yfinance batch must not stall the scan).
+            if _adaptive_weights_enabled():
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(_update_signal_outcomes, ranked, source_breakdown),
+                        timeout=60,
+                    )
+                except (asyncio.TimeoutError, Exception) as e:
+                    log.warning("Signal outcome update skipped: %s", e)
+
             # Scan consistency data for spike detection
             consistency = _get_scan_consistency(n_scans=5)
 
@@ -3533,11 +3752,39 @@ async def _run_scan() -> None:
                 appearances = c.get("appearances", 1)
                 confirmed = c.get("confirmed", False)
 
+                # Evidence ceiling on LLM conviction: a free-model 9/10 without
+                # corroboration (scan confirmation + quality sources) is clamped
+                # before it drives composite, sizing, and policy ranking.
+                if _conviction_clamp_enabled():
+                    _cv = clamp_conviction(pick["conviction"], source_breakdown.get(t, {}), confirmed)
+                    if _cv != pick["conviction"]:
+                        log.info("Conviction clamp %s: %d → %d (confirmed=%s, sources=%s)",
+                                 t, pick["conviction"], _cv, confirmed,
+                                 sorted(source_breakdown.get(t, {}).keys()))
+                        pick["conviction_raw"] = pick["conviction"]
+                        pick["conviction"] = _cv
+
                 # Composite admit gate — the real buy floor. Reject sub-threshold names
                 # HERE (the single chokepoint every new signal passes) so a low score can't
                 # leak in via top-N policy selection or the policy-unavailable fallback.
                 _sent = _blended_sentiment(t, pick.get("sentiment", 0.0))
                 _comp = composite_score(pick["conviction"], score_dict.get(t, 0), _sent)
+
+                # Price/volume confirmation: the tape agrees (accumulation) →
+                # small boost; the tape contradicts (distribution on heavy
+                # volume) → cut. Fail-neutral 1.0 when bars are unavailable.
+                _pc = 1.0
+                if _price_confirm_enabled():
+                    try:
+                        _pc = await asyncio.wait_for(
+                            asyncio.to_thread(_price_confirm_for, t), timeout=12)
+                    except Exception:
+                        _pc = 1.0
+                    if _pc != 1.0:
+                        _adj = int(round(min(100.0, _comp * _pc)))
+                        log.info("Price confirm %s: ×%.3f (composite %d → %d)", t, _pc, _comp, _adj)
+                        _comp = _adj
+
                 if _comp < MIN_COMPOSITE_SCORE:
                     log.info("Signal skip: %s composite %d < admit floor %d",
                              t, _comp, int(MIN_COMPOSITE_SCORE))
@@ -3548,6 +3795,7 @@ async def _run_scan() -> None:
                     "ticker":       t,
                     "name":         pick["name"],
                     "conviction":   pick["conviction"],
+                    "conviction_raw": pick.get("conviction_raw", pick["conviction"]),
                     "theme":        pick["theme"],
                     "thesis":       pick["thesis"],
                     "catalyst":     pick["catalyst"],
@@ -3563,6 +3811,7 @@ async def _run_scan() -> None:
                     "ts":           scan_ts,
                     "raw_score":    score_dict.get(t, 0),
                     "score":        _comp,
+                    "price_confirm": _pc,
                     "source_breakdown": source_breakdown.get(t, {}),
                     "is_spike":     is_spike,
                     "confirmed":    confirmed,
@@ -4115,6 +4364,67 @@ def _breakout_signal(
 
 def _breakout_confirm_enabled() -> bool:
     return os.getenv("THEMATIC_BREAKOUT_CONFIRM", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ── Price/volume confirmation of social signals ───────────────────────────────
+def _price_confirm_enabled() -> bool:
+    return os.getenv("THEMATIC_PRICE_CONFIRM", "true").strip().lower() in ("1", "true", "yes", "on")
+
+
+def price_confirmation(
+    closes: "list[float]",
+    volumes: "list[float]",
+    *,
+    lo: float = 0.85,
+    hi: float = 1.12,
+) -> float:
+    """Pure multiplier confirming (or contradicting) a social signal with tape.
+
+    The composite score is conviction + buzz + sentiment — pure narrative, zero
+    price information, so "everyone's loading up" scores identically whether the
+    stock is being accumulated or dumped. This reads the last week of daily bars:
+
+    * price UP over ~5 sessions, heavier-than-normal volume → accumulation
+      confirms the buzz → boost toward ``hi``.
+    * price DOWN on heavy volume → distribution contradicts the buzz (bull-trap
+      / bag-holder chatter) → cut toward ``lo``.
+    * quiet / mixed tape, or not enough bars → 1.0 (fail-neutral).
+
+    Bars oldest → newest, today last. A ±8% 5-day move saturates the direction;
+    relative volume (today+yesterday vs 20d avg) scales how much the move counts.
+    """
+    import math as _m
+
+    def _clean(xs):
+        return [float(x) for x in (xs or [])
+                if isinstance(x, (int, float)) and _m.isfinite(float(x))]
+
+    c, v = _clean(closes), _clean(volumes)
+    if len(c) < 10:
+        return 1.0
+    ret5 = c[-1] / c[-6] - 1.0 if c[-6] > 0 else 0.0
+    direction = max(-1.0, min(1.0, ret5 / 0.08))
+    prior = v[-22:-2]
+    avg_vol = sum(prior) / len(prior) if prior else 0.0
+    recent = v[-2:]
+    rvol = (sum(recent) / len(recent) / avg_vol) if (avg_vol > 0 and recent) else 1.0
+    # Volume scales conviction in the move: quiet tape (rvol 0.5) counts ~70%,
+    # heavy tape (rvol >= 2) counts ~130% of the direction.
+    vol_amp = 0.7 + 0.3 * max(0.0, min(2.0, rvol - 0.5))
+    x = direction * vol_amp
+    mult = 1.0 + (x * (hi - 1.0) if x >= 0 else x * (1.0 - lo))
+    return round(max(lo, min(hi, mult)), 4)
+
+
+def _price_confirm_for(ticker: str, *, fetch=None) -> float:
+    """Network wrapper: bars → price_confirmation. 1.0 on any failure."""
+    fetch = fetch or _fetch_daily_bars
+    try:
+        bars = fetch(ticker) or {}
+        return price_confirmation(bars.get("closes", []), bars.get("volumes", []))
+    except Exception as e:
+        log.debug("price confirm %s: %s", ticker, e)
+        return 1.0
 
 
 def _fetch_daily_bars(ticker: str, period: str = "3mo") -> dict:
@@ -5430,6 +5740,11 @@ async def approve_signal(
                     "entry_raw_score": float(sig.get("raw_score", 0) or 0),
                     "confirmed_scans": sig.get("scan_appearances", 1),
                     "_source": "thematic_auto",
+                    # entry-time source attribution → adaptive source weights
+                    "sources": {
+                        k: float(v) for k, v in (sig.get("source_breakdown") or {}).items()
+                        if isinstance(v, (int, float)) and v > 0
+                    },
                 }
                 state["positions"]    = open_positions
                 state["cash"]         = round(cash - cost, 4)
@@ -5532,6 +5847,49 @@ async def execute_exits(_user: dict = Depends(require_admin)):
     """Execute exits: close thematic positions meeting stop/target/hold/buzz-collapse criteria."""
     exits = await _check_thematic_exits(execute=True)
     return {"ok": True, "executed": exits, "count": len(exits)}
+
+
+@router.get("/thematic/auto/outcomes")
+async def get_signal_outcomes(_user: dict = Depends(get_current_user)):
+    """Signal-accuracy report from the outcome tracker: per-source learned weights
+    and stats, plus hit-rate by score bucket (is a scored-85 pick actually better
+    than a scored-70 one?). Read-only view of the learning loop's state."""
+    from tradingagents.screening import signal_outcomes as so
+    rows = so.load_rows(OUTCOMES_FILE)
+    evaluated = [r for r in rows if so._row_outcome(r) is not None]
+
+    buckets: dict[str, dict] = {}
+    for r in evaluated:
+        ret = so._row_outcome(r)
+        s = float(r.get("score", 0) or 0)
+        label = ("<40" if s < 40 else "40-60" if s < 60 else "60-80" if s < 80
+                 else "80-100" if s < 100 else "100+")
+        b = buckets.setdefault(label, {"n": 0, "wins": 0, "ret_sum": 0.0})
+        b["n"] += 1
+        b["wins"] += 1 if ret > 0 else 0
+        b["ret_sum"] += ret
+    calibration = {
+        k: {"n": v["n"], "hit_rate": round(v["wins"] / v["n"], 3),
+            "avg_ret_pct": round(v["ret_sum"] / v["n"] * 100, 2)}
+        for k, v in sorted(buckets.items()) if v["n"] > 0
+    }
+
+    stats = so.compute_source_stats(evaluated, _closed_trades_for_weights())
+    weights = so.load_weights(SOURCE_WEIGHTS_FILE)
+    return {
+        "ok": True,
+        "rows_total": len(rows),
+        "rows_evaluated": len(evaluated),
+        "rows_pending": len(rows) - len(evaluated),
+        "calibration_by_score": calibration,
+        "source_stats": {
+            k: {"n_eff": round(v.n_eff, 2), "hit_rate": round(v.hit_rate, 3),
+                "avg_ret_pct": round(v.avg_ret * 100, 2),
+                "weight": weights.get(k, 1.0)}
+            for k, v in sorted(stats.items(), key=lambda kv: -kv[1].n_eff)
+        },
+        "adaptive_weights_enabled": _adaptive_weights_enabled(),
+    }
 
 
 @router.get("/thematic/auto/exit-log")

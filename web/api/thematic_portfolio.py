@@ -154,6 +154,27 @@ def _get_social_score_from_history(ticker: str) -> float:
         return 5.0
 
 
+def _get_source_breakdown_from_history(ticker: str) -> dict:
+    """Per-source score contributions for ticker from the latest scan snapshot.
+    Stored on the position at entry so the closed trade can attribute its P&L
+    back to the sources that surfaced it (adaptive source weights)."""
+    if not _SCORE_HISTORY_FILE.exists():
+        return {}
+    try:
+        for line in reversed(_SCORE_HISTORY_FILE.read_text().splitlines()):
+            try:
+                rec = json.loads(line)
+                bd = rec.get("breakdown") or {}
+                if bd:
+                    src = bd.get(ticker.upper()) or {}
+                    return {k: float(v) for k, v in src.items() if isinstance(v, (int, float)) and v > 0}
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return {}
+
+
 def _score_position(pos: dict, prices: dict[str, float]) -> dict[str, float]:
     ticker = pos["ticker"]
     entry  = pos.get("entry_price", 0) or 0
@@ -674,6 +695,9 @@ async def thematic_paper_trade(body: ThematicTradeIn, user: dict = Depends(get_c
             "rr_widened": rr_widened,   # A4: True if target was widened to meet min_rr
             # P1: set entry_raw_score from latest scan so buzz_decay exit can fire.
             "entry_raw_score": _get_social_score_from_history(ticker) * 10.0,
+            # Which sources surfaced this pick — closed-trade P&L folds back into
+            # the adaptive source weights (signal_outcomes).
+            "sources": _get_source_breakdown_from_history(ticker),
         }
 
         state["positions"]    = open_positions
