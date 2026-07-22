@@ -254,14 +254,26 @@ def evaluate(
             reason=f"At hard cap {cfg.hard_max} positions — manage existing only.",
         )
 
-    # Manage-first: strong positions still progressing and nothing clearly beats
-    # them → suppress new-signal generation this cycle.
-    if strong and not clearly_superior:
+    # Manage-first: near capacity, with strong positions still progressing and
+    # nothing clearly better → suppress new-signal generation this cycle.
+    #
+    # The `n >= near` guard is load-bearing. Without it, the mere EXISTENCE of one
+    # strong holding suppressed every new signal: `is_strong` is only conviction>=6
+    # and target_progress<0.8, the unified view folds REAL broker holdings in, and
+    # `clearly_superior` demands a candidate beat the weakest by +replace_margin
+    # conviction AND on expected return. So a single conviction-7 name — real or
+    # thematic — returned an empty decision set forever, and the consumer treats
+    # an empty dict as "nothing passes". The scanner proposed ZERO candidates per
+    # cycle regardless of the tape, while cash sat undeployed.
+    #
+    # Manage-first is a scarcity rule: it only makes sense when slots are scarce.
+    # Below near-capacity a strong holding is no reason to refuse a second idea.
+    if strong and not clearly_superior and n >= near:
         return PolicyResult(
             [], suppress_generation=True, n_existing=n, capacity_note=cap_note,
             reason=(
-                f"Managing existing — {len(strong)} high-conviction position(s) "
-                f"still progressing; no candidate clearly superior."
+                f"Managing existing — near capacity ({n}/{max_p}) with {len(strong)} "
+                f"high-conviction position(s) still progressing; no candidate clearly superior."
             ),
         )
 

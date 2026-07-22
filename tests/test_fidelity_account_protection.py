@@ -57,7 +57,17 @@ def test_default_account_refused_in_strict_mode(monkeypatch):
     assert ei.value.status_code == 403
 
 
-def test_default_account_allowed_when_not_strict(monkeypatch):
+def test_default_account_refused_by_default(monkeypatch):
+    # Strict mode now DEFAULTS ON when a protected list exists (2026-07-05 audit:
+    # account-select fallthrough could land orders on the broker default account).
     monkeypatch.setenv("FIDELITY_PROTECTED_ACCOUNTS", "262502469")
     monkeypatch.delenv("FIDELITY_REQUIRE_EXPLICIT_ACCOUNT", raising=False)
-    f._assert_account_tradeable(None)  # default allowed when strict mode off
+    with pytest.raises(HTTPException) as ei:
+        f._assert_account_tradeable(None)
+    assert ei.value.status_code == 403
+
+
+def test_default_account_allowed_when_strict_explicitly_disabled(monkeypatch):
+    monkeypatch.setenv("FIDELITY_PROTECTED_ACCOUNTS", "262502469")
+    monkeypatch.setenv("FIDELITY_REQUIRE_EXPLICIT_ACCOUNT", "false")
+    f._assert_account_tradeable(None)  # explicit opt-out only

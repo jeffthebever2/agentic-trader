@@ -5,6 +5,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, Cell,
 } from 'recharts'
 import { Card } from '@/components/ui/Card'
+import { AnimatedNumber } from '@/components/ui/AnimatedNumber'
 import { Tabs } from '@/components/ui/Tabs'
 import { Badge } from '@/components/ui/Badge'
 import { Modal } from '@/components/ui/Modal'
@@ -111,7 +112,7 @@ function Hero({ m }: { m: PerfMetrics }) {
       <div style={{ display: 'flex', alignItems: 'flex-end', gap: 28, flexWrap: 'wrap' }}>
         <div>
           <div style={lbl}>Account value</div>
-          <div style={{ fontSize: 38, fontWeight: 800, color: 'var(--ink)', lineHeight: 1, letterSpacing: '-.02em', fontVariantNumeric: 'tabular-nums' }}>{usd(m.current_value)}</div>
+          <div style={{ fontSize: 38, fontWeight: 800, color: 'var(--ink)', lineHeight: 1, letterSpacing: '-.02em', fontVariantNumeric: 'tabular-nums' }}>{Number.isFinite(m.current_value as number) ? <AnimatedNumber value={m.current_value as number} format={usd} flash={false} /> : usd(m.current_value)}</div>
         </div>
         <div style={{ paddingBottom: 4 }}>
           <div style={lbl}>Today</div>
@@ -121,7 +122,7 @@ function Hero({ m }: { m: PerfMetrics }) {
         </div>
         <div style={{ paddingBottom: 4 }}>
           <div style={lbl}>Total return</div>
-          <div style={{ fontSize: 20, fontWeight: 800, color: sgn(m.total_pnl), fontVariantNumeric: 'tabular-nums' }}>{usd(m.total_pnl)} <span style={{ fontSize: 13, color: sgn(m.total_return_pct) }}>{pct(m.total_return_pct)}</span></div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: sgn(m.total_pnl), fontVariantNumeric: 'tabular-nums' }}>{Number.isFinite(m.total_pnl as number) ? <AnimatedNumber value={m.total_pnl as number} format={usd} flash /> : usd(m.total_pnl)} <span style={{ fontSize: 13, color: sgn(m.total_return_pct) }}>{pct(m.total_return_pct)}</span></div>
         </div>
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 22, paddingBottom: 4 }}>
           <Mini label="MTD" value={pct(m.mtd_pct)} color={sgn(m.mtd_pct)} />

@@ -22,6 +22,7 @@ import asyncio
 import json
 import logging
 import os
+from tradingagents.config import env_bool
 import re
 import tempfile
 import threading
@@ -329,6 +330,19 @@ def _lexicon_sell_tickers(text: str) -> set:
     return out
 
 
+def _lexicon_sells_norecord(text: str) -> set:
+    """Sell/warning tickers per the lexicon WITHOUT recording intent — for a
+    cashtag point-branch whose sibling ``_lexicon_counts`` call already records
+    this headline's intent (recording twice would double the sentiment mass)."""
+    from tradingagents.screening import tweet_intent as ti
+    out: set = set()
+    for r in _lexicon_rows(text):
+        lex = r["lex"] or ti.classify_intent(r["text"], ticker=r["ticker"])
+        if lex.reduce_buy:
+            out.add(r["ticker"])
+    return out
+
+
 def _lexicon_counts(blob: str, weight: int = 1) -> dict:
     """Sync lexicon-only intent for NEWS sources (headlines are mostly NEWS_ONLY;
     no AI call needed). Records intent + returns non-selling buy-counts. Lets an
@@ -432,8 +446,13 @@ def _get_tweepy_client():
 
 
 async def _twitter_tickers() -> dict[str, int]:
-    """Twitter API v2 search — requires Basic plan ($100/mo). Returns empty if free tier."""
-    return {}  # Free tier 402s on search_recent_tweets — not viable
+    """X API v2 search placeholder.
+
+    Self-serve X search is pay-per-use, so live calls must go through the
+    credit-aware planner in ``tradingagents.screening.data_scaling`` before this
+    source is enabled.
+    """
+    return {}
 
 
 # ── DuckDuckGo news scraper ───────────────────────────────────────────────────
@@ -571,11 +590,14 @@ async def _brave_tickers(client: httpx.AsyncClient) -> dict[str, int]:
             results = r.json().get("results", [])
             for item in results:
                 text = f"{item.get('title','')} {item.get('description','')}"
+                # Sell filter must gate BOTH branches — a "downgrade/offering"
+                # headline used to skip only the plain-text branch while its
+                # cashtag still added the full +3.
+                _sell = _lexicon_sell_tickers(text)
                 for t in _CASH.findall(text):
-                    if t not in _SKIP and 2 <= len(t) <= 5:
+                    if t not in _SKIP and 2 <= len(t) <= 5 and t not in _sell:
                         counts[t] = counts.get(t, 0) + 3   # $TICKER cashtag = high confidence
                 # Plain text: 5+ chars only to cut BOOM/JUNE/AMID noise
-                _sell = _lexicon_sell_tickers(text)
                 for t in extract_tickers(text):
                     if t not in _SKIP and len(t) >= 5 and t not in _sell:
                         counts[t] = counts.get(t, 0) + 1
@@ -702,12 +724,26 @@ async def _marketaux_tickers(client: httpx.AsyncClient) -> dict[str, int]:
         if r.status_code != 200:
             log.warning("Marketaux: %s %s", r.status_code, r.text[:100])
             return {}
+        from tradingagents.screening import tweet_intent as ti
         for article in r.json().get("data", []):
+            blob = f"{article.get('title', '')} {article.get('description', '')}".strip()
             # Entities = identified tickers with sentiment
             for ent in article.get("entities", []):
                 sym  = ent.get("symbol", "").upper()
                 sent = float(ent.get("sentiment_score", 0) or 0)
                 if sym and sym not in _SKIP and len(sym) >= 2 and sent > 0:
+                    # Marketaux has the highest merge multiplier AND a
+                    # _HIGH_TRUST_SOLO exemption — its headlines must not bypass
+                    # the intent gate every other text source goes through. The
+                    # API's sentiment_score misses action words (offering,
+                    # downgrade, investigation) the lexicon catches; recording
+                    # intent also lets these names join bull/bear modulation and
+                    # the avoid flag in _merge_signals.
+                    lex = ti.classify_intent(blob, ticker=sym) if blob else None
+                    if lex is not None:
+                        _record_intent(sym, lex)
+                        if lex.reduce_buy:
+                            continue
                     # Weight by sentiment strength
                     counts[sym] = counts.get(sym, 0) + int(sent * 5) + 2
     except Exception as e:
@@ -847,9 +883,12 @@ async def _insider_tickers(client: httpx.AsyncClient) -> dict[str, int]:
                     for item in soup3.find_all("item")[:8]:
                         title = item.find("title")
                         blob  = title.text if title else ""
+                        # Non-recording sell check — _lexicon_counts below already
+                        # records this headline's intent once.
+                        _sold = _lexicon_sells_norecord(blob)
                         # Cashtags in congress news = very high signal
                         for m in _CASHTAG_RE.findall(blob.upper()):
-                            if m not in _SKIP and 2 <= len(m) <= 5:
+                            if m not in _SKIP and 2 <= len(m) <= 5 and m not in _sold:
                                 counts[m] = counts.get(m, 0) + 4
                         for t, c in _lexicon_counts(blob).items():
                             counts[t] = counts.get(t, 0) + c
@@ -903,12 +942,14 @@ async def _stocktwits_trending(client: httpx.AsyncClient) -> dict[str, int]:
             for text in _INNER.findall(r.text):
                 if _headline_is_dupe(text):
                     continue
+                # Sell filter gates the cashtag branch too — an offering/downgrade
+                # PR must not add +4 via its cashtag.
+                _sell = _lexicon_sell_tickers(text)
                 # Cashtags ($NVDA) = high confidence
                 for t in _CASH.findall(text):
-                    if t not in _SKIP and 2 <= len(t) <= 5:
+                    if t not in _SKIP and 2 <= len(t) <= 5 and t not in _sell:
                         counts[t] = counts.get(t, 0) + 4
                 # Plain text tickers: 4+ chars only (cuts PART/WALL/HELP noise)
-                _sell = _lexicon_sell_tickers(text)
                 for t in extract_tickers(text):
                     if t not in _SKIP and len(t) >= 4 and t not in _sell:
                         counts[t] = counts.get(t, 0) + 1
@@ -980,12 +1021,13 @@ async def _rss_tickers(client: httpx.AsyncClient) -> dict[str, int]:
             for text in texts:
                 if _headline_is_dupe(text):
                     continue
+                # Sell filter gates the cashtag branch too (same fix as PR feed).
+                _sell = _lexicon_sell_tickers(text)
                 # Cashtags ($NVDA) = high confidence signal
                 for t in _CASH.findall(text):
-                    if t not in _SKIP and 2 <= len(t) <= 5:
+                    if t not in _SKIP and 2 <= len(t) <= 5 and t not in _sell:
                         counts[t] = counts.get(t, 0) + 3
                 # Plain text: 4+ chars to avoid PART/WALL/HELP/WORLD noise
-                _sell = _lexicon_sell_tickers(text)
                 for t in extract_tickers(text):
                     if t not in _SKIP and len(t) >= 4 and t not in _sell:
                         counts[t] = counts.get(t, 0) + 1
@@ -1068,9 +1110,18 @@ _MAX_PER_SOURCE_PTS: float = 60.0
 # Sources that count as real conviction signal (not OTC/foreign-stock noise from
 # screener/mover feeds). Used both for the multi-source confirmation bonus and
 # the quality gate — confirmation must come from quality feeds, not two screeners.
+# NOTE: "scan_memory" is deliberately NOT a quality source. It is the ticker's
+# OWN prior-scan score, so counting it as independent corroboration lets a name
+# launder its own history into the multi-source confirmation bonus, the quality
+# gate, and the conviction ceiling. `conviction_ceiling` already takes
+# `confirmed` (seen in >=2 scans) as a separate argument, so including it here
+# made "confirmed AND >=2 quality sources" degenerate into "confirmed AND >=1
+# real source" — inflating the ceiling by a full conviction point (= +7.5
+# composite) on most ranked names. The solo-dampener already excluded it; that
+# exclusion simply was not applied to the other three sites.
 _QUALITY_SOURCES = frozenset({
     "trusted_twitter", "reddit", "seeking_alpha", "google_news",
-    "insider", "marketaux", "twitter", "ddg", "brave", "scan_memory",
+    "insider", "marketaux", "twitter", "ddg", "brave",
     "google_trends", "discovery", "analyst", "options_flow",
 })
 
@@ -1337,7 +1388,44 @@ async def _merge_signals(
     filtered_scores = {t: s for t, s in scores.items() if t in valid}
     filtered_breakdown = {t: v for t, v in breakdown.items() if t in filtered_scores}
 
-    ranked = sorted(filtered_scores.items(), key=lambda x: x[1], reverse=True)[:25]
+    ranked_full = sorted(filtered_scores.items(), key=lambda x: x[1], reverse=True)
+
+    # v2 diversification (rank-time interleave): round-robin the score-ranked list
+    # by MACRO-CLUSTER *before* truncating to the top-25 the LLM picker sees, so
+    # the top-N list is already section-spread instead of ~7 AI-complex names
+    # crowding out every other narrative. Clusters are visited best-score-first
+    # each round and score order is preserved WITHIN a cluster, so the overall #1
+    # name still leads — only the Nth same-cluster name is demoted below a
+    # fresh-cluster name. Pure/sync/no-I/O. Fail-OPEN to the plain score sort on
+    # any error; env DIVERSIFY_ENABLED (default on) gates it.
+    ranked = ranked_full[:25]
+    if env_bool("DIVERSIFY_ENABLED", True):
+        try:
+            from tradingagents.portfolio.diversification import macro_cluster
+
+            groups: dict[str, list] = {}
+            order: list[str] = []  # cluster keys, first-appearance = best-score-first
+            for t, s in ranked_full:
+                ck = macro_cluster(_guess_theme(t)) or f"solo:{t.upper()}"
+                if ck not in groups:
+                    groups[ck] = []
+                    order.append(ck)
+                groups[ck].append((t, s))
+            interleaved: list = []
+            depth = 0
+            while len(interleaved) < len(ranked_full):
+                progressed = False
+                for ck in order:
+                    bucket = groups[ck]
+                    if depth < len(bucket):
+                        interleaved.append(bucket[depth])
+                        progressed = True
+                if not progressed:
+                    break
+                depth += 1
+            ranked = interleaved[:25]
+        except Exception as e:
+            log.debug("cluster interleave skipped: %s", e)
     return ranked, filtered_breakdown
 
 
@@ -1399,6 +1487,36 @@ def _guess_theme(ticker: str) -> str:
         if ticker in members:
             return theme
     return "future_tech"
+
+
+# v2 market-section diversification: fold a thematic name's narrative theme
+# (preferred) or GICS sector into a small set of macro-clusters (ai_complex,
+# nuclear, quantum, minerals, ...). Pure/sync/network-free; imported once here so
+# both the persist site and every cap can resolve a bucket cheaply.
+from tradingagents.portfolio.diversification import macro_cluster as _macro_cluster
+
+
+def _resolve_cluster(theme=None, sector=None, ticker=None) -> "str | None":
+    """Fold a thematic theme (preferred) or GICS sector into a macro-cluster bucket.
+
+    NEVER invents a theme: when no explicit ``theme`` is given it uses EXACT
+    THEMES_MAP membership only (skipping ``_guess_theme``'s 'future_tech' catch-all,
+    which would misfile a real holding like AAPL into the biotech cluster), then
+    falls back to the ticker's GICS ``sector``. Returns None only when neither
+    resolves — the pure diversification layer then fails CLOSED to a per-ticker
+    singleton bucket (never an infinite cap). Never raises.
+    """
+    try:
+        t = (str(theme).strip().lower() or None) if theme else None
+        if not t and ticker:
+            u = str(ticker).upper()
+            for th, members in THEMES_MAP.items():
+                if u in members:
+                    t = th
+                    break
+        return _macro_cluster(t, sector)
+    except Exception:
+        return None
 
 
 _VALID_THEMES = set(THEMES_MAP.keys())
@@ -1594,11 +1712,14 @@ def _sanitize_picks(picks: object, allowed_tickers: set[str]) -> list[dict[str, 
     return list(best.values())
 
 
-def _build_ai_pick_prompt(ticker_str: str, news_text: str) -> str:
+def _build_ai_pick_prompt(ticker_str: str, news_text: str, max_per_cluster: int = 3) -> str:
     """Build the thematic pick prompt. Pure (no I/O) so the picking discipline is
     testable. Encodes the accuracy rules the deterministic layer also enforces:
-    only the trending tickers, a concrete catalyst, lone-hype down-ranking, and a
-    hard skip on red-flag names — so the LLM and the sanitizer pull the same way."""
+    only the trending tickers, a concrete catalyst, lone-hype down-ranking, a
+    hard skip on red-flag names, and a soft diversify-across-macro-themes nudge —
+    so the LLM and the sanitizer pull the same way. ``max_per_cluster`` mirrors
+    DIVERSIFY_MAX_NAMES_PER_CLUSTER (the hard cap the sizer enforces downstream);
+    it only softens the prompt and never places or relaxes an order."""
     return f"""You are a disciplined momentum stock analyst. You track social buzz, news catalysts, AND insider/congressional buying as conviction signals.
 
 Trending tickers by combined signal score (Reddit buzz + news mentions + insider buys + congressional trades):
@@ -1613,8 +1734,9 @@ RULES (follow strictly — they drive real position sizing):
 3. A name trending on a SINGLE source with no cross-confirmation is unproven — cap its conviction at 6. Names confirmed across MULTIPLE sources AND with insider buying get the highest conviction.
 4. READ WHAT THE CROWD IS ACTUALLY SAYING — bullish (buy/squeeze/breakout) vs bearish (sell/dump/short/crash/overvalued). A name the crowd is BEARISH on is NOT a buy.
 5. SKIP entirely any name whose chatter cites fraud, an SEC/DOJ investigation, a trading halt, delisting, going-concern, dilution, or a short-seller report — these are not buys at any buzz level.
+6. DIVERSIFY across the market — do NOT stack the whole list on one macro-theme. Most of the AI/semis/datacenter names (ai_leaders, ai_infrastructure, optical_network, memory_hbm, datacenter_power) are really ONE correlated trade; pick at most {max_per_cluster} names from any single macro-theme and prefer spreading picks across DIFFERENT themes/sectors (e.g. nuclear_energy, space_defense, fintech_consumer, critical_minerals, quantum_future). A book concentrated in one theme is penalised at sizing time, so a slightly-lower-conviction name in a fresh theme often beats the 4th correlated AI name.
 
-Pick the TOP 6 highest-conviction LONG plays that satisfy the rules.
+Pick the TOP 6 highest-conviction LONG plays that satisfy the rules — and, all else equal, spread them across DIFFERENT macro-themes/sectors rather than piling into one.
 
 Respond ONLY with a JSON array (no markdown, no explanation):
 [
@@ -1882,7 +2004,7 @@ def _openrouter_intent_models() -> list:
 
 
 def _ai_intent_enabled() -> bool:
-    if os.getenv("THEMATIC_AI_INTENT", "true").strip().lower() not in ("1", "true", "yes", "on"):
+    if not env_bool("THEMATIC_AI_INTENT", True):
         return False
     return bool((os.getenv("CLOUDFLARE_ACCOUNT_ID") and os.getenv("CLOUDFLARE_API_TOKEN"))
                 or os.getenv("OPENROUTER_API_KEY"))
@@ -2224,7 +2346,7 @@ async def _ai_catalyst_materiality(signals: "list[dict]") -> dict:
 
 # ── #4 News-driven exit classification — bad news (exit) vs attention fade (hold) ─
 def _ai_exit_check_enabled() -> bool:
-    return os.getenv("THEMATIC_AI_EXIT_CHECK", "true").strip().lower() in ("1", "true", "yes", "on") \
+    return env_bool("THEMATIC_AI_EXIT_CHECK", True) \
         and _ai_intent_enabled()
 
 
@@ -2310,7 +2432,12 @@ _scan_lock = asyncio.Lock()
 # os.replace is crash-safe but doesn't prevent concurrent RMW clobbers.
 # Both thematic_auto and thematic_portfolio import this lock to serialize
 # all paper-state mutations across endpoints and the auto-scan loop.
-_paper_state_lock = asyncio.Lock()
+# P2 2026-07-05: upgraded from a plain asyncio.Lock (in-process only) to a
+# flock-backed lock so a multi-worker deployment can't interleave RMW cycles
+# across processes. Same `async with` usage at every import site.
+from tradingagents.portfolio.process_lock import CrossProcessAsyncLock
+
+_paper_state_lock = CrossProcessAsyncLock(PAPER_STATE_FILE.parent / "state.json.lock")
 
 SCORE_HISTORY_FILE = TMP / "thematic_score_history.jsonl"
 _SCORE_HISTORY_MAX = 500  # max lines before pruning
@@ -2325,7 +2452,7 @@ _source_weights_cache: dict = {"mtime": None, "weights": {}}
 
 
 def _adaptive_weights_enabled() -> bool:
-    return os.getenv("THEMATIC_ADAPTIVE_WEIGHTS", "true").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_ADAPTIVE_WEIGHTS", True)
 
 
 def _load_source_weights() -> dict[str, float]:
@@ -2492,7 +2619,7 @@ def _buzz_tier(score: float) -> str:
 
 
 def _conviction_clamp_enabled() -> bool:
-    return os.getenv("THEMATIC_CONVICTION_CLAMP", "true").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_CONVICTION_CLAMP", True)
 
 
 def conviction_ceiling(confirmed: bool, quality_sources: int, insider_and_social: bool) -> int:
@@ -2581,9 +2708,40 @@ def _load_signals() -> dict:
     return {"signals": [], "last_scan": None}
 
 
+# Serializes every read-modify-write of SIGNALS_FILE (scan final save, approve,
+# skip). A scan holds its in-memory snapshot across many awaits (AI passes take
+# tens of seconds); without this lock its final save could overwrite a signal a
+# user approved mid-scan back to "pending" → re-page → double buy.
+_signals_lock = asyncio.Lock()
+
+# Statuses a stale in-memory snapshot must never revert to "pending".
+_TERMINAL_SIGNAL_STATUSES = {"approved", "skipped", "executed", "expired"}
+# "approving" is the in-flight claim approve_signal stamps before its slow
+# (60s+ Playwright) live leg. It must survive a scan's stale save too — a
+# revert to "pending" mid-flight would re-arm the double-buy — and it blocks
+# re-approval just like a terminal status (fail closed; force overrides).
+_PROTECTED_SIGNAL_STATUSES = _TERMINAL_SIGNAL_STATUSES | {"approving"}
+
+
 def _save_signals(data: dict) -> None:
     if SIGNALS_FILE.exists():
         try:
+            # Last-line defence (belt to _signals_lock's braces): if the file
+            # already records a terminal status for a signal this snapshot still
+            # thinks is pending, keep the terminal status.
+            try:
+                on_disk = json.loads(SIGNALS_FILE.read_text())
+                disk_status = {
+                    s.get("id"): s.get("status")
+                    for s in on_disk.get("signals", [])
+                    if s.get("id")
+                }
+                for s in data.get("signals", []):
+                    ds = disk_status.get(s.get("id"))
+                    if s.get("status") == "pending" and ds in _PROTECTED_SIGNAL_STATUSES:
+                        s["status"] = ds
+            except Exception:
+                pass
             import shutil
             shutil.copy2(SIGNALS_FILE, SIGNALS_FILE.with_suffix(".json.bak"))
         except Exception:
@@ -2935,6 +3093,16 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
         return exits
 
     positions: dict = state.get("positions", {})
+    # Deltas, replayed onto a FRESHLY re-read snapshot under the lock at the end.
+    # This function reads the state, then awaits a yfinance download and an LLM
+    # call, then wrote the whole stale snapshot back — a multi-second lost-update
+    # window against every other writer (approve_signal, the Fidelity mirror,
+    # thematic_portfolio), all of which correctly take _paper_state_lock. A
+    # concurrent approval could be erased, or an exited position resurrected with
+    # its cash double-counted. Recording deltas lets us hold the lock only for the
+    # re-read/merge/write, never across the network I/O.
+    _pos_field_updates: "dict[str, dict]" = {}
+    _exit_proceeds: "dict[str, float]" = {}
     thematic_tickers = [
         t for t, p in positions.items()
         if p.get("_source", "").startswith("thematic")
@@ -2999,18 +3167,42 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
         # so the position can capture the +50-200% moves these plays actually make,
         # while still locking in the gain if it rolls over. ──────────────────────
         trail_pct = float(pos.get("trail_pct", 20) or 20)
+        # High-water mark is tracked from ENTRY on every pass — NOT only once the
+        # trail activates. Previously peak_price sat at the entry price until
+        # `trailing` flipped, so a runner that reached +150% and rolled back to
+        # +20% before max-hold converted it had its trail computed off +20%: the
+        # protection was anchored at the worst possible point rather than the
+        # real high. Tracking it always also makes the trail a true one-way
+        # ratchet across restarts, since peak_price is persisted.
+        peak = max(
+            float(pos.get("peak_price", 0) or 0),
+            float(pos.get("entry_price", 0) or 0),
+            price,
+        )
+        if peak != pos.get("peak_price"):
+            pos["peak_price"] = peak
+            _pos_field_updates.setdefault(ticker, {})["peak_price"] = peak
+            modified = True
+
+        # Persist the CURRENT mark (not the high-water mark) so the sizing
+        # denominator in _thematic_account_value reflects live book value.
+        # Nothing else wrote this field, which silently made mark-to-market
+        # sizing fall back to a monotonic peak.
+        if pos.get("last_price") != price:
+            pos["last_price"] = price
+            _pos_field_updates.setdefault(ticker, {})["last_price"] = price
+            modified = True
+
         if not pos.get("trailing") and target < 999999 and price >= target:
+            # Do NOT reset peak_price here — it is already >= price, and
+            # overwriting it with the current print would *lower* the high-water
+            # mark whenever the position spiked between scans.
             pos["trailing"] = True
-            pos["peak_price"] = price
+            _pos_field_updates.setdefault(ticker, {})["trailing"] = True
             modified = True
             log.info("%s hit target %.2f at %.2f — trailing %.0f%% to let it run",
                      ticker, target, price, trail_pct)
-        if pos.get("trailing"):
-            peak = max(float(pos.get("peak_price", price) or price), price)
-            if peak != pos.get("peak_price"):
-                pos["peak_price"] = peak
-                modified = True
-            trail_stop = peak * (1 - trail_pct / 100.0)
+        trail_stop = peak * (1 - trail_pct / 100.0)
 
         reason = None
         if pos.get("trailing"):
@@ -3035,8 +3227,11 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
                 _run_buf = 1.12
             if _ep > 0 and price > _ep * _run_buf:
                 if not pos.get("trailing"):
+                    # peak_price is already maintained above from entry — do not
+                    # re-anchor it to today's price here (that was the bug that
+                    # pinned a faded runner's trail to its faded level).
                     pos["trailing"] = True
-                    pos["peak_price"] = max(price, float(pos.get("peak_price", price) or price))
+                    _pos_field_updates.setdefault(ticker, {})["trailing"] = True
                     modified = True
                     log.info("%s past max-hold but +%.0f%% — trailing instead of timed exit",
                              ticker, (price / _ep - 1) * 100)
@@ -3104,6 +3299,7 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
                 state["cash"]         = round(cur_cash + proceeds, 4)
                 state["settled_cash"] = round(cur_settled + proceeds, 4)
                 del positions[ticker]
+                _exit_proceeds[ticker] = proceeds
                 exit_rec["executed"] = True
                 exit_rec["proceeds"] = proceeds
                 modified = True
@@ -3113,24 +3309,63 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
             exits.append(exit_rec)
 
     if modified and execute:
-        state["positions"] = positions
-        # A1: append closed trades to state["trades"] so the daily-loss circuit breaker
-        # can read them. Without this, realized_today was always 0 (closed_today was never written).
-        state.setdefault("trades", [])
-        for ex in exits:
-            if ex.get("executed"):
-                state["trades"].append({
-                    "ticker": ex["ticker"],
-                    "pnl": round((ex.get("pnl_pct", 0) / 100.0) * (ex.get("proceeds", 0)), 2),
-                    "pnl_pct": ex.get("pnl_pct", 0) / 100.0,
-                    "exit_time": ex.get("ts", ""),
-                    "exit_reason": ex.get("reason", ""),
-                    "_source": "thematic",
-                    "sources": ex.get("sources") or {},
-                })
-        # Keep trades list bounded (last 200 entries)
-        state["trades"] = state["trades"][-200:]
-        _atomic_write(PAPER_STATE_FILE, state)
+        # Re-read under the lock and replay the deltas, rather than writing the
+        # snapshot we read before the price fetch and the LLM call. Holding the
+        # lock across that I/O would stall every other writer for seconds; writing
+        # the stale copy silently clobbered them.
+        async with _paper_state_lock:
+            try:
+                fresh = json.loads(PAPER_STATE_FILE.read_text()) if PAPER_STATE_FILE.exists() else {}
+            except Exception as e:
+                log.warning("Exit check: state re-read failed (%s) — writing merged snapshot", e)
+                fresh = {}
+            # Re-read failed → fall back to the snapshot we already mutated
+            # in-loop. `fresh is state` then, so the positions were ALREADY
+            # removed and the cash ALREADY credited by the loop body: the merge
+            # below must not try to re-apply them, but every executed exit still
+            # has to be BOOKED. Without this flag `_credited_tickers` stayed
+            # empty and _write_thematic_exit_state skipped every trade —
+            # realized_today read 0 and the daily-loss circuit breaker would not
+            # halt after a day of stop-outs.
+            _merge_from_disk = isinstance(fresh, dict) and bool(fresh)
+            if not _merge_from_disk:
+                fresh = state
+            fresh_positions: dict = fresh.setdefault("positions", {})
+
+            # 1. Field updates apply only to positions that still exist.
+            for _tk, _upd in _pos_field_updates.items():
+                if _tk in fresh_positions and isinstance(fresh_positions[_tk], dict):
+                    fresh_positions[_tk].update(_upd)
+
+            # 2. Credit proceeds ONLY for positions we actually remove here, so a
+            #    concurrently-closed name can never be paid out twice.
+            _credited = 0.0
+            _credited_tickers: set = set()
+            for _tk, _proceeds in _exit_proceeds.items():
+                if not _merge_from_disk:
+                    # In-loop mutation already applied — book it, don't re-credit.
+                    _credited_tickers.add(_tk)
+                elif _tk in fresh_positions:
+                    del fresh_positions[_tk]
+                    _credited += float(_proceeds or 0)
+                    _credited_tickers.add(_tk)
+                else:
+                    log.info("Exit merge: %s already closed by another writer — "
+                             "not crediting $%.2f twice", _tk, _proceeds)
+            if _credited:
+                _cash = float(fresh.get("cash", 0) or 0)
+                _settled = float(fresh.get("settled_cash", _cash) or _cash)
+                fresh["cash"] = round(_cash + _credited, 4)
+                fresh["settled_cash"] = round(_settled + _credited, 4)
+
+            state = fresh
+            positions = fresh_positions
+            state["positions"] = positions
+            # Book trades ONLY for positions this pass actually closed. Recording
+            # every `executed` row would double-count a name another writer had
+            # already closed (we deliberately skip crediting those), and the
+            # daily-loss circuit breaker reads that list.
+            _write_thematic_exit_state(state, exits, credited=set(_credited_tickers))
         # Log exits
         EXIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with EXIT_LOG_FILE.open("a") as f:
@@ -3138,6 +3373,35 @@ async def _check_thematic_exits(execute: bool = False) -> list[dict]:
                 f.write(json.dumps(ex) + "\n")
 
     return exits
+
+
+def _write_thematic_exit_state(state: dict, exits: list,
+                               credited: "set | None" = None) -> None:
+    """Append closed trades and persist. Caller MUST hold ``_paper_state_lock``.
+
+    ``credited`` is the set of tickers this pass actually closed and paid out.
+    Rows outside it were closed by a concurrent writer, so booking them here
+    would double-count into the daily-loss circuit breaker. None = book all
+    (single-writer callers)."""
+    # A1: append closed trades to state["trades"] so the daily-loss circuit breaker
+    # can read them. Without this, realized_today was always 0 (closed_today was never written).
+    state.setdefault("trades", [])
+    for ex in exits:
+        if credited is not None and ex.get("ticker") not in credited:
+            continue
+        if ex.get("executed"):
+            state["trades"].append({
+                "ticker": ex["ticker"],
+                "pnl": round((ex.get("pnl_pct", 0) / 100.0) * (ex.get("proceeds", 0)), 2),
+                "pnl_pct": ex.get("pnl_pct", 0) / 100.0,
+                "exit_time": ex.get("ts", ""),
+                "exit_reason": ex.get("reason", ""),
+                "_source": "thematic",
+                "sources": ex.get("sources") or {},
+            })
+    # Keep trades list bounded (last 200 entries)
+    state["trades"] = state["trades"][-200:]
+    _atomic_write(PAPER_STATE_FILE, state)
 
 
 def _append_score_history(scan_ts: str, ranked: list[tuple[str, float]], breakdown: dict[str, dict[str, float]]) -> None:
@@ -3350,6 +3614,62 @@ async def _auto_execute_confirmed_signals(signals: list[dict]) -> None:
         log.warning("_auto_execute_confirmed_signals: %s", e)
 
 
+def _source_concurrency() -> int:
+    """Max in-flight per-ticker fetches inside one source scraper.
+    Env THEMATIC_SOURCE_CONCURRENCY, default 16, clamped [1, 64]."""
+    try:
+        return max(1, min(int(float(os.getenv("THEMATIC_SOURCE_CONCURRENCY", "16") or 16)), 64))
+    except Exception:
+        return 16
+
+
+async def _gather_per_ticker(universe, worker, *, label: str) -> int:
+    """Run ``worker(ticker)`` across ``universe`` with bounded concurrency and a
+    soft deadline. Returns the number of tickers that completed.
+
+    Both `_discovery_tickers` and `_analyst_tickers` used to ``await`` one ticker
+    at a time across a universe of up to THEMATIC_DISCOVERY_MAX_UNIVERSE (350) —
+    and the analyst makes FIVE network calls per ticker, so ~1,750 sequential
+    round-trips — against the 25s budget from `_scan_source_timeout()`. They
+    could not physically finish. Worse, the caller wraps sources in
+    ``asyncio.wait_for``, which cancels and DISCARDS partial work, so both
+    contributed exactly zero: production health showed `status=timeout` with 17
+    consecutive failures while their API keys were present and being paid for.
+    Between them that is the price/volume breakout scanner (a _HIGH_TRUST_SOLO
+    source) and the only fundamental confirmation in the system.
+
+    The soft deadline fires BEFORE the caller's hard timeout so partial results
+    survive — a slow universe now degrades to fewer tickers rather than to no
+    source at all.
+    """
+    sem = asyncio.Semaphore(_source_concurrency())
+    done = 0
+
+    async def _bounded(tk):
+        nonlocal done
+        async with sem:
+            try:
+                await worker(tk)
+            finally:
+                done += 1
+
+    tasks = [asyncio.create_task(_bounded(tk)) for tk in universe]
+    if not tasks:
+        return 0
+    soft_deadline = max(3.0, _scan_source_timeout() * 0.8)
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True), timeout=soft_deadline
+        )
+    except asyncio.TimeoutError:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        log.warning("%s: soft deadline %.0fs hit — keeping %d/%d ticker(s) completed",
+                    label, soft_deadline, done, len(tasks))
+    return done
+
+
 def _scan_source_timeout() -> float:
     """Per-source hard cap (s) for scan scrapers so one hung/rate-limited source
     can't stall the whole scan. Env THEMATIC_SOURCE_TIMEOUT, default 25, floor 5."""
@@ -3393,7 +3713,7 @@ def _trends_momentum(series: "list[float]") -> int:
 
 
 def _google_trends_enabled() -> bool:
-    return os.getenv("THEMATIC_GOOGLE_TRENDS", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_GOOGLE_TRENDS", False)
 
 
 def _google_trends_watch_terms() -> "dict[str, str]":
@@ -3662,11 +3982,20 @@ async def _run_scan() -> None:
                     s["raw_score"] = score_dict.get(t, s.get("raw_score", 0))
                     _bs = _blended_sentiment(t, float(s.get("sentiment", 0) or 0))
                     s["sentiment"] = _bs
-                    s["score"] = composite_score(
+                    # Re-apply the price/volume confirmation multiplier. It is
+                    # applied once at creation and persisted as `price_confirm`,
+                    # but this carry-forward refresh used to recompute the raw
+                    # composite and silently drop it — so a name admitted at 70
+                    # only AFTER a x0.85 distribution penalty was re-scored back
+                    # up to ~82 on the next scan, crossing auto_trade_score and
+                    # firing a live trade request at a score it never earned, on
+                    # a stock the tape says is being distributed.
+                    _pc = float(s.get("price_confirm", 1.0) or 1.0)
+                    s["score"] = int(round(min(100.0, composite_score(
                         int(s.get("conviction", 7) or 7),
                         float(s.get("raw_score", 0) or 0),
                         _bs,
-                    )
+                    ) * _pc)))
                 # Drop a carried signal whose score fell below the buy floor — it's
                 # no longer a valid candidate, so expiring it won't re-add/flip-flop.
                 if float(s.get("score", 0) or 0) < MIN_COMPOSITE_SCORE:
@@ -3678,6 +4007,25 @@ async def _run_scan() -> None:
             _already_pending = {s["ticker"] for s in carried_pending}
             data["signals"] = carried_pending + prior_history
             created_this_scan: list[str] = []
+
+            # v2 pick-time diversification backstop: don't even PROPOSE the (N+1)th
+            # name in a macro-cluster. Seed the running tally from what's already
+            # held + already pending (so the cap spans the whole intended book), then
+            # skip a pick whose cluster is full BEFORE creating its pending signal.
+            # Pure/sync; fail-open (DIVERSIFY_ENABLED gates it; unknown cluster = no cap).
+            from tradingagents.portfolio.diversification import DiversifyConfig as _DivCfg
+            _divc = _DivCfg.from_env()
+            _cluster_tally: dict[str, int] = {}
+
+            def _bump_cluster(cl):
+                if cl:
+                    _cluster_tally[cl] = _cluster_tally.get(cl, 0) + 1
+
+            if _divc.enabled:
+                for _s in carried_pending:
+                    _bump_cluster(_resolve_cluster(_s.get("theme"), None, _s.get("ticker")))
+                for _tk in _existing_portfolio:
+                    _bump_cluster(_resolve_cluster(None, None, _tk))
             seen: set[str] = set()
 
             # ── Portfolio-manager policy: manage-first, capacity, top-N ──────────
@@ -3790,7 +4138,16 @@ async def _run_scan() -> None:
                              t, _comp, int(MIN_COMPOSITE_SCORE))
                     continue
 
+                # v2: skip the (N+1)th same-macro-cluster pick before it becomes a
+                # pending signal — stops the book being proposed as all-AI at source.
+                _pick_cluster = _resolve_cluster(pick.get("theme"), None, t) if _divc.enabled else None
+                if _pick_cluster and _cluster_tally.get(_pick_cluster, 0) >= _divc.max_names_per_cluster:
+                    log.info("Signal skip: %s — macro-cluster '%s' already at %d names (diversification)",
+                             t, _pick_cluster, _divc.max_names_per_cluster)
+                    continue
+
                 data["signals"].append({
+                    "macro_cluster": _pick_cluster,
                     "id":           f"{t}_{int(now)}",
                     "ticker":       t,
                     "name":         pick["name"],
@@ -3824,6 +4181,7 @@ async def _run_scan() -> None:
                     "policy_reason":  _pd.get("reason", ""),
                 })
                 created_this_scan.append(t)
+                _bump_cluster(_pick_cluster)
 
             # Trim old non-pending signals (keep last 50)
             pending   = [s for s in data["signals"] if s.get("status") == "pending"]
@@ -3868,7 +4226,8 @@ async def _run_scan() -> None:
             data["signals"] = pending + history
             data["last_scan"] = scan_ts
             data["policy"] = policy_summary
-            _save_signals(data)
+            async with _signals_lock:
+                _save_signals(data)
 
             # SMS notify only when this scan produced GENUINELY NEW pending signals —
             # carried-forward ones were already announced (no re-page on every scan).
@@ -3902,8 +4261,15 @@ async def twitter_status(_user: dict = Depends(get_current_user)):
     return {
         "ok": True,
         "connected": False,
-        "reason": "Twitter API v2 search requires Basic plan ($100/mo). Free tier only allows posting.",
-        "sources_active": ["Reddit WSB/stocks/investing", "DuckDuckGo news", "Yahoo Finance trending"],
+        "reason": (
+            "X API search is disabled until pay-per-use credits and the local "
+            "X budget guard are configured."
+        ),
+        "sources_active": [
+            "Reddit WSB/stocks/investing",
+            "DuckDuckGo news",
+            "Yahoo Finance trending",
+        ],
     }
 
 
@@ -4037,6 +4403,60 @@ async def get_signals(_user: dict = Depends(get_current_user)):
         sig["is_spike"]        = is_spike
         sig["confirmed"]       = confirmed
         sig["scan_appearances"]= appearances
+    # ── Market-section diversification preview (thematic v2) ────────────────
+    # Pure/sync/network-free: fold each pick's theme→macro-cluster, measure the
+    # cluster/sector exposure already in the shared thematic PAPER book, and show
+    # the SAME room the sizer + approve path enforce — so the human sees the
+    # cluster, its n-names / %-of-book, N_eff, and WHY a name would be shrunk or
+    # blocked BEFORE approving. Propose-only: this decorates the feed, never gates
+    # it (any failure is swallowed so a bad state.json can't blank the queue).
+    try:
+        from tradingagents.portfolio.diversification import (
+            macro_cluster, diversification_room, BookItem, DiversifyConfig,
+        )
+        from web.api.thematic_portfolio import PAPER_STATE_FILE as _PSF
+
+        _dcfg = DiversifyConfig.from_env()
+        _pst = json.loads(_PSF.read_text()) if _PSF.exists() else {}
+        _acct = _thematic_account_value(_user.get("email", ""))
+        _book: list[BookItem] = []
+        _weights: list[float] = []
+        for _tk, _p in (_pst.get("positions", {}) or {}).items():
+            _val = float(_p.get("entry_price", 0) or 0) * float(_p.get("shares", 0) or 0)
+            if _val <= 0:
+                continue
+            _book.append(BookItem(
+                ticker=str(_tk).upper(),
+                cluster=macro_cluster(_p.get("theme"), _p.get("sector")),
+                sector=_p.get("sector"),
+                dollars=_val,
+            ))
+            _weights.append(_val)
+        # Effective number of positions (inverse-Herfindahl): one concentrated
+        # name → ~1.0, a perfectly even book of N → N. Book-level context per card.
+        _tot = sum(_weights)
+        _n_eff = round((_tot * _tot) / sum(w * w for w in _weights), 2) if _tot > 0 else 0.0
+        for sig in pending:
+            _tkr = str(sig.get("ticker", "")).upper()
+            _cl = macro_cluster(sig.get("theme"), sig.get("sector"))
+            # Peers = book names already resolved into the cluster this pick joins.
+            _peers = [b for b in _book if _cl and (b.cluster or "") == _cl]
+            _cl_dollars = sum(b.dollars for b in _peers)
+            _room = diversification_room(_tkr, _cl, sig.get("sector"), _book, _acct, _dcfg)
+            sig["diversify"] = {
+                "cluster": _cl,
+                "cluster_names": len(_peers),
+                "cluster_pct": round(_cl_dollars / _acct * 100.0, 1) if _acct > 0 else None,
+                "max_names": _dcfg.max_names_per_cluster,
+                "max_cluster_pct": _dcfg.max_cluster_pct,
+                "blocked": _room.blocked,
+                "cap_reason": _room.reason or None,
+                "decay_mult": round(_room.decay_mult, 2),
+                "n_eff": _n_eff,
+            }
+    except Exception:
+        pass  # diversification preview is decorative — never break the feed
+
     return {
         "ok": True,
         "signals": pending,
@@ -4090,17 +4510,33 @@ def _thematic_account_value(email: str) -> float:
 
     try:
         cash = _f(st.get("cash", 0))
-        deployed = sum(
-            _f(p.get("entry_price", 0)) * _f(p.get("shares", 0))
-            for p in (st.get("positions", {}) or {}).values()
-        )
+        # Mark positions to the last OBSERVED price, else to cost.
+        #
+        # Valuing at cost makes this identically `starting_cash + realized P&L`,
+        # so "adaptive" sizing is frozen at the original balance: a book up 60%
+        # unrealized still sizes off the start value (compounding off), and a
+        # book down 40% sizes as if flat (over-risking into a drawdown).
+        #
+        # NEVER fall back to peak_price. It is a one-way ratchet
+        # (max(peak, entry, price)), so a name that ran +150% and gave it all
+        # back would still value at +150% forever — an account value that can
+        # only increase, which is worse than valuing at cost. `last_price` is
+        # written by _check_thematic_exits on every pass; when it is absent
+        # (position opened but not yet re-priced) cost is the honest mark.
+        deployed = 0.0
+        for p in (st.get("positions", {}) or {}).values():
+            shares = _f(p.get("shares", 0))
+            entry = _f(p.get("entry_price", 0))
+            mark = _f(p.get("last_price", 0)) or entry
+            deployed += mark * shares
     except Exception:
         return 0.0
     val = round(cash + deployed, 2)
     return val if (_m.isfinite(val) and val >= 0) else 0.0
 
 
-def _adaptive_dollar(account_value: float, score: float, target_pct: float, hil: dict) -> float:
+def _adaptive_dollar(account_value: float, score: float, target_pct: float, hil: dict,
+                     conviction: int | None = None) -> float:
     """Position size adaptive to portfolio AND signal quality.
 
     dollar = account_value × base_pct × score_multiplier × target_boost, clamped to
@@ -4120,7 +4556,22 @@ def _adaptive_dollar(account_value: float, score: float, target_pct: float, hil:
     score_mult = max(0.4, min(2.0, 0.6 + (_score - 50.0) / 50.0 * 1.3))
     # let conviction in a big runner add a little extra (target ≥80% → up to +20%)
     target_boost = 1.0 + min(0.2, max(0.0, (_target - 40.0) / 300.0))
-    dollar = account_value * base_pct * score_mult * target_boost
+    # Conviction was dropped entirely on this fallback path, so a conviction-10 and
+    # a conviction-4 signal with the same composite score got IDENTICAL size. This
+    # path runs whenever portfolio context can't be built or the user forces past a
+    # "no room" rejection — i.e. exactly when a human has expressed extra intent.
+    # Reuse the same monotonic 0.4x–1.5x curve the policy and portfolio sizers use
+    # so the three paths agree on what conviction is worth.
+    conv_mult = 1.0
+    if conviction is not None:
+        try:
+            from tradingagents.portfolio.portfolio_policy import conviction_scale
+            conv_mult = float(conviction_scale(int(conviction)))
+            if not math.isfinite(conv_mult) or conv_mult <= 0:
+                conv_mult = 1.0
+        except Exception:
+            conv_mult = 1.0
+    dollar = account_value * base_pct * score_mult * target_boost * conv_mult
     try:
         from tradingagents.compliance import MAX_POSITION_PCT_OF_ACCOUNT as _CAP
     except Exception:
@@ -4246,6 +4697,102 @@ def _adv_dollars_for(ticker: str, period: str = "1mo") -> "float | None":
         return None
 
 
+def _diversify_enforce_live() -> bool:
+    """Fold REAL Fidelity holdings into the thematic sizing book (product decision
+    2026-07-06). Default ON; env DIVERSIFY_ENFORCE_LIVE can disable."""
+    v = os.getenv("DIVERSIFY_ENFORCE_LIVE")
+    return True if v is None else v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _real_fidelity_book(email: str) -> "dict[str, float]":
+    """Real broker holdings as {TICKER: pct_of_account}, read from the cheap on-disk
+    Fidelity positions snapshot (no browser, no network). Empty on any miss so the
+    approval path never blocks on the broker. pct_of_account (not raw $) keeps the
+    book SCALE-CONSISTENT with the thematic sizing account_value. Non-equity /
+    money-market rows (SPAXX etc.) are skipped by the isalpha()/len<=5 filter and
+    the missing-pct guard."""
+    out: "dict[str, float]" = {}
+    if not email:
+        return out
+    try:
+        from web.api.fidelity import _read_snapshot
+        snap = _read_snapshot(email, "positions") or {}
+        for row in (snap.get("positions") or []):
+            tk = str(row.get("symbol") or row.get("ticker") or "").upper().strip()
+            if not tk or not tk.isalpha() or len(tk) > 5:
+                continue
+            raw = str(row.get("pct_of_account", "") or "").replace("%", "").replace(",", "").strip()
+            try:
+                pct = float(raw)
+            except ValueError:
+                continue
+            if pct > 0:
+                out[tk] = out.get(tk, 0.0) + pct
+    except Exception as e:
+        log.debug("real fidelity book read failed (%s) — paper-only book", e)
+    return out
+
+
+async def _live_diversification_room(email, sig, ticker, account=None):
+    """Fresh market-section room for a LIVE candidate vs the UNIFIED real+paper
+    book — FastAPI wiring around tradingagents.portfolio.diversification (the
+    pure/sync engine). Returns (DiversifyRoom, account_value). Real Fidelity
+    holdings + open thematic paper positions are folded into macro-clusters (real
+    names by best-effort GICS sector; the candidate also by its theme). Raises on
+    hard failure so the caller log-and-skips enforcement instead of trading blind
+    — it NEVER fabricates room.
+
+    LIMITATION: ``account`` is accepted for call-site symmetry but is NOT yet
+    honoured — ``get_unified_existing`` has no per-account filter, so the budget
+    is computed against the household view while the order itself sizes against a
+    single account via ``_account_scoped_balances``. Harmless on a single-account
+    login (today's case); with a second taxable account the cluster/sector budget
+    would inflate to the larger account's value. Thread an account filter through
+    ``get_unified_existing`` before relying on multi-account behaviour."""
+    from tradingagents.portfolio.diversification import (
+        diversification_room, DiversifyConfig, BookItem,
+    )
+    from web.api.holdings_brain import get_unified_existing
+
+    positions, acct_val = await get_unified_existing(email, broker="fidelity", broker_timeout=25.0)
+    if not acct_val or acct_val <= 0:
+        raise ValueError("no account value for live diversification room")
+
+    tkr = str(ticker).upper()
+    # Keep REAL Fidelity holdings only: the unified view returns open thematic PAPER
+    # positions at pct_of_account == 0 (they're not real money and belong to the
+    # paper-leg sizer's own book). Enforcing the live leg against the REAL account's
+    # holdings + value keeps a single, scale-consistent denominator.
+    real = [p for p in positions if float(getattr(p, "pct_of_account", 0) or 0) > 0]
+    book_tickers = [str(getattr(p, "ticker", "")).upper() for p in real]
+    want = list(dict.fromkeys([tkr] + [t for t in book_tickers if t]))
+    try:
+        secs = await asyncio.wait_for(
+            asyncio.gather(*[asyncio.to_thread(_sector_of, t) for t in want]),
+            timeout=12.0,
+        )
+        sector_by = {t: s for t, s in zip(want, secs)}
+    except Exception:
+        sector_by = {}
+
+    book: list = []
+    for p in real:
+        t = str(getattr(p, "ticker", "")).upper()
+        if not t:
+            continue
+        sec = sector_by.get(t)
+        pct = float(getattr(p, "pct_of_account", 0) or 0)
+        # Ticker-aware resolve: a known AI name (THEMES_MAP member) still classifies
+        # into ai_complex even if its GICS sector lookup timed out / is missing.
+        book.append(BookItem(t, cluster=_resolve_cluster(None, sec, t), sector=sec,
+                             dollars=pct / 100.0 * acct_val))
+
+    cand_sec = sector_by.get(tkr)
+    cand_cluster = _resolve_cluster(sig.get("theme"), cand_sec, tkr)
+    room = diversification_room(tkr, cand_cluster, cand_sec, book, acct_val, DiversifyConfig.from_env())
+    return room, acct_val
+
+
 async def _portfolio_aware_dollar(email, sig, account_value, target_pct, stop_pct, hil):
     """Whole-portfolio dollar size for a thematic approval.
 
@@ -4275,9 +4822,28 @@ async def _portfolio_aware_dollar(email, sig, account_value, target_pct, stop_pc
         # size off conviction/score + the hard portfolio constraints.
         vol = None
         max_corr = None
+        corr_load = None
+        n_eff = None
         adv_dollars = None
         sectors: dict[str, str | None] = {}
-        book_tickers = [str(tk).upper() for tk in positions.keys()]
+
+        # Book = the thematic PAPER positions only, each as % of the paper account
+        # value `av`. Real Fidelity holdings are deliberately NOT folded in here: they
+        # are a DIFFERENT denominator (% of the REAL account, not of `av`), and mixing
+        # the two would spuriously blow the heat/cluster caps of the small paper book
+        # (a $500k real account 80%-invested vs a $100k paper `av` → every approval
+        # blocked). Real-account market-section diversification is enforced separately
+        # on the LIVE leg via _live_diversification_room, which is scale-consistent
+        # (real pct against the real account value).
+        paper_theme: "dict[str, str | None]" = {}
+        book_weight: "dict[str, float]" = {}
+        for tk, p in positions.items():
+            key = str(tk).upper()
+            val = float(p.get("entry_price", 0) or 0) * float(p.get("shares", 0) or 0)
+            book_weight[key] = book_weight.get(key, 0.0) + ((val / av * 100.0) if av > 0 else 0.0)
+            paper_theme.setdefault(key, p.get("theme"))
+
+        book_tickers = list(book_weight.keys())
         try:
             async def _enrich():
                 want = list(dict.fromkeys([ticker] + book_tickers))
@@ -4293,24 +4859,55 @@ async def _portfolio_aware_dollar(email, sig, account_value, target_pct, stop_pc
                 vol = ps.realized_vol_pct(cand_closes)
                 book = {t: c for t, c in closes.items() if t != ticker}
                 if book:
-                    from tradingagents.portfolio.correlation import max_correlation
-                    mc = max_correlation(cand_closes, book)
-                    max_corr = mc.get("max_corr") if isinstance(mc, dict) else None
-        except Exception:
+                    # Weighted correlation LOAD vs the WHOLE book (not single-worst) plus
+                    # an effective-bets (N_eff) advisory. Weights = each holding's % of
+                    # account; max_corr preserved for the legacy path + notes.
+                    from tradingagents.portfolio.correlation import (
+                        correlation_load, correlation_matrix, effective_bets,
+                    )
+                    _link = float(os.getenv("SIZER_CLUSTER_LINK_THRESHOLD", "0.65") or 0.65)
+                    _cl = correlation_load(cand_closes, book, book_weight, link_threshold=_link)
+                    corr_load = _cl.get("load")
+                    max_corr = _cl.get("max_corr")
+                    _base = ps.SizerConfig.from_env(hil).base_position_pct
+                    _allw = {ticker: _base, **{k: book_weight.get(k, 0.0) for k in book}}
+                    _tks, _mat = correlation_matrix({ticker: cand_closes, **book})
+                    n_eff = effective_bets([_allw.get(t, 0.0) for t in _tks], _mat)
+        except Exception as _enrich_err:
+            # Enrichment failed or blew the 12s budget. Do NOT leave `vol` as None:
+            # inverse_vol_factor(None) returns a NEUTRAL 1.0, so the trade we know
+            # the LEAST about gets the LARGEST size. For these thematic small-caps
+            # realized vol runs 60-120% against a 40% target, so the factor is
+            # otherwise pinned at its 0.5 floor — a timeout is therefore a clean
+            # 2x oversize, and with correlation also degrading to 1.0 the two
+            # compound. Missing risk data must shrink, never inflate: synthesize
+            # the vol that pins the factor to its floor.
             sectors = {}
+            try:
+                _cfg_fb = ps.SizerConfig.from_env(hil)
+                if vol is None and _cfg_fb.vol_factor_floor > 0:
+                    vol = _cfg_fb.target_vol_pct / _cfg_fb.vol_factor_floor
+            except Exception:
+                pass
+            log.warning("enrichment failed for %s (%s) — sizing at the conservative "
+                        "vol floor rather than neutral", ticker, _enrich_err)
 
         existing = []
-        for tk, p in positions.items():
-            val = float(p.get("entry_price", 0) or 0) * float(p.get("shares", 0) or 0)
+        for key, wt in book_weight.items():
+            sec = sectors.get(key)
             existing.append(ps.BookPosition(
-                ticker=str(tk).upper(),
-                weight_pct=(val / av * 100.0) if av > 0 else 0.0,
-                sector=sectors.get(str(tk).upper()),
+                ticker=key,
+                weight_pct=wt,
+                sector=sec,
+                cluster=_resolve_cluster(paper_theme.get(key), sec, key),
             ))
+        cand_sector = sectors.get(ticker)
         cand = ps.SizingCandidate(
             ticker=ticker, conviction=conviction, score=score,
             expected_return_pct=float(target_pct or 0), stop_pct=float(stop_pct or 0),
-            volatility_pct=vol, sector=sectors.get(ticker), max_corr=max_corr,
+            volatility_pct=vol, sector=cand_sector,
+            cluster=_resolve_cluster(sig.get("theme"), cand_sector, ticker),
+            max_corr=max_corr, corr_load=corr_load, n_eff=n_eff,
             adv_dollars=adv_dollars,
         )
         res = ps.size_position(av, cand, existing, cash_available=cash, cfg=ps.SizerConfig.from_env(hil))
@@ -4363,12 +4960,12 @@ def _breakout_signal(
 
 
 def _breakout_confirm_enabled() -> bool:
-    return os.getenv("THEMATIC_BREAKOUT_CONFIRM", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_BREAKOUT_CONFIRM", False)
 
 
 # ── Price/volume confirmation of social signals ───────────────────────────────
 def _price_confirm_enabled() -> bool:
-    return os.getenv("THEMATIC_PRICE_CONFIRM", "true").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_PRICE_CONFIRM", True)
 
 
 def price_confirmation(
@@ -4460,7 +5057,7 @@ def _ticker_breakout(ticker: str, *, fetch=None) -> bool:
 
 
 def _atr_stops_enabled() -> bool:
-    return os.getenv("THEMATIC_ATR_STOPS", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_ATR_STOPS", False)
 
 
 # ── Trade-request chart (TradingView-style PNG attached to the SMS) ───────────
@@ -4468,7 +5065,7 @@ _CHART_DIR = Path(__file__).resolve().parent.parent / "static" / "charts"
 
 
 def _chart_sms_enabled() -> bool:
-    return os.getenv("THEMATIC_CHART_SMS", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_CHART_SMS", False)
 
 
 def _fetch_ohlcv_df(ticker: str, period: str = "1y"):
@@ -4487,7 +5084,7 @@ def _fetch_ohlcv_df(ticker: str, period: str = "1y"):
 
 
 def _chart_upload_enabled() -> bool:
-    return os.getenv("THEMATIC_CHART_UPLOAD", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_CHART_UPLOAD", False)
 
 
 def _upload_chart_public(path: str) -> "str | None":
@@ -4563,11 +5160,11 @@ _finra_short_cache: dict = {"day": "", "map": {}}
 
 
 def _short_overlay_enabled() -> bool:
-    return os.getenv("THEMATIC_SHORT_OVERLAY", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_SHORT_OVERLAY", False)
 
 
 def _true_short_interest_enabled() -> bool:
-    return os.getenv("THEMATIC_TRUE_SHORT_INTEREST", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_TRUE_SHORT_INTEREST", False)
 
 
 def _parse_finra_short_volume(text: str) -> "dict[str, float]":
@@ -4824,7 +5421,7 @@ def _price_target_weight(targets: "dict | list[dict]", price: "float | None" = N
 
 
 def _analyst_enabled() -> bool:
-    return os.getenv("THEMATIC_ANALYST", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_ANALYST", False)
 
 
 def _fetch_fmp_grades(ticker: str) -> "list[dict]":
@@ -4927,35 +5524,52 @@ async def _analyst_tickers(
     fetch_price = fetch_price or _fetch_quote_price
     universe = universe if universe is not None else _discovery_universe()
     out: dict[str, int] = {}
-    for tk in universe:
+
+    async def _one(tk: str) -> None:
         w = 0
+        # The four probes are independent — run them together rather than in
+        # series, so one ticker costs one round-trip of latency, not four.
+        grades, recs, earnings, targets, price = await asyncio.gather(
+            asyncio.to_thread(fetch_grades, tk),
+            asyncio.to_thread(fetch_recs, tk),
+            asyncio.to_thread(fetch_earnings, tk),
+            asyncio.to_thread(fetch_targets, tk),
+            asyncio.to_thread(fetch_price, tk),
+            return_exceptions=True,
+        )
+
+        def _ok(v):
+            return None if isinstance(v, BaseException) else v
+
         try:
-            w += _fmp_grade_weight(await asyncio.to_thread(fetch_grades, tk) or [])
+            w += _fmp_grade_weight(_ok(grades) or [])
         except Exception:
             pass
         try:
-            w += _recommendation_weight(await asyncio.to_thread(fetch_recs, tk) or {})
+            w += _recommendation_weight(_ok(recs) or {})
         except Exception:
             pass
         try:
-            w += _earnings_surprise_weight(await asyncio.to_thread(fetch_earnings, tk) or [])
+            w += _earnings_surprise_weight(_ok(earnings) or [])
         except Exception:
             pass
         try:
-            price = await asyncio.to_thread(fetch_price, tk)
-            w += _price_target_weight(await asyncio.to_thread(fetch_targets, tk) or {}, price)
+            w += _price_target_weight(_ok(targets) or {}, _ok(price))
         except Exception:
             pass
         if w > 0:
             norm = _norm_ticker(tk)
             if norm:
                 out[norm] = min(w, 12)
+
+    # 5 sequential calls x 350 tickers could never fit the per-source budget.
+    await _gather_per_ticker(universe, _one, label="analyst")
     return out
 
 
 # ── Unusual options-flow confirmation (optional Tradier chain) ───────────────
 def _options_flow_enabled() -> bool:
-    return os.getenv("THEMATIC_OPTIONS_FLOW", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_OPTIONS_FLOW", False)
 
 
 def _options_flow_weight(options: "list[dict]") -> int:
@@ -5063,7 +5677,7 @@ async def _options_flow_tickers(*, universe=None, fetch_chain=None) -> "dict[str
 
 # ── Discovery scanner (no-buzz price/volume breakouts — the IREN-$5 solver) ───
 def _discovery_enabled() -> bool:
-    return os.getenv("THEMATIC_DISCOVERY", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_DISCOVERY", False)
 
 
 _DISCOVERY_SEED_UNIVERSE = [
@@ -5146,7 +5760,8 @@ async def _discovery_tickers(*, fetch_bars=None, fetch_bench=None, universe=None
     except Exception:
         bench = []
     out: dict[str, int] = {}
-    for tk in universe:
+
+    async def _one(tk: str) -> None:
         try:
             bars = await asyncio.to_thread(fetch_bars, tk) or {}
             res = is_discovery_candidate(bars, bench)
@@ -5158,7 +5773,10 @@ async def _discovery_tickers(*, fetch_bars=None, fetch_bench=None, universe=None
                     out[norm] = w
         except Exception as e:
             log.debug("discovery %s: %s", tk, e)
-            continue
+
+    # Concurrent + partial-safe: sequential awaits over a 350-name universe could
+    # never finish inside the per-source budget. See _gather_per_ticker.
+    await _gather_per_ticker(universe, _one, label="discovery")
     return out
 
 
@@ -5181,11 +5799,11 @@ def _atr_stop_pct(price: float, atr: float, base_pct: float, *,
 
 
 def _risk_sizing_enabled() -> bool:
-    return os.getenv("THEMATIC_RISK_SIZING", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_RISK_SIZING", False)
 
 
 def _correlation_guard_enabled() -> bool:
-    return os.getenv("THEMATIC_CORRELATION_GUARD", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_CORRELATION_GUARD", False)
 
 
 def _correlation_guard_for_book(
@@ -5234,7 +5852,7 @@ _regime_cache: dict = {"ts": 0.0, "mult": 1.0}
 
 
 def _regime_gate_enabled() -> bool:
-    return os.getenv("THEMATIC_REGIME_GATE", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_REGIME_GATE", False)
 
 
 def _fetch_spy_closes() -> "list[float]":
@@ -5420,6 +6038,8 @@ class ApproveBody(BaseModel):
     fidelity_bid: float | None = None
     fidelity_ask: float | None = None
     fidelity_market_open: bool | None = None
+    fidelity_account: str | None = None  # explicit Fidelity target account; falls back to
+                                         # per-user HIL fidelity_account → env FIDELITY_TRADE_ACCOUNT
     force: bool = False             # A10: bypass score/spike gate (explicit override)
 
 
@@ -5429,13 +6049,17 @@ def _fidelity_request_kwargs_from_approval(
     *,
     stop_pct: float,
     target_pct: float,
-    dollar_amount: float,
+    dollar_amount: float | None,
+    account: str | None = None,
+    pct_of_account: float | None = None,
 ) -> dict:
     return {
         "ticker": ticker,
         "dollar_amount": dollar_amount,
+        "pct_of_account": pct_of_account,
         "stop_pct": stop_pct,
         "target_pct": target_pct,
+        "account": account,
         "also_paper_trade": False,
         "execute": True,
         "quote_time": body.fidelity_quote_time,
@@ -5461,6 +6085,20 @@ async def approve_signal(
     sig = next((s for s in data["signals"] if s["id"] == signal_id), None)
     if not sig:
         raise HTTPException(status_code=404, detail="Signal not found")
+
+    # ── Re-approval guard (P0 double-buy) ─────────────────────────────────────
+    # A signal already approved/executed/skipped (or mid-approval) must not
+    # re-run the live path: the per-ticker order lock only blocks CONCURRENT
+    # orders, so a re-tapped SMS link or an HTTP retry after a slow (60s+)
+    # Playwright approve would place a SECOND full-size real Fidelity buy.
+    # 409 unless the human explicitly forces a re-approval.
+    _prior_status = sig.get("status")
+    if _prior_status in _PROTECTED_SIGNAL_STATUSES and not body.force:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Signal already {_prior_status} — re-approval blocked (double-buy guard). "
+                   f"Pass force=true to intentionally approve again.",
+        )
 
     stop_pct   = body.stop_pct   or sig.get("stop_pct", 7)
     target_pct = body.target_pct or sig.get("target_pct", 20)
@@ -5491,6 +6129,11 @@ async def approve_signal(
     _size_factor = float(sig.get("size_factor") or 0)
     _adaptive = bool(hil_settings.get("adaptive_sizing", True))
     _sig_score = float(sig.get("score") or composite_score(conviction, float(sig.get("raw_score", 0) or 0), float(sig.get("sentiment", 0) or 0)))
+    # Seed the paper book BEFORE reading its value. _ensure_thematic_paper_state()
+    # used to run further down (at the write), so on a cold book this returned 0.0
+    # and the very first approval fell through to the flat base size — roughly 8x
+    # smaller than every subsequent approval, which sees the funded book.
+    _ensure_thematic_paper_state()
     _acct_val = _thematic_account_value(user["email"]) if _adaptive else 0.0
     sizing_info: dict | None = None
     if _explicit_dollar or not use_conviction_scale:
@@ -5504,13 +6147,15 @@ async def approve_signal(
             user["email"], sig, _acct_val, target_pct, stop_pct, hil_settings
         )
         if sizing_info is None:                       # context unavailable → legacy
-            policy_alloc = _adaptive_dollar(_acct_val, _sig_score, target_pct, hil_settings)
-            log.info("Adaptive (fallback) size %s: acct=$%.0f score=%.0f → $%.0f",
-                     ticker, _acct_val, _sig_score, policy_alloc)
+            policy_alloc = _adaptive_dollar(_acct_val, _sig_score, target_pct, hil_settings,
+                                            conviction=conviction)
+            log.info("Adaptive (fallback) size %s: acct=$%.0f score=%.0f conv=%s → $%.0f",
+                     ticker, _acct_val, _sig_score, conviction, policy_alloc)
         elif _pa_dollars and _pa_dollars > 0:
             policy_alloc = _pa_dollars
         elif body.force:                              # no room, but user forced
-            policy_alloc = _adaptive_dollar(_acct_val, _sig_score, target_pct, hil_settings)
+            policy_alloc = _adaptive_dollar(_acct_val, _sig_score, target_pct, hil_settings,
+                                            conviction=conviction)
             log.info("Portfolio-aware found no room for %s but force=true → adaptive $%.0f",
                      ticker, policy_alloc)
         else:                                         # no room → block with the reason
@@ -5617,6 +6262,44 @@ async def approve_signal(
         from web.auth import enforce_step_up
         await enforce_step_up(request, user)
 
+    # ── Resolve the live-Fidelity target account UP-FRONT ─────────────────────
+    # Strict mode (FIDELITY_REQUIRE_EXPLICIT_ACCOUNT, default on when a protected
+    # list exists) refuses account-less orders. Resolve request →
+    # per-user HIL setting → env FIDELITY_TRADE_ACCOUNT here, BEFORE any
+    # portfolio/paper write, so a missing or protected account fails the WHOLE
+    # approval loudly (403) instead of booking the paper leg and burying the
+    # refusal in result["fidelity_trade"]["error"] with ok:true.
+    fid_account: str | None = None
+    if body.fidelity_trade and body.execute_fidelity:
+        from tradingagents.compliance import LIVE_TRADING_HARD_BLOCKED, live_trading_enabled
+        if not LIVE_TRADING_HARD_BLOCKED and live_trading_enabled():
+            from web.api.fidelity import _resolve_trade_account
+            try:
+                fid_account = _resolve_trade_account(
+                    body.fidelity_account or hil_settings.get("fidelity_account")
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+    # ── Claim the signal: CAS pending → "approving" ───────────────────────────
+    # Re-checked under the shared lock so a mid-flight concurrent approve bails
+    # with 409 instead of racing the paper/Fidelity legs below (the order lock
+    # only 429s while it is HELD — it releases before this handler finishes).
+    # "approving" is revert-protected in _save_signals, so a scan's stale
+    # snapshot cannot flip it back to pending while the slow live leg runs.
+    async with _signals_lock:
+        _fresh = _load_signals()
+        _fsig = next((s for s in _fresh["signals"] if s.get("id") == signal_id), None)
+        _fstatus = (_fsig or {}).get("status")
+        if _fstatus in _PROTECTED_SIGNAL_STATUSES and not body.force:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Signal already {_fstatus} — concurrent/repeat approval blocked (double-buy guard).",
+            )
+        if _fsig is not None:
+            _fsig["status"] = "approving"
+            _save_signals(_fresh)
+
     # 1. Add to thematic portfolio
     from web.api.thematic_portfolio import _load, _save, _fetch_prices, DEFAULT_THEMES
     import datetime as _dt
@@ -5681,6 +6364,19 @@ async def approve_signal(
         today   = _dt.date.today().isoformat()
         alpha_tier = "A+" if conviction >= 9 else "A" if conviction >= 7 else "B" if conviction >= 5 else "C"
 
+        # v2 diversification buckets, resolved ONCE off the event loop (so we never
+        # do network I/O while holding _paper_state_lock). The persisted position
+        # then carries the REAL GICS sector + macro-cluster and every downstream cap
+        # reads them without recomputing. Best-effort: the sector cache is normally
+        # warm from sizing; a cold miss degrades to None (the pure diversification
+        # layer then fails CLOSED to a per-ticker singleton bucket).
+        _pos_theme = sig.get("theme", "future_tech")
+        try:
+            _pos_sector = await asyncio.to_thread(_sector_of, ticker)
+        except Exception:
+            _pos_sector = None
+        _pos_cluster = _resolve_cluster(_pos_theme, _pos_sector, ticker)
+
         # A11/P8: hold lock for entire read-modify-write of paper state so
         # concurrent approvals/auto-scans can't clobber each other.
         async with _paper_state_lock:
@@ -5698,7 +6394,9 @@ async def approve_signal(
             # ── Portfolio brain cap checks ────────────────────────────────────
             open_positions = state.get("positions", {})
             thematic_count = sum(1 for p in open_positions.values() if p.get("_source", "").startswith("thematic"))
-            theme_count    = sum(1 for p in open_positions.values() if p.get("sector") == "thematic" and p.get("theme") == sig.get("theme"))
+            # Positions now persist their REAL sector (not the constant "thematic"),
+            # so key the per-theme cap off _source, matching thematic_count above.
+            theme_count    = sum(1 for p in open_positions.values() if str(p.get("_source", "")).startswith("thematic") and p.get("theme") == sig.get("theme"))
 
             cap_reason = None
             if len(open_positions) >= PORTFOLIO_MAX_POSITIONS:
@@ -5707,6 +6405,65 @@ async def approve_signal(
                 cap_reason = f"Theme '{sig.get('theme')}' at max {PORTFOLIO_MAX_PER_THEME} positions"
             elif thematic_count >= PORTFOLIO_MAX_SPECULATIVE:
                 cap_reason = f"Thematic/speculative positions at max {PORTFOLIO_MAX_SPECULATIVE}"
+
+            # ── Macro-cluster / sector diversification backstop (v2) ──────────
+            # The per-theme ladder above counts a NOISY label — 3 AI-leaders +
+            # 3 AI-infra + 3 optical names are one macro trade that slips it. Fold
+            # the book into macro-clusters and bound how much of it any one market
+            # section may occupy: a hard NAMES count cap and a hard DOLLAR budget
+            # per cluster/sector, evaluated against the paper book we are about to
+            # write. Pure/sync/network-free. Propose-only — it only ever BLOCKS a
+            # new name here (the sizer already shrank the order); force=true (HIL
+            # authority) bypasses it, and it never touches the compliance kill-chain.
+            if not cap_reason and not body.force and ticker not in open_positions:
+                try:
+                    from tradingagents.portfolio.diversification import (
+                        BookItem as _DivBookItem,
+                        DiversifyConfig as _DivConfig,
+                        diversification_room as _div_room,
+                        macro_cluster as _macro_cluster,
+                    )
+                    _divcfg = _DivConfig.from_env(hil_settings)
+                    if _divcfg.enabled:
+                        # Fall back to the (network-free) paper-book value when
+                        # adaptive sizing is off, so the caps still bind at $0 _acct_val.
+                        _div_acct = _acct_val if _acct_val > 0 else _thematic_account_value(user["email"])
+                        # Positions persist their REAL GICS sector + macro cluster
+                        # at write time. Passing sector=None here (and reading
+                        # sig["sector"], a key that is never assigned anywhere)
+                        # made _bucket_keys fall back to a solo:TICKER singleton
+                        # for every name — so max_names_per_sector and
+                        # max_sector_pct could never bind. Half the guard was
+                        # decorative; use the stored values.
+                        _div_book = [
+                            _DivBookItem(
+                                ticker=str(p.get("ticker", tk)),
+                                cluster=(p.get("macro_cluster")
+                                         or _macro_cluster(p.get("theme"), p.get("sector"))),
+                                sector=p.get("sector"),
+                                dollars=float(p.get("shares", 0) or 0) * float(p.get("entry_price", 0) or 0),
+                            )
+                            for tk, p in open_positions.items()
+                        ]
+                        _room = _div_room(
+                            ticker,
+                            _pos_cluster,
+                            _pos_sector,
+                            _div_book,
+                            _div_acct,
+                            _divcfg,
+                        )
+                        if _room.blocked:
+                            cap_reason = f"Diversification cap ({_room.reason})"
+                        elif cost > _room.dollar_cap:
+                            cap_reason = (
+                                f"Diversification dollar cap: {_room.cluster or 'section'} has "
+                                f"${_room.dollar_cap:,.0f} room < ${cost:,.0f} order ({_room.reason})"
+                            )
+                        if cap_reason:
+                            result["diversification"] = _room.to_dict()
+                except Exception as _dive:
+                    log.debug("diversification backstop unavailable for %s: %s", ticker, _dive)
 
             if not cap_reason and ticker not in open_positions:
                 corr_ok, corr_reason = _correlation_guard_for_book(ticker, list(open_positions.keys()))
@@ -5727,7 +6484,10 @@ async def approve_signal(
                     "breakeven_moved": False, "peak_price": price, "scans_held": 0,
                     "trailing": False, "trail_pct": float(hil_settings.get("trail_pct", 20.0)),
                     "partial_sold": False, "defensive_trimmed": False, "scaled_in": False,
-                    "sector": "thematic", "theme": sig.get("theme", "future_tech"),
+                    # v2: persist the REAL GICS sector + macro-cluster bucket (not the
+                    # constant "thematic") so cluster/sector caps read buckets directly.
+                    "sector": _pos_sector, "macro_cluster": _pos_cluster,
+                    "theme": _pos_theme,
                     "entry_date": today,
                     "funded_by_unsettled": False, "unsettled_settle_date": "",
                     "regime_at_entry": "thematic", "regime_score_at_entry": None,
@@ -5769,37 +6529,184 @@ async def approve_signal(
         elif not live_trading_enabled():
             result["fidelity_trade"] = {"skipped": True, "reason": "LIVE_TRADING_ENABLED not set"}
         else:
+            # ── Diversification parity on the REAL Fidelity leg (thematic v2) ──
+            # ADDITIVE market-section guard: the live order must honor the SAME
+            # cluster/sector caps as the paper leg. This ONLY shrinks or blocks the
+            # order — it never touches validate_live_order or the step-up 2FA gate
+            # (both already enforced above and downstream). Gate DIVERSIFY_ENFORCE_LIVE
+            # (default true → enforced on real money from day one).
+            # ── Re-anchor the live order to the REAL account ──────────────────
+            # policy_alloc / live_alloc are denominated in the THEMATIC PAPER book
+            # (THEMATIC_PAPER_START_CASH, default $100,000). Handing those dollars
+            # straight to the broker meant _size_fidelity_position evaluated
+            # min(paper_dollars, 10% of the REAL account, available_cash) — and
+            # because the paper book dwarfs the real account, the paper number
+            # never won. EVERY live order therefore pinned at exactly the 10%
+            # compliance cap, which made conviction, quality, inverse-vol,
+            # correlation and the diversification decay numerically INERT on real
+            # money: a conviction-4 and a conviction-10 signal bought the same
+            # dollar amount, always the maximum allowed.
+            #
+            # Carry the UNITLESS weight instead and let whichever account the
+            # order lands in be the denominator — the same scale-consistency rule
+            # copytrade_reconcile already follows. `live_div_alloc` stays None
+            # until we have a REAL account value to convert against.
+            # Two intents, and they must not be conflated:
+            #
+            #  * A WEIGHT (% of book) — from the portfolio sizer. Re-anchor it to
+            #    the real account; that is the scale-mix fix.
+            #  * ABSOLUTE DOLLARS — an explicit `dollar_amount`, or any path where
+            #    adaptive sizing is off so there is no book denominator. These are
+            #    already real dollars and must be passed through as dollars.
+            #
+            # Dividing an absolute dollar intent by the paper book turned "$500"
+            # into "0.5% of the paper book" applied to the REAL account (~$25 on a
+            # $5k account). And with adaptive sizing off, `_acct_val` is 0, so the
+            # weight stayed 0 and the live leg silently skipped while the response
+            # still said ok:true — execution off, success reported.
             try:
-                from web.api.fidelity import (
-                    _fidelity_thematic_trade_inner,
-                    FidelityThematicTradeRequest,
-                    _validate_account_number,
-                    _get_order_lock,
-                    _ORDER_LOCKS_META,
-                )
-                fid_body = FidelityThematicTradeRequest(
-                    **_fidelity_request_kwargs_from_approval(
-                        ticker,
-                        body,
-                        stop_pct=live_stop_pct,
-                        target_pct=target_pct,
-                        dollar_amount=live_alloc,
-                    )
-                )
-                fid_account = _validate_account_number(None)
-                lock_key = f"{user['email']}:{ticker}"
-                order_lock = _get_order_lock(lock_key)
-                if order_lock.locked():
-                    result["fidelity_trade"] = {"skipped": True, "reason": "order already in progress"}
+                from tradingagents.compliance import MAX_POSITION_PCT_OF_ACCOUNT as _LIVE_CAP
+            except Exception:
+                _LIVE_CAP = 10.0
+
+            live_weight_pct = 0.0
+            live_abs_dollars = 0.0
+            if isinstance(sizing_info, dict) and float(sizing_info.get("weight_pct") or 0) > 0:
+                live_weight_pct = min(float(sizing_info["weight_pct"]), float(_LIVE_CAP))
+            elif _explicit_dollar or not _adaptive or _acct_val <= 0:
+                # Absolute intent — hand the broker dollars, let it cap at 10%/cash.
+                live_abs_dollars = max(0.0, float(live_alloc or 0))
+            elif live_alloc > 0:
+                live_weight_pct = min(live_alloc / _acct_val * 100.0, float(_LIVE_CAP))
+
+            if live_weight_pct <= 0 and live_abs_dollars <= 0:
+                log.warning("Live leg skipped for %s: no usable size "
+                            "(alloc=%.2f acct_val=%.2f adaptive=%s explicit=%s)",
+                            ticker, live_alloc or 0, _acct_val, _adaptive, _explicit_dollar)
+
+            live_div_alloc: "float | None" = None
+            live_div_skip: "str | None" = None
+            # force = explicit HIL override → bypass diversification on the live leg
+            # too, matching the paper backstop + sizer (HIL authority is consistent).
+            if _diversify_enforce_live() and not body.force:
+                # (A) Paper leg hard-blocked by a diversification cap → never open
+                # MORE on the real leg than paper would (a soft decay-shrink of the
+                # paper leg is already inherited via policy_alloc → live_alloc).
+                _paper_cap = str(locals().get("cap_reason") or "")
+                if any(tok in _paper_cap.lower() for tok in ("diversif", "cluster_", "sector_")):
+                    live_div_skip = f"paper leg blocked by diversification: {_paper_cap}"
                 else:
-                    async with order_lock:
-                        _ORDER_LOCKS_META[lock_key] = __import__("time").time()
-                        fid_result = await _fidelity_thematic_trade_inner(fid_body, user, ticker, fid_account)
-                    result["fidelity_trade"] = fid_result
-                    log.info("Thematic HIL Fidelity trade executed: %s $%.0f", ticker, policy_alloc)
-            except Exception as fid_err:
-                log.warning("Thematic HIL Fidelity trade failed for %s: %s", ticker, fid_err)
-                result["fidelity_trade"] = {"error": str(fid_err)}
+                    # (B) Fresh room vs the UNIFIED real+paper book. Blocked → skip;
+                    # a tighter dollar budget / size-decay → shrink the live order.
+                    # A failure to build the book log-and-skips enforcement (never
+                    # trades blind, never fabricates room) → today's behavior stands.
+                    try:
+                        _room, _div_av = await _live_diversification_room(
+                            user["email"], sig, ticker, fid_account
+                        )
+                    except Exception as _de:
+                        _room = None
+                        log.warning("Live diversification room unavailable for %s (%s) — not enforced", ticker, _de)
+                    if _room is not None:
+                        if _room.blocked:
+                            live_div_skip = f"diversification cap: {_room.reason}"
+                            # Loud, not buried. The cap counts REAL holdings the
+                            # thematic system never chose and cannot itself trim,
+                            # so a pre-existing book already at the cluster limit
+                            # refuses every new buy in that cluster indefinitely
+                            # while cash sits idle. Blocking is correct risk
+                            # management — adding an Nth correlated name IS more
+                            # concentration — but the operator has to know the
+                            # system is capped, and that the remedy is to trim,
+                            # not to wait.
+                            log.warning(
+                                "LIVE BUY BLOCKED by diversification for %s: %s. This cluster "
+                                "includes pre-existing holdings the thematic system does not "
+                                "manage; it will keep refusing buys in this cluster until the "
+                                "book is trimmed (see the Holdings Brain proposals).",
+                                ticker, _room.reason,
+                            )
+                        else:
+                            # Convert the unitless weight against the REAL account
+                            # value this helper already resolved, then apply the
+                            # cluster/sector budget. Decay is NOT re-applied here:
+                            # the weight already inherited the paper sizer's decay,
+                            # and dollar_cap alone bounds the real budget —
+                            # multiplying decay again would double-shrink.
+                            # Weight → real dollars; or take the absolute intent
+                            # as-is. Either way the cluster/sector budget applies.
+                            _real_alloc = (((_div_av or 0.0) * live_weight_pct / 100.0)
+                                           if live_weight_pct > 0 else live_abs_dollars)
+                            if _real_alloc > 0:
+                                _capped = min(_real_alloc, _room.dollar_cap)
+                                if _capped < _real_alloc:
+                                    log.info("Live diversification shrink %s: $%.0f → $%.0f (%s)",
+                                             ticker, _real_alloc, _capped, _room.reason)
+                                live_div_alloc = _capped
+                                log.info("Live sizing %s: %s → $%.0f",
+                                         ticker,
+                                         (f"{live_weight_pct:.2f}% of real ${_div_av:,.0f}"
+                                          if live_weight_pct > 0
+                                          else f"absolute ${live_abs_dollars:,.0f}"),
+                                         live_div_alloc)
+            if live_div_skip:
+                result["fidelity_trade"] = {"skipped": True, "reason": live_div_skip}
+            elif live_div_alloc is not None and live_div_alloc <= 0:
+                result["fidelity_trade"] = {"skipped": True, "reason": "diversification: no live room"}
+            elif live_div_alloc is None and live_weight_pct <= 0 and live_abs_dollars <= 0:
+                result["fidelity_trade"] = {"skipped": True, "reason": "sizing: no live size"}
+            else:
+                try:
+                    from web.api.fidelity import (
+                        _fidelity_thematic_trade_inner,
+                        FidelityThematicTradeRequest,
+                        _get_order_lock,
+                        _ORDER_LOCKS_META,
+                    )
+                    # fid_account was resolved (and asserted tradeable) up-front,
+                    # BEFORE any state was written — request → HIL setting → env
+                    # FIDELITY_TRADE_ACCOUNT. Never the broker default in strict mode.
+                    fid_body = FidelityThematicTradeRequest(
+                        **_fidelity_request_kwargs_from_approval(
+                            ticker,
+                            body,
+                            stop_pct=live_stop_pct,
+                            target_pct=target_pct,
+                            # Exactly one of these is set, and dollar_amount is
+                            # always a REAL-account figure — never paper-book
+                            # dollars. Precedence:
+                            #   1. live_div_alloc — real dollars after the
+                            #      cluster/sector budget was applied;
+                            #   2. live_abs_dollars — an absolute intent
+                            #      (explicit amount, or adaptive sizing off);
+                            #   3. live_weight_pct — a unitless weight that
+                            #      _size_fidelity_position re-anchors to the
+                            #      real account.
+                            dollar_amount=(live_div_alloc if live_div_alloc is not None
+                                           else (live_abs_dollars or None)),
+                            pct_of_account=(live_weight_pct
+                                            if (live_div_alloc is None
+                                                and not live_abs_dollars
+                                                and live_weight_pct > 0)
+                                            else None),
+                            account=fid_account,
+                        )
+                    )
+                    lock_key = f"{user['email']}:{ticker}"
+                    order_lock = _get_order_lock(lock_key)
+                    if order_lock.locked():
+                        result["fidelity_trade"] = {"skipped": True, "reason": "order already in progress"}
+                    else:
+                        async with order_lock:
+                            _ORDER_LOCKS_META[lock_key] = __import__("time").time()
+                            fid_result = await _fidelity_thematic_trade_inner(fid_body, user, ticker, fid_account)
+                        result["fidelity_trade"] = fid_result
+                        log.info("Thematic HIL Fidelity trade executed: %s (%s)", ticker,
+                                 f"${live_div_alloc:,.0f}" if live_div_alloc is not None
+                                 else f"{live_weight_pct:.2f}% of account")
+                except Exception as fid_err:
+                    log.warning("Thematic HIL Fidelity trade failed for %s: %s", ticker, fid_err)
+                    result["fidelity_trade"] = {"error": str(fid_err)}
 
     # Surface a REPLACE suggestion (propose-only — never auto-exits). The weakest
     # holding the policy flagged is offered as a separate, human-approved exit
@@ -5814,9 +6721,21 @@ async def approve_signal(
             ),
         }
 
-    # Mark signal approved
-    sig["status"] = "approved"
-    _save_signals(data)
+    # Mark signal approved — re-load under the shared lock: this handler's own
+    # snapshot is minutes old by now (Fidelity execution awaits above), so writing
+    # `data` back directly could clobber a concurrent scan's save, and a scan's
+    # stale snapshot could otherwise revert this approval to pending (double buy).
+    async with _signals_lock:
+        fresh = _load_signals()
+        fsig = next((s for s in fresh["signals"] if s.get("id") == signal_id), None)
+        if fsig is None:
+            fsig = sig
+            fresh["signals"].append(fsig)
+        for k in ("short_pressure", "short_interest_pressure", "breakout_confirmed"):
+            if k in sig:
+                fsig[k] = sig[k]
+        fsig["status"] = "approved"
+        _save_signals(fresh)
     resp = {"ok": True, **result}
     warnings = [w for w in [score_warning, rr_warning, spike_warning] if w]
     if warnings:
@@ -5826,12 +6745,13 @@ async def approve_signal(
 
 @router.post("/thematic/auto/signals/{signal_id}/skip")
 async def skip_signal(signal_id: str, _user: dict = Depends(require_admin)):
-    data = _load_signals()
-    sig = next((s for s in data["signals"] if s["id"] == signal_id), None)
-    if not sig:
-        raise HTTPException(status_code=404, detail="Signal not found")
-    sig["status"] = "skipped"
-    _save_signals(data)
+    async with _signals_lock:
+        data = _load_signals()
+        sig = next((s for s in data["signals"] if s["id"] == signal_id), None)
+        if not sig:
+            raise HTTPException(status_code=404, detail="Signal not found")
+        sig["status"] = "skipped"
+        _save_signals(data)
     return {"ok": True}
 
 

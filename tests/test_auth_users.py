@@ -67,22 +67,58 @@ def test_delete_user(tmp_users):
     assert tmp_users.list_users() == []
 
 
+class _FakeClient:
+    def __init__(self, host):
+        self.host = host
+
+
+def _fake_request(host_header="localhost:8001", peer="127.0.0.1", extra_headers=None):
+    hdrs = {"host": host_header}
+    if extra_headers:
+        hdrs.update(extra_headers)
+
+    class FakeRequest:
+        headers = hdrs
+        cookies = {}
+        client = _FakeClient(peer) if peer else None
+    return FakeRequest()
+
+
 def test_dev_localhost_fallback(monkeypatch, tmp_users):
-    """get_optional_user returns dev@local on localhost when not required."""
+    """get_optional_user returns dev@local for a genuine DIRECT localhost request
+    (loopback peer, no proxy headers) when auth is not required."""
     monkeypatch.setenv("CF_ACCESS_REQUIRED", "false")
     monkeypatch.delenv("CF_ACCESS_TEAM_DOMAIN", raising=False)
 
     from web import auth as auth_mod
     importlib.reload(auth_mod)
-    # patch user store reference inside reloaded auth
     monkeypatch.setattr(auth_mod, "get_or_create_user", tmp_users.get_or_create_user)
 
-    class FakeRequest:
-        headers = {"host": "localhost:8001"}
-        cookies = {}
-    u = auth_mod.get_optional_user(FakeRequest())
+    u = auth_mod.get_optional_user(_fake_request())
     assert u and u["email"] == "dev@local"
     assert u["role"] == "admin"  # first user auto-admin
+
+
+def test_localhost_bypass_rejects_spoofed_host(monkeypatch, tmp_users):
+    """C1: a request with Host: localhost but a NON-loopback peer must NOT get the
+    dev-admin bypass — the peer address is authoritative, not the Host header."""
+    monkeypatch.setenv("CF_ACCESS_REQUIRED", "false")
+    monkeypatch.delenv("CF_ACCESS_TEAM_DOMAIN", raising=False)
+    from web import auth as auth_mod
+    importlib.reload(auth_mod)
+    monkeypatch.setattr(auth_mod, "get_or_create_user", tmp_users.get_or_create_user)
+    assert auth_mod._is_localhost(_fake_request(host_header="localhost", peer="203.0.113.7")) is False
+
+
+def test_localhost_bypass_rejects_proxied_loopback(monkeypatch, tmp_users):
+    """C1: even a loopback peer must NOT get the bypass if edge/proxy headers are
+    present — that is tunneled public traffic, not local dev."""
+    monkeypatch.setenv("CF_ACCESS_REQUIRED", "false")
+    from web import auth as auth_mod
+    importlib.reload(auth_mod)
+    for hdr in ("cf-connecting-ip", "cf-ray", "x-forwarded-for", "cf-access-jwt-assertion"):
+        req = _fake_request(peer="127.0.0.1", extra_headers={hdr: "1.2.3.4"})
+        assert auth_mod._is_localhost(req) is False, hdr
 
 
 def test_no_token_returns_none(monkeypatch, tmp_users):

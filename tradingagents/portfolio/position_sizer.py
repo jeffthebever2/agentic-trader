@@ -26,6 +26,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from tradingagents.portfolio.portfolio_policy import conviction_scale
+from tradingagents.portfolio.diversification import (
+    diversification_room, DiversifyConfig, BookItem,
+)
 
 try:
     from tradingagents.compliance import MAX_POSITION_PCT_OF_ACCOUNT
@@ -48,6 +51,7 @@ class BookPosition:
     ticker: str
     weight_pct: float = 0.0          # current % of total account value
     sector: Optional[str] = None
+    cluster: Optional[str] = None    # macro-cluster label (thematic v2 diversification)
 
 
 @dataclass
@@ -60,7 +64,10 @@ class SizingCandidate:
     stop_pct: float = 0.0            # planned stop distance %
     volatility_pct: Optional[float] = None  # annualized realized vol %, None=unknown
     sector: Optional[str] = None
-    max_corr: Optional[float] = None        # max |corr| to existing book, None=unknown
+    cluster: Optional[str] = None           # macro-cluster label (thematic v2 diversification)
+    max_corr: Optional[float] = None        # max |corr| to existing book, None=unknown (legacy single-worst)
+    corr_load: Optional[float] = None       # weighted corr LOAD vs whole book (Σ wᵢ·ρ_ci); preferred shrink driver
+    n_eff: Optional[float] = None           # effective independent bets of book+candidate; ADVISORY only, never shrinks
     adv_dollars: Optional[float] = None     # avg daily DOLLAR volume; None=unknown
     avg_volume: Optional[float] = None      # avg daily SHARE volume (alt to adv_dollars)
     price: Optional[float] = None           # used with avg_volume to derive adv_dollars
@@ -78,6 +85,21 @@ class SizerConfig:
     corr_threshold: float = 0.70            # penalize correlation above this
     corr_penalty_max: float = 0.50          # up to -50% size as corr → 1.0
     max_adv_participation_pct: float = 1.0  # never size above this % of avg daily $ volume
+    # Cap applied when ADV is UNKNOWN. A missing/failed ADV lookup sets the
+    # liquidity cap to math.inf — the one input whose absence should make us more
+    # careful instead removes the constraint, so a name whose volume we cannot
+    # measure (and may therefore not be able to exit) can size to the full
+    # per-position cap.
+    #
+    # DEFAULT 0.0 = off, preserving the documented "missing ADV is neutral"
+    # contract (pinned by test_missing_adv_is_neutral). It is off by default
+    # because the sizer's normal output is ~2-4% of account, so a tight value
+    # here becomes the *binding* constraint on every position and creates cash
+    # drag — the opposite of the intended protection. Enable deliberately via
+    # SIZER_UNKNOWN_ADV_CAP_PCT; ~5.0 (half the 10% compliance cap) throttles the
+    # egregious case without binding on routine sizing.
+    unknown_adv_cap_pct: float = 0.0        # % of account when ADV is unavailable
+    min_effective_bets: float = 4.0         # advisory floor for N_eff (SIZER_MIN_EFFECTIVE_BETS); surfaced, never blocks
     quality_floor: float = 0.4
     quality_cap: float = 2.0
     min_dollar: float = 25.0
@@ -106,7 +128,9 @@ class SizerConfig:
             corr_threshold=min(0.99, max(0.1, _f("SIZER_CORR_THRESHOLD", 0.70))),
             corr_penalty_max=min(0.9, max(0.0, _f("SIZER_CORR_PENALTY_MAX", 0.50))),
             max_adv_participation_pct=max(0.0, _f("SIZER_MAX_ADV_PARTICIPATION_PCT", 1.0)),
+            unknown_adv_cap_pct=max(0.0, _f("SIZER_UNKNOWN_ADV_CAP_PCT", 0.0)),
             min_dollar=max(0.0, _finite(hil.get("min_dollar"), _f("SIZER_MIN_DOLLAR", 25.0))),
+            min_effective_bets=max(1.0, _f("SIZER_MIN_EFFECTIVE_BETS", 4.0)),
         )
 
 
@@ -158,14 +182,21 @@ def inverse_vol_factor(volatility_pct: Optional[float], cfg: SizerConfig) -> flo
     return max(cfg.vol_factor_floor, min(cfg.vol_factor_cap, cfg.target_vol_pct / v))
 
 
-def correlation_factor(max_corr: Optional[float], cfg: SizerConfig) -> float:
-    """Diversification: shrink a candidate highly correlated to the existing book.
+def correlation_factor(corr_load: Optional[float], cfg: SizerConfig,
+                       *, max_corr: Optional[float] = None) -> float:
+    """Diversification shrink off the candidate's weighted correlation LOAD against
+    the WHOLE book (Σ wᵢ·ρ_ci) — captures the many-moderate-correlations concentration
+    that a single-worst-pairwise ``max_corr`` misses. Falls back to ``max_corr`` when no
+    load was computed, so callers with only the legacy single-pair number still shrink.
 
-    Below ``corr_threshold`` → 1.0; scales linearly to (1 - corr_penalty_max) at
-    correlation 1.0. Unknown correlation → 1.0 (neutral)."""
-    if max_corr is None:
+    Below ``corr_threshold`` → 1.0; scales linearly to (1 - corr_penalty_max) as the load
+    → 1.0. Unknown → 1.0 (neutral). SOFT shrink only: the return is floored at
+    (1 - corr_penalty_max) and is NEVER a hard block — the hard concentration floor lives
+    in the theme-macro diversification layer."""
+    signal = corr_load if corr_load is not None else max_corr
+    if signal is None:
         return 1.0
-    c = max(0.0, min(1.0, _finite(max_corr, 0.0)))
+    c = max(0.0, min(1.0, _finite(signal, 0.0)))
     if c <= cfg.corr_threshold:
         return 1.0
     span = max(1e-9, 1.0 - cfg.corr_threshold)
@@ -194,9 +225,11 @@ def size_position(
     *,
     cash_available: Optional[float] = None,
     cfg: Optional[SizerConfig] = None,
+    divcfg: Optional[DiversifyConfig] = None,
 ) -> SizingResult:
     """Dollar size for ``candidate`` given the whole portfolio. See module docstring."""
     cfg = cfg or SizerConfig()
+    divcfg = divcfg or DiversifyConfig.from_env()
     existing = existing or []
     av = _finite(account_value, 0.0)
     if av <= 0:
@@ -205,10 +238,17 @@ def size_position(
     f_conv = conviction_scale(candidate.conviction)
     f_q = quality_factor(candidate.score, candidate.expected_return_pct, candidate.stop_pct, cfg)
     f_vol = inverse_vol_factor(candidate.volatility_pct, cfg)
-    f_corr = correlation_factor(candidate.max_corr, cfg)
+    f_corr = correlation_factor(candidate.corr_load, cfg, max_corr=candidate.max_corr)
+
+    # Market-section diversification (thematic v2): soft size-decay for the Nth
+    # name in a macro-cluster + hard cluster/sector dollar caps. Pure + FAIL-CLOSED
+    # (unknown sector → singleton bucket, never the old math.inf that removed the cap).
+    book = [BookItem(p.ticker, cluster=p.cluster, sector=p.sector,
+                     dollars=av * _finite(p.weight_pct) / 100.0) for p in existing]
+    room = diversification_room(candidate.ticker, candidate.cluster, candidate.sector, book, av, divcfg)
 
     base = av * cfg.base_position_pct / 100.0
-    raw = base * f_conv * f_q * f_vol * f_corr
+    raw = base * f_conv * f_q * f_vol * f_corr * room.decay_mult
 
     # Liquidity / ADV throttle: never take more than max_adv_participation_pct of
     # average daily dollar volume. A hard cap (not a multiplier) so it can be the
@@ -217,36 +257,56 @@ def size_position(
     if adv and adv > 0 and cfg.max_adv_participation_pct > 0:
         liq_cap = adv * cfg.max_adv_participation_pct / 100.0
         f_liq = min(1.0, liq_cap / raw) if raw > 0 else 1.0
+    elif not adv and cfg.unknown_adv_cap_pct > 0 and av > 0:
+        # ADV genuinely UNKNOWN. The `not adv` guard matters: with
+        # max_adv_participation_pct=0 (documented as "throttle disabled") the
+        # first branch is skipped even when ADV is known, and without this the
+        # unknown-ADV cap would then be applied to names whose volume we do have.
+        # Fail CLOSED-ish: throttle to a conservative slice of the account rather
+        # than math.inf. A name whose volume we cannot measure is a name we may
+        # not be able to exit.
+        liq_cap = av * cfg.unknown_adv_cap_pct / 100.0
+        f_liq = min(1.0, liq_cap / raw) if raw > 0 else 1.0
     else:
-        liq_cap = math.inf          # missing ADV → neutral, no clamp
+        liq_cap = math.inf          # throttle explicitly disabled
         f_liq = 1.0
 
     factors = {
         "conviction": f_conv, "quality": f_q, "inverse_vol": f_vol,
-        "correlation": f_corr, "liquidity": f_liq, "base_dollar": base, "raw_dollar": raw,
+        "correlation": f_corr, "diversify_decay": room.decay_mult,
+        "liquidity": f_liq, "base_dollar": base, "raw_dollar": raw,
     }
+    # Advisory: effective independent bets of the resulting book. Surfaced in factors +
+    # note when under the floor; NEVER shrinks size (hard floor = theme-macro layer).
+    if candidate.n_eff is not None:
+        factors["n_eff"] = _finite(candidate.n_eff, 0.0)
+    _low_bets = candidate.n_eff is not None and _finite(candidate.n_eff) < cfg.min_effective_bets
+    _conc_note = (f" | advisory: book N_eff {_finite(candidate.n_eff):.1f} < "
+                  f"{cfg.min_effective_bets:.0f} (concentrated)" if _low_bets else "")
+
+    # A hard cluster/sector count or dollar cap → open NOTHING (before the min()).
+    diversify_label = f"diversify:{room.reason}" if room.reason else "diversify_cap"
+    if room.blocked:
+        return SizingResult(0.0, 0.0, factors, diversify_label,
+                            f"{candidate.ticker}: blocked by {room.reason} — skip.")
 
     # ── Hard constraints (portfolio-level). Pick the smallest binding limit. ──
     pos_cap = av * cfg.max_position_pct / 100.0
     deployed = sum(av * _finite(p.weight_pct) / 100.0 for p in existing)
     heat_room = av * cfg.max_portfolio_heat_pct / 100.0 - deployed
 
-    sec = (candidate.sector or "").strip().lower()
-    if sec:
-        sector_dollars = sum(
-            av * _finite(p.weight_pct) / 100.0
-            for p in existing if (p.sector or "").strip().lower() == sec
-        )
-        sector_room = av * cfg.max_sector_pct / 100.0 - sector_dollars
-    else:
-        sector_room = math.inf  # unknown sector → no sector clamp
+    # Cluster + sector budgets come from the diversification module (fail-closed):
+    # room.dollar_cap is the tighter of the two remaining budgets and binds via min().
 
-    cash_room = _finite(cash_available, math.inf) if cash_available is not None else math.inf
+    # None = caller had no cash data → unconstrained (legacy semantics).
+    # A non-finite NUMBER (NaN/inf) is corrupt data → 0 room, fail closed —
+    # _finite's inf default would silently remove the cash constraint.
+    cash_room = math.inf if cash_available is None else _finite(cash_available, 0.0)
 
     limits = [
         ("target_size", raw),
         ("per_position_cap", pos_cap),
-        ("sector_cap", sector_room),
+        (diversify_label, room.dollar_cap),
         ("portfolio_heat", heat_room),
         ("liquidity_adv", liq_cap),
         ("cash", cash_room),
@@ -265,7 +325,7 @@ def size_position(
     note = (
         f"{candidate.ticker}: ${size:,.0f} ({size / av * 100:.1f}% of ${av:,.0f}) — "
         f"conv×{f_conv:.2f} quality×{f_q:.2f} vol×{f_vol:.2f} corr×{f_corr:.2f} liq×{f_liq:.2f}; "
-        f"bound by {binding}."
+        f"bound by {binding}." + _conc_note
     )
     return SizingResult(round(size, 2), round(size / av * 100.0, 3), factors, binding, note)
 

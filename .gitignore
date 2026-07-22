@@ -64,3 +64,20 @@ web/static/charts/
 Portfolio_Positions_*.csv
 .design-sync/
 *.dssync.json
+
+# --- generated output + reference dumps (hygiene 2026-07-07) ---
+backtest_charts_*/
+old_results/
+paper_accounts/
+Fidelity API/
+*.epub
+# large local reference dumps (not source)
+agentic_trader_RAW_reference_full.txt
+deep-research-report.md
+Top_50_AI_Trading_Systems_Comprehensive_Report.md
+a (*).txt
+
+# Clerk CLI artifacts
+.clerk/
+.clerk_keys.tmp
+.env.local

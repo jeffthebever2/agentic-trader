@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -81,6 +82,27 @@ def _check_report_gates(report_path: Path, min_roc: float, max_brier: float, max
     calibrated = report.get("settings", {}).get("calibrated", False)
 
     issues = list(_schema_fails)  # schema failures block gate
+
+    # Walk-forward is the ONLY deployable evidence — single-split ROC on a few
+    # dozen rows (SE≈0.035+) once slipped a bundle through with
+    # walk_forward.status="insufficient_oos_data" and n_oos=0. Hard-block that.
+    wf_status = wf.get("status") if isinstance(wf, dict) else None
+    wf_n_oos = wf.get("n_oos") if isinstance(wf, dict) else None
+    try:
+        min_wf_oos = int(os.getenv("RETRAIN_MIN_WF_OOS_ROWS", "200"))
+    except ValueError:
+        min_wf_oos = 200
+    if wf_roc is None:
+        issues.append(
+            f"walk_forward validation missing/failed (status={wf_status}, n_oos={wf_n_oos}) "
+            f"— single-split ROC is not sufficient evidence to deploy"
+        )
+    elif isinstance(wf_n_oos, (int, float)) and wf_n_oos < min_wf_oos:
+        issues.append(
+            f"walk_forward n_oos={int(wf_n_oos)} < {min_wf_oos} (RETRAIN_MIN_WF_OOS_ROWS) "
+            f"— insufficient OOS rows to trust WF ROC"
+        )
+
     if win_roc is None:
         issues.append("win_probability ROC missing from report")
     elif win_roc < min_roc:

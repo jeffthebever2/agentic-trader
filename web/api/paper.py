@@ -696,14 +696,20 @@ async def sendblue_inbound(request: Request):
     except Exception:
         pass
 
+    # Fail CLOSED: this endpoint is unauthenticated (in OPEN_PATHS) and can drive
+    # SMS-command actions, so it must reject everything unless a shared secret is
+    # both configured AND matches (constant-time). Previously an unset secret
+    # accepted any caller, and the compare was a timing-leaky `!=`.
+    import hmac as _hmac
     secret = os.getenv("SENDBLUE_INBOUND_SECRET", "").strip()
-    if secret:
-        provided = (
-            request.query_params.get("key")
-            or request.headers.get("x-inbound-key", "")
-        ).strip()
-        if provided != secret:
-            return {"success": False, "error": "unauthorized"}
+    if not secret:
+        return {"success": False, "error": "inbound webhook not configured"}
+    provided = (
+        request.query_params.get("key")
+        or request.headers.get("x-inbound-key", "")
+    ).strip()
+    if not _hmac.compare_digest(provided, secret):
+        return {"success": False, "error": "unauthorized"}
 
     # Sendblue posts JSON; tolerate form/garbage without 500ing.
     try:

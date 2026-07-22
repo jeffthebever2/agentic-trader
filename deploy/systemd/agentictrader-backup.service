@@ -1,0 +1,14 @@
+[Unit]
+Description=AgenticTrader encrypted state backup (D5)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=trader
+WorkingDirectory=/opt/agentictrader
+# Secrets come from an owner-only env file (0600), never inline here.
+EnvironmentFile=/opt/agentictrader/.env.backup
+ExecStart=/usr/bin/env bash /opt/agentictrader/scripts/backup_state.sh
+Nice=10
+IOSchedulingClass=idle

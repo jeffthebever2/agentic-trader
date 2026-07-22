@@ -2206,7 +2206,10 @@ def _ml_prepare_frame(rows_df: pd.DataFrame, hold: int) -> tuple:
 
 def _ml_design_matrix(df: pd.DataFrame, numeric: list, categorical: list,
                       columns: list = None) -> tuple:
-    x_num = df[numeric].copy() if numeric else pd.DataFrame(index=df.index)
+    # reindex (not strict df[numeric]) so training-only features absent at
+    # inference (e.g. qlib_* factors) become NaN for the imputer to fill,
+    # rather than raising KeyError. No-op when every column is present.
+    x_num = df.reindex(columns=numeric).copy() if numeric else pd.DataFrame(index=df.index)
     cat_frames = []
     for col in categorical:
         if col not in df.columns:

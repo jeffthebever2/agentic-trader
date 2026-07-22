@@ -40,7 +40,9 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from tradingagents.config import env_bool
 from tradingagents.portfolio.exit_manager import ExitManager
+from tradingagents.portfolio.short_hold_exits import BREAKEVEN_LOCK_ATR
 
 try:
     from tradingagents.compliance import MAX_POSITION_PCT_OF_ACCOUNT
@@ -75,14 +77,29 @@ _ATR_FALLBACK_PCT = 0.02
 # reshaped to a thematic-conviction-worthy core before new thematic buys are added.
 # OFF by default → first contact just ADOPTs everything (the prior, conservative
 # behaviour). Turn on with HOLDINGS_BRAIN_TAKEOVER=true.
+#: Upper bound on `fraction` (multiple of the current position) for a single ADD.
+#: Keeps a near-zero `pct_of_account` from producing an absurd multiplier; the
+#: resulting dollar amount is separately bounded by the concentration cap.
+_ADD_MAX_FRACTION = 10.0
+
+
+def _add_max_step_pct() -> float:
+    """Max points of ACCOUNT a single ADD may put on. Env
+    HOLDINGS_BRAIN_ADD_MAX_STEP_PCT, default 3.0 — the per-approval rate limit."""
+    try:
+        return max(0.25, float(os.getenv("HOLDINGS_BRAIN_ADD_MAX_STEP_PCT", "3") or 3))
+    except (TypeError, ValueError):
+        return 3.0
+
+
 def _takeover_enabled() -> bool:
-    return os.getenv("HOLDINGS_BRAIN_TAKEOVER", "false").strip().lower() == "true"
+    return env_bool("HOLDINGS_BRAIN_TAKEOVER", False)
 
 
 def _takeover_strict() -> bool:
     """Strict: drop holdings with NO thematic conviction signal (not a current theme).
     Lenient (default): keep unknowns, only drop low-conviction or deep losers."""
-    return os.getenv("HOLDINGS_BRAIN_TAKEOVER_STRICT", "false").strip().lower() == "true"
+    return env_bool("HOLDINGS_BRAIN_TAKEOVER_STRICT", False)
 
 
 def _keep_min_conviction() -> int:
@@ -657,8 +674,19 @@ def _rule_assess(holding: Holding, plan: Optional[dict], ctx: dict) -> Action:
         and holding.pct_of_account < cap - 2.0
         and constructive
     ):
+        # Size the ADD off the available ROOM, not off the existing position.
+        # `fraction` is consumed downstream as `dollar = market_value * fraction`,
+        # so the old `min(0.25, room / pct_of_account)` had the base backwards:
+        # the MORE room a name had, the larger that ratio grew, and the harder the
+        # 0.25 clamp bit. A conviction-10 name at 1% of account with 9 points of
+        # room produced a 25%-of-$46 = ~$11 add, needing ~11 sequential
+        # step-up-2FA approvals to reach the cap — so in practice the highest
+        # conviction idea just stayed at 1%. The 25% clamp was the right RATE
+        # LIMIT applied to the wrong BASE.
         room = cap - holding.pct_of_account
-        frac = min(0.25, max(0.05, room / max(holding.pct_of_account, 1e-9)))
+        step_pct = min(room, _add_max_step_pct())          # points of ACCOUNT to add
+        frac = step_pct / max(holding.pct_of_account, 1e-9)
+        frac = max(0.05, min(frac, _ADD_MAX_FRACTION))     # sanity bound on tiny positions
         return Action(
             holding.ticker, ACTION_ADD,
             reason=(
@@ -1013,6 +1041,86 @@ def check_stops(
             breaches.append(StopBreach(h.ticker, "target_hit", price, target, h.unrealized_pct))
 
     return breaches
+
+
+def ratchet_stops(
+    holdings: List[Holding],
+    store: Dict[str, dict],
+    quotes: Optional[Dict[str, float]] = None,
+    atr_map: Optional[Dict[str, float]] = None,
+    trail_atr_mult: Optional[float] = None,
+) -> List[dict]:
+    """Raise managed stops toward a high-water trailing level. Store-only, monotonic.
+
+    Mirrors the paper book's ``short_hold_exits._update_trail`` semantics on the
+    flat plan dicts the brain persists: track ``trail_high`` (high-water mark),
+    lock the stop to entry once price clears +``BREAKEVEN_LOCK_ATR``×ATR, and once
+    the high-water clears the ExitManager activation threshold, trail the stop at
+    ``peak - trail_atr_mult×ATR`` — the exact math the assess-path SET_STOP
+    proposal uses, so the guard lands on the same levels a human would approve.
+
+    Stop-LEVEL maintenance only: never lowers a stop (max()-only), never creates
+    a stop for a plan without one (that stays HIL), never touches target/status/
+    reason strings, places no orders, emits no risk flags. Uncertain inputs
+    (no price, no entry) fail closed — the plan keeps its current protection.
+
+    Returns change records ``{ticker, old_stop, new_stop, trail_high, price,
+    stop_raised}``; also non-empty when only ``trail_high`` rose, so the caller
+    knows to persist the store.
+    """
+    quotes = quotes or {}
+    store = store or {}
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    changes: List[dict] = []
+
+    for h in holdings:
+        plan = store.get(h.ticker)
+        if not plan or str(plan.get("status")) not in _ACTIVE_STATUSES:
+            continue
+        old_stop = _parse_num(plan.get("stop"))
+        if old_stop <= 0:
+            continue  # no protective stop → never fabricate one (stays HIL-only)
+        price = _parse_num(quotes.get(h.ticker)) or h.last
+        if price <= 0:
+            continue
+
+        stored_th = _parse_num(plan.get("trail_high"))
+        # Migration: seed a missing trail_high from the OBSERVED price only —
+        # never avg_cost (a fabricated peak on a loser would compute a stop
+        # above the current price from a high that never happened).
+        th = max(stored_th if stored_th > 0 else price, price)
+        trail_rose = th > stored_th + 0.01
+        if trail_rose:
+            plan["trail_high"] = round(th, 4)
+
+        new_stop = old_stop
+        entry = h.avg_cost
+        if entry > 0:  # no entry → can't establish gain → leave the stop as-is
+            atr = _atr_for(h, {"atr": atr_map or {}})
+            em = ExitManager(trail_atr_mult=trail_atr_mult) if trail_atr_mult else ExitManager()
+            # Intermediate breakeven lock — same threshold as the paper book.
+            if price >= entry + BREAKEVEN_LOCK_ATR * atr:
+                new_stop = max(new_stop, entry)
+            # Activation measured on the HIGH-WATER mark so it is sticky (like
+            # the paper book's trail_active) without needing a new plan flag.
+            if th >= entry + em.trail_activation_atr_mult * atr:
+                new_stop = em.update_trailing_stop(current_stop=new_stop, peak_price=th, atr=atr)
+
+        stop_raised = new_stop > old_stop + 0.01  # same epsilon as the SET_STOP path
+        if stop_raised:
+            plan["stop"] = round(new_stop, 2)
+            plan["stop_raised_at"] = now
+            plan["stop_source"] = "trail_ratchet"
+        if stop_raised or trail_rose:
+            changes.append({
+                "ticker": h.ticker,
+                "old_stop": old_stop,
+                "new_stop": plan["stop"] if stop_raised else old_stop,
+                "trail_high": round(th, 4),
+                "price": price,
+                "stop_raised": stop_raised,
+            })
+    return changes
 
 
 # ── Store persistence (per-user JSON, atomic) ───────────────────────────────────

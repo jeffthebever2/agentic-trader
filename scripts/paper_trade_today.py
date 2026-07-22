@@ -3656,6 +3656,9 @@ def scan_account_once(
         regime_state=_rs,
         output_dir=str(output_dir) if output_dir else None,
         now=now,
+        # Shadow gate = model not in the decision path; its age must not halt
+        # the rule-based entries that actually carry the book.
+        ml_enforcing=(getattr(args, "ml_gate_mode", "veto_only") != "shadow"),
     )
 
     if not _safety_report.safe_to_trade:
@@ -3910,7 +3913,19 @@ def scan_account_once(
             except Exception:
                 continue
             if held >= cp_max_hold:
-                price = prices.get(ticker, position.entry_price)
+                # Never fall back to entry_price: that books a fabricated 0% trade
+                # into trades[] → the leaderboard → the retrain JSONL, teaching the
+                # model that a possibly halted/delisted name was neutral. Skip and
+                # report, matching the exit loop above and PRICE_FEED_INCOMPLETE.
+                price = prices.get(ticker)
+                if price is None:
+                    account.log_event({"type": "PRICE_FEED_INCOMPLETE",
+                                       "missing_tickers": [ticker], "at": "MAX_HOLD_DAYS"})
+                    if dashboard:
+                        dashboard.event(
+                            f"{strategy_label(strategy)} time-stop {ticker} SKIPPED — no live price"
+                        )
+                    continue
                 account.sell(ticker, price, "MAX_HOLD_DAYS", now)
                 sold += 1
                 if dashboard:
@@ -3930,7 +3945,17 @@ def scan_account_once(
             except Exception:
                 continue
             if held_days >= max_hold:
-                price = prices.get(ticker, position.entry_price)
+                # See MAX_HOLD_DAYS above — a synthesized entry-price fill is fake
+                # P&L that poisons the retrain feedback loop.
+                price = prices.get(ticker)
+                if price is None:
+                    account.log_event({"type": "PRICE_FEED_INCOMPLETE",
+                                       "missing_tickers": [ticker], "at": "MAX_HOLD_DAYS"})
+                    if dashboard:
+                        dashboard.event(
+                            f"{strategy_label(strategy)} max-hold {ticker} SKIPPED — no live price"
+                        )
+                    continue
                 account.sell(ticker, price, "MAX_HOLD_DAYS", now)
                 sold += 1
                 if dashboard:
@@ -5417,7 +5442,16 @@ def run() -> None:
                         for ticker, position in list(account.positions.items()):
                             if strategy == "long_hold" or getattr(args, "hold_overnight", True):
                                 continue  # carry positions overnight
-                            exit_price = final_prices.get(ticker, position.entry_price)
+                            # No synthesized entry-price fill — see MAX_HOLD_DAYS.
+                            exit_price = final_prices.get(ticker)
+                            if exit_price is None:
+                                account.log_event({"type": "PRICE_FEED_INCOMPLETE",
+                                                   "missing_tickers": [ticker],
+                                                   "at": "EOD_FLATTEN_AFTER_CLOSE"})
+                                dashboard.event(
+                                    f"{strategy_label(strategy)} flatten {ticker} SKIPPED — no closing price"
+                                )
+                                continue
                             account.sell(ticker, exit_price, "EOD_FLATTEN_AFTER_CLOSE", now)
                             dashboard.event(
                                 f"{strategy_label(strategy)} sold {ticker} at {exit_price:.2f}: after-close flatten"

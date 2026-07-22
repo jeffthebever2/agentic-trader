@@ -31,6 +31,13 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# Cycle 44 E-12: intermediate breakeven lock — the stop moves to entry once price
+# gains this many ATRs, *before* full trail activation (breakeven_trigger_atr).
+# Shared with the live-book stop ratchet (holdings_brain.ratchet_stops) so the
+# paper and live books use one number.
+BREAKEVEN_LOCK_ATR = 0.6
+
+
 # ---------------------------------------------------------------------------
 # Exit signal enum
 # ---------------------------------------------------------------------------
@@ -389,10 +396,10 @@ def _update_trail(plan: ShortHoldExitPlan, current_price: float) -> None:
         plan.peak_price = current_price
 
     # Cycle 44 E-12: intermediate breakeven. Lock the stop to entry once price
-    # reaches +0.6 ATR, before full trail activation at the breakeven trigger
-    # (default +1.0 ATR). Removes the fully-exposed entry→+1ATR "dead zone" where a
-    # near-target runner could round-trip to a full stop-loss.
-    if not plan.trail_active and current_price >= plan.entry + 0.6 * plan.atr:
+    # reaches +BREAKEVEN_LOCK_ATR ATR, before full trail activation at the breakeven
+    # trigger (default +1.0 ATR). Removes the fully-exposed entry→+1ATR "dead zone"
+    # where a near-target runner could round-trip to a full stop-loss.
+    if not plan.trail_active and current_price >= plan.entry + BREAKEVEN_LOCK_ATR * plan.atr:
         plan.trail_stop = max(plan.trail_stop, plan.entry)
 
     # Activate trail once price exceeds breakeven trigger

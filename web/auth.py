@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, HTTPException, Request, status
 
+from tradingagents.config import env_bool
 from web.users import get_or_create_user
 
 log = logging.getLogger("auth")
@@ -61,11 +62,11 @@ def _audience() -> str:
 
 
 def _required() -> bool:
-    return os.getenv("CF_ACCESS_REQUIRED", "false").lower() == "true"
+    return env_bool("CF_ACCESS_REQUIRED", False)
 
 
 def _local_dev_enabled() -> bool:
-    return os.getenv("CF_ACCESS_LOCAL_DEV", "false").lower() == "true"
+    return env_bool("CF_ACCESS_LOCAL_DEV", False)
 
 
 def _local_dev_email() -> str:
@@ -82,8 +83,29 @@ def _local_dev_email() -> str:
 
 
 def _is_localhost(request: Request) -> bool:
-    host = (request.headers.get("host") or "").split(":")[0].lower()
-    return host in ("localhost", "127.0.0.1", "::1")
+    """True only for a genuine DIRECT local-dev request — never for tunneled traffic.
+
+    SECURITY (C1): the previous implementation keyed off the client-controlled
+    ``Host`` header, so any request with ``Host: localhost`` was treated as trusted
+    dev traffic and auto-elevated to admin. This now uses the real socket peer AND
+    requires the absence of edge/proxy headers.
+
+    The peer alone is insufficient: cloudflared connects to the origin from
+    127.0.0.1, so every PUBLIC request also has a loopback peer. But every tunneled
+    request carries Cloudflare/forwarding headers that a direct ``localhost:8001``
+    dev request does not — so a loopback peer with none of those markers is the only
+    thing treated as local dev. Fails closed for anything proxied.
+    """
+    client = (request.client.host if request.client else "") or ""
+    if client.lower() not in ("127.0.0.1", "::1", "localhost"):
+        return False
+    proxy_markers = (
+        "cf-connecting-ip", "cf-ray", "cf-access-jwt-assertion",
+        "x-forwarded-for", "x-forwarded-host", "forwarded",
+    )
+    if any(request.headers.get(h) for h in proxy_markers):
+        return False
+    return True
 
 
 def _jwks_client() -> Any:
@@ -296,11 +318,12 @@ async def enforce_step_up(
         or (method == "passkey" and bool(st["passkeys"]))
         or (method == "email" and st.get("email_enabled"))
         or (method == "passcode" and st.get("passcode_enabled"))
+        or (method == "clerk" and st.get("clerk_enabled"))
     )
     if method == "none" or not ready:
         raise HTTPException(
             status_code=status.HTTP_428_PRECONDITION_REQUIRED,
-            detail="Step-up 2FA required before trading. Enroll a trading passcode, TOTP, email codes, or a passkey in Settings.",
+            detail="Step-up 2FA required before trading. Enroll a trading passcode, TOTP, email codes, a passkey, or Clerk (Google) in Settings.",
         )
     token = request.headers.get("x-step-up-token", "")
     if not twofa.verify_step_up_token(token, user["email"]):

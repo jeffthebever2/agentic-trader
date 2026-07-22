@@ -1,12 +1,14 @@
 import os
 
+from tradingagents.config import env_bool
+
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
 
 DEFAULT_CONFIG = {
     "project_dir": os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
     "results_dir": os.getenv("TRADINGAGENTS_RESULTS_DIR", os.path.join(_TRADINGAGENTS_HOME, "logs")),
     "data_cache_dir": os.getenv("TRADINGAGENTS_CACHE_DIR", os.path.join(_TRADINGAGENTS_HOME, "cache")),
-    "data_cache_enabled": os.getenv("TRADINGAGENTS_DATA_CACHE_ENABLED", "true").lower() == "true",
+    "data_cache_enabled": env_bool("TRADINGAGENTS_DATA_CACHE_ENABLED", True),
     "data_cache_ttl_hours": int(os.getenv("TRADINGAGENTS_DATA_CACHE_TTL_HOURS", "24")),
     "memory_log_path": os.getenv("TRADINGAGENTS_MEMORY_LOG_PATH", os.path.join(_TRADINGAGENTS_HOME, "memory", "trading_memory.md")),
     "structured_memory_dir": os.getenv("TRADINGAGENTS_STRUCTURED_MEMORY_DIR", os.path.join(_TRADINGAGENTS_HOME, "memory")),
@@ -25,10 +27,10 @@ DEFAULT_CONFIG = {
     "max_sector_exposure": float(os.getenv("TRADINGAGENTS_MAX_SECTOR_EXPOSURE", "0.30")),
     "max_daily_loss": float(os.getenv("TRADINGAGENTS_MAX_DAILY_LOSS", "-0.05")),
     "max_monthly_loss": float(os.getenv("TRADINGAGENTS_MAX_MONTHLY_LOSS", "-0.15")),
-    "paper_trading_enabled": os.getenv("TRADINGAGENTS_PAPER_TRADING_ENABLED", "true").lower() == "true",
+    "paper_trading_enabled": env_bool("TRADINGAGENTS_PAPER_TRADING_ENABLED", True),
     "live_broker_enabled": False,
     # Quota-protected paid/free-tier enrichers
-    "fmp_enabled": os.getenv("TRADINGAGENTS_FMP_ENABLED", "true").lower() == "true",
+    "fmp_enabled": env_bool("TRADINGAGENTS_FMP_ENABLED", True),
     "fmp_daily_limit": int(os.getenv("TRADINGAGENTS_FMP_DAILY_LIMIT", "250")),
     "fmp_reserve_calls": int(os.getenv("TRADINGAGENTS_FMP_RESERVE_CALLS", "25")),
     # LLM settings

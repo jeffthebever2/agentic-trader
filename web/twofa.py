@@ -43,6 +43,10 @@ _TOTP_QR_LOGO = ROOT / "web" / "static" / "agentic-trader-icon.png"
 _STEP_UP_TTL = 300  # seconds
 _EMAIL_CODE_TTL = 600  # seconds
 _EMAIL_CODE_RESEND_SECONDS = 60
+# Max wrong guesses per issued code before it is invalidated. Caps brute-force of
+# the 6-digit code to 5 tries within the 10-min TTL, independent of the (IP-based,
+# spoofable) global rate limiter (H5).
+_EMAIL_CODE_MAX_ATTEMPTS = 5
 
 TOTP_ISSUER = "Agentic Trader"
 
@@ -429,6 +433,12 @@ def verify_email_code(email: str, code: str) -> bool:
     expected = pending.get("digest", "")
     actual = _code_digest(email, code)
     if not hmac.compare_digest(expected, actual):
+        # Cap guesses per issued code — invalidate after too many wrong attempts so
+        # the 6-digit code cannot be brute-forced within its TTL (H5).
+        attempts = int(pending.get("attempts", 0)) + 1
+        pending["attempts"] = attempts
+        if attempts >= _EMAIL_CODE_MAX_ATTEMPTS:
+            _PENDING_EMAIL.pop(email.lower(), None)
         return False
     _PENDING_EMAIL.pop(email.lower(), None)
     return True
@@ -542,6 +552,14 @@ _PENDING_EMAIL: dict[str, dict[str, Any]] = {}
 _PASSCODE_FAILS: dict[str, dict[str, Any]] = {}
 
 
+def _clerk_configured() -> bool:
+    try:
+        from web import clerk
+        return clerk.clerk_configured()
+    except Exception:
+        return False
+
+
 def step_up_status(email: str) -> dict[str, Any]:
     user = user_store.get_user(email) or {}
     return {
@@ -549,6 +567,7 @@ def step_up_status(email: str) -> dict[str, Any]:
         "totp_enabled": bool(user.get("totp_enabled", False)),
         "passcode_enabled": bool(user.get("passcode_enabled", False)),
         "email_enabled": email_otp_available(),
+        "clerk_enabled": _clerk_configured(),
         "passkeys": [
             {"id": p["id"], "name": p.get("name", "Passkey"), "created": p.get("created")}
             for p in user.get("passkeys", [])

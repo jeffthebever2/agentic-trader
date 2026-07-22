@@ -52,6 +52,26 @@ class BuzzConfig:
     # A net-bearish name (more bearish than bullish conviction) is flagged avoid.
     neg_avoid: float = -0.20
 
+    # Sentiment floor used by the DOWNSTREAM hard caps (composite_score caps a
+    # name at 45 when net_sentiment <= -0.5; blend_sentiment turns conservative
+    # at -0.3). Those thresholds were calibrated against the UNSMOOTHED scale,
+    # where any bearish weight with no bull could reach -1.0. Smoothing raised
+    # the bar to ~6 explicit sell posts, so a name with 2 bearish posts and no
+    # bullish ones went from "capped at 45, never auto-tradeable" to ~72 —
+    # through MIN_COMPOSITE_SCORE=70. `bearish_floor_scale` rescales the
+    # one-sided-bearish case back onto the original range so those caps keep
+    # biting, without reintroducing single-mention saturation on the bull side.
+    bearish_floor_scale: float = 2.0
+
+    # Evidence-mass prior for net_sentiment (Laplace smoothing). Without it the
+    # denominator is just the observed weight, so ONE unopposed bullish mention
+    # yields net_sentiment == 1.0 exactly — full confidence from a single post.
+    # That term multiplies the whole composite by up to 1.25x, which was enough to
+    # admit names with almost no measured buzz (the raw buzz needed to clear the
+    # composite floor collapsed from ~91 to ~8). The prior makes one mention read
+    # as ~0.25 and lets genuine consensus still approach 1.0.
+    sentiment_prior: float = 3.0
+
     @staticmethod
     def from_env() -> "BuzzConfig":
         g = os.getenv
@@ -74,6 +94,8 @@ class BuzzConfig:
             vol_cap=f("BUZZ_VOL_CAP", 15.0),
             k_vol=f("BUZZ_K_VOL", 4.0),
             neg_avoid=f("BUZZ_NEG_AVOID", -0.20),
+            sentiment_prior=f("BUZZ_SENTIMENT_PRIOR", 3.0),
+            bearish_floor_scale=f("BUZZ_BEARISH_FLOOR_SCALE", 2.0),
         )
 
 
@@ -178,8 +200,27 @@ def compute_buzz(base: float, tally: dict, *, cfg: BuzzConfig = DEFAULT) -> Buzz
     delta = bull - bear + neutral
     buzz = max(0.0, base + delta)
 
-    denom = bull_w + bear_w + neut_w + _EPS
+    # Laplace-smoothed: a single unopposed mention must not read as total
+    # conviction. See BuzzConfig.sentiment_prior.
+    denom = bull_w + bear_w + neut_w + max(0.0, cfg.sentiment_prior) + _EPS
     net_sentiment = max(-1.0, min(1.0, (bull_w - bear_w) / denom))
+    # Keep the downstream bearish HARD CAPS reachable. They were calibrated on
+    # the unsmoothed scale, so without this a clearly bearish name no longer
+    # trips composite_score's <=-0.5 cap and can clear the buy gate.
+    #
+    # Scaled CONTINUOUSLY by how one-sided the bearish evidence is, not switched
+    # on a `bull_w <= 0` test. A hard branch made this a step function: one
+    # throwaway bullish reply (bull_w 0 → 1e-9) flipped sentiment -0.78 → -0.39
+    # and a hard-capped 45 became a tradeable 77. The buy gate must not hinge on
+    # whether literally nobody posted anything positive.
+    if net_sentiment < 0 and cfg.bearish_floor_scale > 1.0:
+        total_w = bull_w + bear_w
+        if total_w > 0:
+            bear_share = bear_w / total_w          # 1.0 = wholly bearish
+            # Interpolate the multiplier 1.0 → bearish_floor_scale across the
+            # bullish-contamination range, so a tiny bull weight barely moves it.
+            mult = 1.0 + (cfg.bearish_floor_scale - 1.0) * max(0.0, min(1.0, bear_share))
+            net_sentiment = max(-1.0, net_sentiment * mult)
     bull_bear_ratio = min(999.0, (bull_w + _EPS) / (bear_w + _EPS))  # cap so all-bull doesn't log as ~millions
     avoid = net_sentiment <= cfg.neg_avoid and bear_w > 0.0
 

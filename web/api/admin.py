@@ -60,6 +60,7 @@ def record_audit_event(
         }
         with AUDIT_FILE.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
+        os.chmod(AUDIT_FILE, 0o600)  # admin action history — owner-only (M7)
     except Exception:
         pass
 
@@ -90,6 +91,7 @@ def _write_flags(flags: dict[str, bool]) -> dict[str, bool]:
     try:
         with _os.fdopen(fd, "w", encoding="utf-8") as f: f.write(content)
         _os.replace(tmp, FLAGS_FILE)
+        _os.chmod(FLAGS_FILE, 0o600)  # admin feature flags — owner-only (M7)
     except Exception:
         try: _os.unlink(tmp)
         except Exception: pass

@@ -1,0 +1,19 @@
+# logrotate config for Agentic Trader logs (D3 — logs were unbounded).
+# Install: sudo cp deploy/logrotate/agentictrader /etc/logrotate.d/agentictrader
+# Test:    sudo logrotate -d /etc/logrotate.d/agentictrader   (dry run)
+#
+# copytruncate: the uvicorn/loop processes hold the file open and append; we
+# rotate in place and truncate rather than requiring a service restart/reopen.
+
+/opt/agentictrader/logs/*.log /opt/agentictrader/logs/*.err {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    dateext
+    su trader trader
+    create 0640 trader trader
+}

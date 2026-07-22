@@ -67,11 +67,39 @@ def test_hard_cap_is_manage_only():
 
 
 # ── manage-first suppression ────────────────────────────────────────────────────
-def test_strong_positions_progressing_suppress_generation():
-    existing = [_pos("AAA", conv=8, status="HOLD", progress=0.3, ret=20)]
+def test_strong_positions_progressing_suppress_generation_near_capacity():
+    """Manage-first is a SCARCITY rule — it fires once slots are scarce (n >= near)."""
+    existing = [_pos(f"H{i}", conv=8, status="HOLD", progress=0.3, ret=20)
+                for i in range(CFG.near_capacity_count)]
     r = pp.evaluate(existing, [_cand("BBB", conv=6, ret=15)], CFG)
     assert r.suppress_generation is True
     assert "Managing existing" in r.reason
+
+
+def test_one_strong_holding_does_not_freeze_the_whole_book():
+    """Regression: manage-first used to trigger on the mere EXISTENCE of a strong
+    position, with no capacity condition.
+
+    `is_strong` is only conviction>=6 and target_progress<0.8, and the unified
+    view folds REAL broker holdings in — so a single conviction-7 name returned an
+    empty decision set on every cycle, forever. The consumer treats an empty dict
+    as "nothing passes", so the scanner proposed ZERO candidates regardless of the
+    tape while cash sat undeployed, and max_positions=10 was unreachable: the book
+    could never grow past its first holding.
+    """
+    existing = [_pos("AAA", conv=8, status="HOLD", progress=0.3, ret=20)]
+    r = pp.evaluate(existing, [_cand("BBB", conv=6, ret=15)], CFG)
+    assert r.suppress_generation is False
+    assert any(d.ticker == "BBB" for d in r.decisions)
+
+
+@pytest.mark.parametrize("n_held", range(1, 8))
+def test_book_can_grow_toward_capacity_with_strong_holdings(n_held):
+    """Every position count below `near` must still admit new ideas."""
+    existing = [_pos(f"H{i}", conv=8, status="HOLD", progress=0.3, ret=20)
+                for i in range(n_held)]
+    r = pp.evaluate(existing, [_cand("NEW", conv=6, ret=15)], CFG)
+    assert r.suppress_generation is False, f"frozen at {n_held}/{CFG.max_positions}"
 
 
 def test_clearly_superior_candidate_overrides_manage_first():

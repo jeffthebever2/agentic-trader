@@ -201,10 +201,18 @@ def _score_position(pos: dict, prices: dict[str, float]) -> dict[str, float]:
     # Chase risk (higher = more chased, penalizes late entries)
     chase_risk = min(max(chase_pct / 5.0, 0.0), 10.0) if has_prices else 0.0
 
-    # Theme score — premium AI/infra themes score highest
-    premium_themes = {"ai_leaders", "ai_infrastructure", "memory_hbm", "datacenter_power"}
-    growth_themes  = {"optical_network", "space_defense", "quantum_future", "nuclear_energy"}
-    theme_score = 9.0 if pos.get("theme") in premium_themes else 7.0 if pos.get("theme") in growth_themes else 5.5
+    # Theme score — NEUTRAL flat base (de-biased 2026-07-06).
+    # Previously premium AI/infra themes scored 9.0 vs 5.5 for "other" themes,
+    # which actively AMPLIFIED concentration into the AI complex — the exact bias
+    # the market-section diversification build exists to kill. Diversification is
+    # now enforced structurally in the sizer (cluster caps + decay via
+    # tradingagents/portfolio/diversification.py), so scoring must NOT also tilt
+    # toward the crowded themes. Every theme now gets the same base; differentiation
+    # comes from catalyst/conviction/momentum/social/entry, not from which theme
+    # bucket the position happens to sit in. Because this is constant across all
+    # positions, it no longer changes relative ranking (its 0.15 weight is now a
+    # fixed offset) — that is the whole point of the de-bias.
+    theme_score = 6.0
 
     # Catalyst score: 9 = specific near-term catalyst, 5 = general thesis, 2 = none
     cat = pos.get("catalyst", "").strip()
@@ -633,7 +641,7 @@ async def thematic_paper_trade(body: ThematicTradeIn, user: dict = Depends(get_c
         open_positions = state.get("positions", {})
         _theme = port_pos.get("theme", "future_tech")
         _thematic_count = sum(1 for p in open_positions.values() if p.get("_source", "").startswith("thematic"))
-        _theme_count    = sum(1 for p in open_positions.values() if p.get("theme") == _theme and p.get("sector") == "thematic")
+        _theme_count    = sum(1 for p in open_positions.values() if p.get("theme") == _theme and str(p.get("_source", "")).startswith("thematic"))
         if len(open_positions) >= PORTFOLIO_MAX_POSITIONS:
             raise HTTPException(status_code=400, detail=f"Portfolio at max {PORTFOLIO_MAX_POSITIONS} positions")
         if _theme_count >= PORTFOLIO_MAX_PER_THEME:

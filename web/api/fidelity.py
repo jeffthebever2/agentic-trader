@@ -14,6 +14,9 @@ import hashlib
 import json
 import logging
 import os
+from tradingagents.config import env_bool
+from tradingagents.compliance import valid_symbol
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -69,6 +72,114 @@ def _read_snapshot(email: str, kind: str) -> "dict | None":
     return None
 
 
+def _pending_fills_path(email: str) -> Path:
+    return _snapshot_path(email, "pending_fills")
+
+
+def _load_pending_fills(email: str) -> list[dict]:
+    try:
+        p = _pending_fills_path(email)
+        if p.exists():
+            data = json.loads(p.read_text())
+            return data.get("pending", []) if isinstance(data, dict) else []
+    except Exception as e:
+        log.debug("pending-fill ledger read: %s", e)
+    return []
+
+
+def _save_pending_fills(email: str, pending: list[dict]) -> None:
+    try:
+        p = _pending_fills_path(email)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"pending": pending[-200:], "updated_at": _time.time()}))
+        tmp.replace(p)
+        try:
+            os.chmod(p, 0o600)
+        except Exception:
+            pass
+    except Exception as e:
+        log.warning("pending-fill ledger write failed: %s", e)
+
+
+def _record_pending_fill(email: str, *, ticker: str, shares: float, side: str,
+                         shares_before: float, limit_price: float | None = None) -> None:
+    """Remember that we SUBMITTED an order, so a later holdings snapshot can tell
+    us whether it actually filled.
+
+    Fidelity accepting a limit order is not a fill — these are DAY orders, so one
+    that never trades expires at 16:00 with no notification while internal state
+    (written on acceptance) claims we hold the position. Holdings are the source
+    of truth; this ledger is what lets us compare against them.
+    """
+    try:
+        import datetime as _dt
+        from tradingagents.brokers.fill_verifier import PendingFill
+        entry = PendingFill(
+            ticker=str(ticker).upper(), intended_shares=float(shares or 0),
+            shares_before=float(shares_before or 0), side=str(side or "buy").lower(),
+            submitted_at=_dt.datetime.now().isoformat(timespec="seconds"),
+            limit_price=limit_price,
+            order_id=f"{ticker}-{int(_time.time() * 1000)}",
+        ).as_dict()
+        pend = _load_pending_fills(email)
+        pend.append(entry)
+        _save_pending_fills(email, pend)
+        log.info("Pending fill recorded: %s %s x%s (had %s)",
+                 side, ticker, shares, shares_before)
+    except Exception as e:
+        log.warning("could not record pending fill for %s: %s", ticker, e)
+
+
+def _current_shares(email: str, ticker: str) -> float:
+    """Shares currently held per the cached positions snapshot (0 when unknown)."""
+    try:
+        from tradingagents.brokers.fill_verifier import holdings_share_map
+        snap = _read_snapshot(email, "positions") or {}
+        return holdings_share_map(snap.get("positions") or []).get(str(ticker).upper(), 0.0)
+    except Exception:
+        return 0.0
+
+
+def verify_pending_fills(email: str, *, session_expired: bool = False) -> list[dict]:
+    """Compare the pending-fill ledger against real broker holdings.
+
+    Returns the terminal verdicts (filled / partial / unfilled). An UNFILLED
+    verdict means internal state is describing a position that does not exist —
+    the caller must remove it and alert rather than keep marking it to market.
+
+    Fails safe: if the holdings snapshot is missing we pass ``None`` and every
+    verdict is UNKNOWN, so nothing is ever cleaned up on a transient scrape
+    failure.
+    """
+    from tradingagents.brokers.fill_verifier import (
+        PendingFill, holdings_share_map, reconcile_pending_fills, STATUS_PENDING,
+        STATUS_UNKNOWN,
+    )
+    raw = _load_pending_fills(email)
+    if not raw:
+        return []
+    snap = _read_snapshot(email, "positions")
+    holdings = holdings_share_map(snap.get("positions") or []) if snap else None
+
+    pendings = [PendingFill.from_dict(d) for d in raw]
+    expired = [p.ticker for p in pendings] if session_expired else []
+    verdicts = reconcile_pending_fills(pendings, holdings, expired_tickers=expired,
+                                       tolerance_shares=0.5)
+
+    keep, terminal = [], []
+    for src, v in zip(raw, verdicts):
+        if v.status in (STATUS_PENDING, STATUS_UNKNOWN):
+            keep.append(src)
+        else:
+            terminal.append(v.as_dict())
+            level = log.warning if v.status == "unfilled" else log.info
+            level("Fill verdict %s: %s (%s)", v.ticker, v.status, v.reason)
+    if len(keep) != len(raw):
+        _save_pending_fills(email, keep)
+    return terminal
+
+
 def _write_snapshot(email: str, kind: str, data: dict) -> None:
     try:
         payload = dict(data)
@@ -87,11 +198,58 @@ def _snapshot_meta(cached: dict) -> dict:
     return {"cached": True, "age_seconds": round(age, 1), "stale": age > _POS_CACHE_TTL}
 
 
+# Action words that appear inside historical lock keys. They identify the verb,
+# never the instrument, so they must not create a separate lock namespace.
+_ORDER_KEY_VERBS = frozenset({"buy", "sell", "exit", "auto-exit", "trim", "close"})
+
+
+def _canonical_order_key(key: str) -> str:
+    """Collapse the historical key dialects down to one lock per (user, ticker).
+
+    Four namespaces existed for the SAME position — ``{email}:{ticker}``,
+    ``{email}:{ticker}:{buy|sell}``, ``{email}:exit:{ticker}`` and
+    ``{email}:auto-exit:{ticker}``. Different strings mean different
+    ``asyncio.Lock`` objects, so they serialised nothing against each other.
+
+    The dangerous pair is on the sell side: the armed autonomous exit executor
+    takes ``auto-exit:`` while a human approving the *same* proposal takes
+    ``exit:``. Both pass, both scrape the same share count, both sell it — a
+    100-share holding becomes 100 short. That is precisely the position
+    PROHIBITED_ORDER_TYPES exists to prevent, and compliance cannot see it
+    because each order is individually a valid "Sell 100". The proposal status
+    only flips to executed after the ~40s Playwright round-trip, so there is no
+    status-based dedup either.
+
+    Serialising more is strictly safer, so collapse rather than split.
+
+    Implementation note: strip only the VERB tokens and keep every other segment
+    in order. Key shapes differ per broker — Fidelity uses ``{email}:{ticker}``
+    and Webull uses ``webull:{email}:{ticker}:{ACTION}`` — so anything that
+    assumes a fixed position for the ticker will collapse *different* tickers
+    onto one lock and block legitimate concurrent orders. Order-preserving verb
+    removal handles both shapes and keeps distinct tickers, users and brokers
+    distinct.
+    """
+    parts = [p for p in str(key).split(":") if p]
+    if len(parts) < 2:
+        return str(key)
+    kept = [p for p in parts if p.lower() not in _ORDER_KEY_VERBS]
+    if not kept:
+        return str(key)
+    # Normalise the instrument (always the trailing segment once verbs are gone).
+    kept[-1] = kept[-1].upper()
+    return ":".join(kept)
+
+
 def _get_order_lock(key: str) -> asyncio.Lock:
-    """Return (or create) a per-(user,ticker) lock to prevent duplicate orders."""
-    if key not in _ORDER_LOCKS:
-        _ORDER_LOCKS[key] = asyncio.Lock()
-    return _ORDER_LOCKS[key]
+    """Return (or create) a per-(user,ticker) lock to prevent duplicate orders.
+
+    The key is canonicalised first — see ``_canonical_order_key`` — so buy, sell,
+    exit and auto-exit for one ticker all contend for a single lock."""
+    canonical = _canonical_order_key(key)
+    if canonical not in _ORDER_LOCKS:
+        _ORDER_LOCKS[canonical] = asyncio.Lock()
+    return _ORDER_LOCKS[canonical]
 
 
 def _mask_account(account: str | None) -> str:
@@ -148,11 +306,83 @@ def _assert_account_tradeable(account: str | None) -> None:
         )
     # Strict mode: refuse the broker's default account too, so an order can never
     # silently land on whichever account Fidelity has selected (could be the Roth).
-    if not cleaned and os.getenv("FIDELITY_REQUIRE_EXPLICIT_ACCOUNT", "false").strip().lower() == "true":
+    # Defaults ON whenever a protected list exists; set to "false" to opt out.
+    if not cleaned and env_bool("FIDELITY_REQUIRE_EXPLICIT_ACCOUNT", True):
         raise HTTPException(
             status_code=403,
-            detail="FIDELITY_REQUIRE_EXPLICIT_ACCOUNT=true — specify an explicit, allowed "
+            detail="FIDELITY_REQUIRE_EXPLICIT_ACCOUNT is enabled — specify an explicit, allowed "
                    "account number (refusing the default account).",
+        )
+
+
+def _resolve_trade_account(explicit: str | None = None) -> str | None:
+    """Resolve the target account for HIL flows that don't carry one per-request.
+
+    Order: ``explicit`` (request field / per-user setting) → env
+    ``FIDELITY_TRADE_ACCOUNT`` → None. The result ALWAYS passes
+    ``_assert_account_tradeable``, so a protected account — or no account at all
+    while ``FIDELITY_REQUIRE_EXPLICIT_ACCOUNT`` strict mode is active — raises
+    (403) here instead of falling through to whatever account the broker has
+    pre-selected. This only NARROWS the account gates: the order paths still
+    re-validate, re-assert, and read-back-verify the ticket selection.
+    """
+    raw = str(explicit).strip() if explicit else os.getenv("FIDELITY_TRADE_ACCOUNT", "").strip()
+    account = _validate_account_number(raw) if raw else None  # ValueError on garbage
+    _assert_account_tradeable(account)  # 403: protected, or empty in strict mode
+    return account
+
+
+async def _select_and_verify_account(page, account: str | None) -> None:
+    """Select ``account`` in the trade-ticket dropdown and verify the ticket took it.
+
+    Fail-closed: any failure to select OR verify aborts the order. We never fall
+    back to whatever account Fidelity has pre-selected — the pre-selected default
+    could be a protected retirement account that ``_assert_account_tradeable``
+    validated the *requested* account against, not the one the order would hit.
+    """
+    from fastapi import HTTPException
+
+    if not account:
+        return
+    dropdown = page.locator('#dest-acct-dropdown')
+    try:
+        await dropdown.click()
+        await asyncio.sleep(1)
+        await page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
+        await asyncio.sleep(1)
+    except Exception as exc:
+        log.error("Could not select account %s — aborting order (no default-account fallback): %s",
+                  _mask_account(account), exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not select account {_mask_account(account)} on the trade ticket — order aborted.",
+        )
+    # Read back what the ticket actually shows; the selection click above can
+    # silently no-op while the page keeps the pre-selected account.
+    try:
+        shown = (await dropdown.inner_text(timeout=2000)) or ""
+    except Exception:
+        shown = ""
+    # Match against extracted digit RUNS — never a raw concatenation of every
+    # digit on the widget. A concatenation lets a rendered balance ("$15,260.00"),
+    # ANOTHER account number (default 40552604 contains "5260"), or a still-open
+    # option list false-pass the last-4 check by digit coincidence while the
+    # ticket keeps the broker default account. Fail-closed rules:
+    #   * full match  → some digit run equals the requested account exactly;
+    #   * last-4 match → the last 4 digits appear as a standalone token (masked
+    #     display like "...6789"), never embedded inside a longer digit run;
+    #   * any OTHER account-like run (≥6 digits ≠ requested) on the widget —
+    #     open option list or a different selected account — aborts outright.
+    digit_runs = re.findall(r"\d{4,}", shown)
+    other_accounts = [r for r in digit_runs if len(r) >= 6 and r != account]
+    full_match = account in digit_runs
+    last4_match = re.search(rf"(?:^|\D){re.escape(account[-4:])}(?:\D|$)", shown) is not None
+    if other_accounts or not (full_match or last4_match):
+        log.error("Account read-back mismatch: requested %s, ticket shows %r — aborting order",
+                  _mask_account(account), shown.strip()[:80])
+        raise HTTPException(
+            status_code=502,
+            detail="Trade ticket did not confirm the requested account — order aborted.",
         )
 
 
@@ -161,11 +391,88 @@ _ORDER_CONFIRM_PATTERNS = [
     "order received", "order submitted", "order number", "confirmation",
     "order #", "order has been placed", "order was placed",
 ]
+# Matched as substrings against the WHOLE page innerText, and checked BEFORE the
+# confirm patterns — so any token that appears in ordinary Fidelity chrome makes
+# a successful order look rejected. Post-submit that is the dangerous direction:
+# the order is already live, but `order_status` stays "sized", the paper mirror
+# is skipped and `_mark_owned` never runs, leaving real shares that no part of
+# the system knows about — no stop, no target, not in the exit guard, and
+# copy-trade will buy the name again.
+#
+# Dropped as pure noise: "buying power" (a standard ticket label), "after hours"
+# (extended-hours UI), "error" and "invalid" (hidden aria-live templates and
+# validation scaffolding present on every page). What remains only appears in a
+# genuine rejection message.
+#
+# The opposite direction — missing a real rejection — is now recoverable:
+# verify_pending_fills() checks submitted orders against actual holdings, so a
+# rejected order that we recorded as filled surfaces as a PHANTOM alert instead
+# of silently persisting. That safety net is what makes trimming this list the
+# right trade.
 _ORDER_ERROR_PATTERNS = [
-    "insufficient", "not enough", "buying power", "error", "failed",
-    "unable to process", "cannot process", "rejected", "invalid",
-    "market is closed", "after hours",
+    "insufficient", "not enough", "failed",
+    "unable to process", "cannot process", "rejected",
+    "market is closed",
 ]
+
+# Natural-language rejection phrasings the flat substring list cannot express.
+# "cannot process" does NOT match "cannot be processed" — and that exact string
+# was this function's own documented example of a page that must be rejected, so
+# the documented behaviour and the real behaviour disagreed: a rejected order
+# carrying an order number read as CONFIRMED, and state was written for shares
+# that were never bought. Anchored on the verb so they cannot fire on chrome.
+# Anchored on YOUR order specifically. The first draft matched the bare verb
+# phrase, which fires on ordinary Fidelity copy that has nothing to do with the
+# order just submitted — all of these are benign and were being rejected:
+#   "Orders cannot be placed for restricted securities."   (boilerplate)
+#   "If you are unable to complete your order, call us."   (help text)
+#   "Tell us why your task was not completed."             (feedback widget)
+#   a "Recent orders" row reading "Order canceled"          (a DIFFERENT order)
+# Post-submit a false positive is the dangerous direction: the order is already
+# live, so a spurious rejection leaves real shares nothing tracks. Requiring a
+# possessive/definite reference to *this* order keeps the genuine rejections
+# ("Your order cannot be processed", "This order was not placed") and drops the
+# generic copy.
+# Rejection detection is SENTENCE-SCOPED, not proximity-based.
+#
+# A proximity regex over the whole page fails both ways. `innerText` joins DOM
+# elements with newlines, and `[^.]` matches a newline, so an unrelated heading
+# and unrelated boilerplate three elements apart look adjacent — that is how
+# "Your order / Summary / Orders cannot be placed for restricted securities"
+# read as a rejection. In the other direction a bounded gap breaks on the first
+# period, and any rejection that echoes the ticket contains a price ("$4.12"),
+# so real rejections were missed. Word order also varies: "unable to place YOUR
+# ORDER" puts the anchor after the verb.
+#
+# Instead: split into sentences/lines, and require the anchor and the rejection
+# verb to appear in the SAME segment, in either order.
+_THIS_ORDER_RX = re.compile(
+    r"(?:(?:your|this)\s+order|order\s*(?:#|number)\s*[:\s]?\s*\d+)", re.I)
+_REJECT_VERB_RX = re.compile(
+    r"(?:(?:cannot|can\s?not|could\s+not|unable\s+to|will\s+not|has\s+not|"
+    r"have\s+not)\s+(?:be\s+)?(?:process|complet|plac|submit|execut|accept|fill)"
+    r"|(?:was|were|is|are)\s+not\s+"
+    r"(?:placed|accepted|submitted|executed|processed|completed|filled)\b"
+    r"|\b(?:declined|refused|rejected|cancell?ed|voided)\b)", re.I)
+# Conditional / advisory framing — help text and feedback widgets, not verdicts.
+_BENIGN_CONTEXT_RX = re.compile(
+    r"\b(?:if\s+you|if\s+your|should\s+you|tell\s+us|please\s+call|contact\s+us|"
+    r"why\s+your|in\s+the\s+event|may\s+not\s+be)\b", re.I)
+
+
+def _order_rejection_segment(page_text: str) -> "str | None":
+    """Return the sentence rejecting THIS order, or None."""
+    # Collapse punctuation INSIDE numbers so "$4.12" / "1,000" do not split a
+    # sentence or hide a quantity.
+    norm = re.sub(r"(?<=\d)[,.](?=\d)", "", page_text or "")
+    for seg in re.split(r"[.\n;]", norm):
+        if not seg.strip():
+            continue
+        if _BENIGN_CONTEXT_RX.search(seg):
+            continue
+        if _THIS_ORDER_RX.search(seg) and _REJECT_VERB_RX.search(seg):
+            return seg.strip()[:160]
+    return None
 
 
 def _verify_fidelity_order_page(page_text: str) -> tuple[bool, str]:
@@ -179,6 +486,9 @@ def _verify_fidelity_order_page(page_text: str) -> tuple[bool, str]:
     for pat in _ORDER_ERROR_PATTERNS:
         if pat in lower:
             return False, f"order rejected by Fidelity: '{pat}' found in page"
+    seg = _order_rejection_segment(page_text)
+    if seg:
+        return False, f"order rejected by Fidelity: {seg!r}"
     for pat in _ORDER_CONFIRM_PATTERNS:
         if pat in lower:
             return True, f"confirmed: '{pat}' found in page"
@@ -222,7 +532,34 @@ _RELOGIN_BACKOFF_MAX = 3600.0   # cap at 1 hour
 # Users with a live order on the shared browser context. While set, background
 # loops (keepalive / auto-relogin / exit-guard) must NOT reset or relogin that
 # user's browser — doing so closes the context and crashes the in-flight order.
-_ORDER_IN_FLIGHT: set[str] = set()
+# REFCOUNTED (ticker → depth), not a set. `key in _ORDER_IN_FLIGHT` still reads
+# naturally on a dict, so the consumers in web/app.py and _auto_relogin are
+# unchanged.
+_ORDER_IN_FLIGHT: dict[str, int] = {}
+
+
+def _order_in_flight_acquire(key: str) -> None:
+    """Mark one more in-flight order for this user.
+
+    This was a set, so two concurrent orders for the same user — a buy on AAPL
+    and an exit on NVDA, which take different per-ticker locks and are both
+    legal — each add()ed the same key, and whichever finished FIRST discard()ed
+    it. That un-protected the second order while it sat between its Place Order
+    click and its confirmation read: the keepalive loop saw an idle browser,
+    called _reset_browser_state, and the live order died with TargetClosedError.
+    The order was already submitted at Fidelity, so the position became real,
+    untracked, and unstopped.
+    """
+    _ORDER_IN_FLIGHT[key] = _ORDER_IN_FLIGHT.get(key, 0) + 1
+
+
+def _order_in_flight_release(key: str) -> None:
+    """Drop one in-flight order; the key disappears only at depth zero."""
+    remaining = _ORDER_IN_FLIGHT.get(key, 0) - 1
+    if remaining > 0:
+        _ORDER_IN_FLIGHT[key] = remaining
+    else:
+        _ORDER_IN_FLIGHT.pop(key, None)
 
 
 class _order_in_flight:
@@ -232,11 +569,11 @@ class _order_in_flight:
         self.key = _user_key(email)
 
     def __enter__(self):
-        _ORDER_IN_FLIGHT.add(self.key)
+        _order_in_flight_acquire(self.key)
         return self
 
     def __exit__(self, *exc):
-        _ORDER_IN_FLIGHT.discard(self.key)
+        _order_in_flight_release(self.key)
         return False
 
 
@@ -307,6 +644,12 @@ async def _ensure_browser(email: str):
     key = _user_key(email)
     if not key:
         raise RuntimeError("Authenticated user email is required for Fidelity session isolation")
+    # Dev kill-switch: refuse to launch the Playwright/Chrome automation at all.
+    # Fidelity blocks true headless, so any launch is a real (if off-screen) Chrome
+    # window — annoying on a frontend-dev box. This only ever *denies* browser
+    # access, so it weakens no compliance gate. Callers already catch this.
+    if env_bool("FIDELITY_BROWSER_DISABLED", False):
+        raise RuntimeError("Fidelity browser automation disabled (FIDELITY_BROWSER_DISABLED=true)")
     context = _PW_CONTEXTS.get(key)
     browser = _PW_BROWSERS.get(key)
     if context is not None:
@@ -337,7 +680,7 @@ async def _ensure_browser(email: str):
     # only knob is whether it's on-screen or parked off-screen (invisible).
     #   FIDELITY_HEADLESS=false → on-screen (debug login/scrape)
     #   otherwise (default)      → headed but off-screen at -32000,-32000 (hidden)
-    on_screen = os.getenv("FIDELITY_HEADLESS", "true").strip().lower() == "false"
+    on_screen = not env_bool("FIDELITY_HEADLESS", True)
     win_args = visible_args if on_screen else hidden_args
     # Prefer system Edge/Chrome (less detectable than bundled Chromium), all headed.
     for channel in ("msedge", "chrome", None):
@@ -536,7 +879,7 @@ def _clear_manual_login_required(email: str) -> None:
 
 def _credential_storage_enabled() -> bool:
     """Opt-in. Storing a recoverable password is off unless explicitly enabled."""
-    return os.getenv("FIDELITY_STORE_CREDENTIALS", "false").strip().lower() == "true"
+    return env_bool("FIDELITY_STORE_CREDENTIALS", False)
 
 
 def _save_credentials(email: str, username: str, password: str) -> None:
@@ -1461,7 +1804,7 @@ class FidelityTradeRequest(BaseModel):
     def model_post_init(self, __context) -> None:
         from fastapi import HTTPException
         self.symbol = self.symbol.upper().strip()
-        if not self.symbol.isalpha() or len(self.symbol) > 5:
+        if not valid_symbol(self.symbol):
             raise ValueError(f"Invalid symbol '{self.symbol}'")
         if self.action.lower() not in ("buy", "sell"):
             raise ValueError(f"action must be 'Buy' or 'Sell', got '{self.action}'")
@@ -1491,7 +1834,23 @@ async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(requi
         if LIVE_TRADING_HARD_BLOCKED:
             raise HTTPException(status_code=403, detail="LIVE_TRADING_HARD_BLOCKED=True in compliance.py")
         _assert_account_tradeable(body.account)  # block protected (Roth/IRA) accounts
-        decision = validate_live_order(body.model_dump())
+        import datetime as _dt
+        order = body.model_dump()
+        # Naive-local 'now' matches the gateway's naive-local quote_time (F3) —
+        # compliance otherwise falls back to utcnow() and skews the age check.
+        order["now"] = _dt.datetime.now().isoformat(timespec="seconds")
+        if body.execute:
+            # F2: the server's trusted gateway quote is the SOLE execution
+            # evidence — caller-supplied quote_* is overwritten, never trusted.
+            # limit_price is an order parameter here (user may deliberately place
+            # away from market), so limit_factor=None leaves it untouched.
+            _loop = asyncio.get_running_loop()
+            _tq = await _loop.run_in_executor(None, _trusted_quote_fields, body.symbol)
+            try:
+                _apply_execution_quote(order, _tq, limit_factor=None)
+            except ValueError as e:
+                raise HTTPException(status_code=503, detail=str(e))
+        decision = validate_live_order(order)
         if not decision.allowed:
             raise HTTPException(status_code=403, detail=decision.reason)
         if not live_trading_enabled():
@@ -1510,14 +1869,7 @@ async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(requi
             if _is_login_url(page.url):
                 raise HTTPException(status_code=401, detail="Not authenticated with Fidelity")
 
-            if account:
-                try:
-                    await page.locator('#dest-acct-dropdown').click()
-                    await asyncio.sleep(1)
-                    await page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
-                    await asyncio.sleep(1)
-                except Exception:
-                    log.warning("Could not select account %s — using default", _mask_account(account))
+            await _select_and_verify_account(page, account)
 
             try:
                 sym = page.locator('#eq-ticket-dest-symbol')
@@ -1665,6 +2017,86 @@ async def fidelity_trade(body: FidelityTradeRequest, admin: dict = Depends(requi
 
 ACCOUNTS_URL = "https://digital.fidelity.com/ftgw/digital/portfolio/summary"
 TRADE_HISTORY_FILE = ROOT / "tmp" / "fidelity_trade_log.jsonl"
+ORDER_AUDIT_FILE = ROOT / "tmp" / "fidelity_order_audit.jsonl"
+ORDER_AUDIT_SHOTS = ROOT / "tmp" / "order_audit"
+
+
+async def _presubmit_audit(page, email: str, intent, ok: bool, reasons: list) -> None:
+    """Capture a pre-submit screenshot + structured audit record right before the
+    'Place Order' click (SnapTrade migration hardening). Best-effort — a failed
+    screenshot/log must never block or crash the trade path. Account is masked;
+    files are written owner-only (0600)."""
+    import datetime as _dt, json as _json
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    shot_rel = None
+    try:
+        ORDER_AUDIT_SHOTS.mkdir(parents=True, exist_ok=True)
+        shot = ORDER_AUDIT_SHOTS / f"{stamp}_{intent.symbol}.png"
+        await page.screenshot(path=str(shot))
+        os.chmod(shot, 0o600)
+        shot_rel = shot.name
+    except Exception as e:
+        log.debug("presubmit screenshot failed: %s", e)
+    try:
+        row = {
+            "ts": _dt.datetime.now().isoformat(timespec="seconds"),
+            "user": hashlib.sha256(_user_key(email).encode()).hexdigest()[:12],
+            "account_mask": intent.account_mask,
+            "symbol": intent.symbol,
+            "side": intent.side,
+            "quantity": intent.quantity,
+            "order_type": intent.order_type,
+            "limit_price": intent.limit_price,
+            "est_cost": intent.est_cost,
+            "ticket_verified": bool(ok),
+            "reasons": list(reasons or []),
+            "screenshot": shot_rel,
+        }
+        ORDER_AUDIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with ORDER_AUDIT_FILE.open("a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(row) + "\n")
+        os.chmod(ORDER_AUDIT_FILE, 0o600)
+    except Exception as e:
+        log.debug("presubmit audit log failed: %s", e)
+
+
+def _snaptrade_recent_orders(email: str) -> list[dict]:
+    """Best-effort: pull normalized executed orders across the user's SnapTrade
+    Fidelity accounts. Returns [] if SnapTrade is off/unlinked/unavailable — never
+    raises into the trade path. Fidelity order history via SnapTrade is executed-only
+    and can lag, so reconciliation is a post-hoc confirmation, not a gate."""
+    try:
+        from web.broker.snaptrade_data import SnapTradeDataProvider, is_enabled
+        from web.broker import snaptrade_store as _store
+        if not (is_enabled() and _store.is_linked(email)):
+            return []
+        creds = _store.get_credentials(email)
+        if not creds:
+            return []
+        uid, secret = creds
+        prov = SnapTradeDataProvider()
+        accts = prov.list_accounts(uid, secret).get("accounts", [])
+        orders: list[dict] = []
+        for a in accts:
+            aid = a.get("account_id")
+            if aid:
+                orders.extend(prov.get_orders(uid, secret, aid).get("orders", []))
+        return orders
+    except Exception as e:
+        log.debug("snaptrade recent-orders lookup failed: %s", e)
+        return []
+
+
+def _reconcile_fill(email: str, intent) -> dict:
+    """Reconcile a just-submitted order against SnapTrade executed history when
+    available. Returns the recon result dict (source='none' when SnapTrade lacks
+    the order yet — expected given Fidelity's lag)."""
+    try:
+        from tradingagents.brokers.reconcile import reconcile_fill
+        return reconcile_fill(intent, _snaptrade_recent_orders(email)).as_dict()
+    except Exception as e:
+        log.debug("fill reconcile failed: %s", e)
+        return {"matched": False, "status": "no_data", "source": "none", "discrepancies": []}
 
 
 def _parse_dollar(text: str) -> float | None:
@@ -1751,7 +2183,45 @@ async def _get_fidelity_balances(email: str) -> dict:
                 if (text && text.length > 2) accountOptions.push(text);
             });
 
-            return { tiles, cashRows, grandTotal, accountOptions };
+            // Per-account balances (F4): walk pinned-left rows in numeric
+            // row-index order tracking 'Account: <name> <number>' header rows —
+            // the same technique the positions scrape uses (live-verified; Roth
+            // protection depends on it). Per account: value = every data row's
+            // curVal in that section, cash = Cash/MMKT rows only.
+            const accounts = [];
+            let curAcct = null;
+            const symMap = {};
+            document.querySelectorAll('.ag-pinned-left-cols-container .ag-row[row-index]').forEach(row => {
+                const cell = row.querySelector('[col-id="sym"]');
+                if (cell) symMap[row.getAttribute('row-index')] = cell.innerText.trim();
+            });
+            const ordered = Object.entries(symMap).sort((a, b) => Number(a[0]) - Number(b[0]));
+            ordered.forEach(([ri, symText]) => {
+                const ticker = (symText.split('\\n')[0] || '').trim();
+                if (/^Account/i.test(symText) || /^[A-Z]?\\d{6,12}$/.test(ticker)) {
+                    const numMatch = symText.match(/\\b([A-Z]?\\d{6,12})\\b/);
+                    curAcct = {
+                        number: numMatch ? numMatch[1] : '',
+                        name: symText.replace(/^Account:?/i, '')
+                            .replace(/\\b[A-Z]?\\d{6,12}\\b/, '').replace(/\\s+/g, ' ').trim(),
+                        valueRaw: [], cashRaw: [],
+                    };
+                    accounts.push(curAcct);
+                    return;
+                }
+                if (ticker.startsWith('Grand total')) { curAcct = null; return; }
+                if (!curAcct) return;
+                const center = document.querySelector(`.ag-center-cols-container .ag-row[row-index="${ri}"]`);
+                const val = center?.querySelector('[col-id="curVal"]')?.innerText?.trim().split('\\n')[0] || '';
+                if (!val) return;
+                curAcct.valueRaw.push(val);
+                const tU = ticker.toUpperCase().replace(/[^A-Z0-9& ]/g, '');
+                const isCash = ticker.startsWith('Cash') || tU === 'CASH'
+                    || tU.startsWith('CASH & CASH') || MMKT.some(m => tU.startsWith(m));
+                if (isCash) curAcct.cashRaw.push(val);
+            });
+
+            return { tiles, cashRows, grandTotal, accountOptions, accounts };
         }
         """)
 
@@ -1768,9 +2238,25 @@ async def _get_fidelity_balances(email: str) -> dict:
         # E2FP5: do NOT invent a balance when cash scrape fails — a safety system must
         # refuse to act on an unknown balance. Leave cash_val as None; callers will abort.
 
+        # Per-account balances (F4). Unparseable value/cash stays None — the
+        # sizing scope helper treats None as "cannot size" (fail closed).
+        accounts = []
+        for acct in result.get("accounts") or []:
+            vals = [_parse_dollar(v) for v in acct.get("valueRaw") or []]
+            vals = [v for v in vals if v is not None]
+            cash_vals = [_parse_dollar(v) for v in acct.get("cashRaw") or []]
+            cash_vals = [v for v in cash_vals if v is not None]
+            accounts.append({
+                "number": str(acct.get("number") or ""),
+                "name":   str(acct.get("name") or ""),
+                "value":  round(sum(vals), 2) if vals else None,
+                "cash":   round(sum(cash_vals), 2) if cash_vals else None,
+            })
+
         return {
             "total_value":     grand_total,
             "available_cash":  cash_val,
+            "accounts":        accounts,
             "cash_rows":       result.get("cashRows", []),
             "summary_tiles":   result.get("tiles", {}),
             "account_options": result.get("accountOptions", []),
@@ -1835,6 +2321,74 @@ def _size_fidelity_position(
     if cost > available_cash:
         return 0, 0.0
     return shares, cost
+
+
+# Per-account values must reconcile with the scraped grand total within this
+# fraction, else the balance parse is untrustworthy and sizing is refused.
+_BALANCE_RECON_TOLERANCE = 0.05
+
+
+def _account_scoped_balances(balances: dict, account: str | None) -> tuple[float, float]:
+    """Return (total_value, available_cash) for the ONE account an order targets.
+
+    Real-money sizing must never see household totals: the 10% position cap and
+    the cash cap have to hold within the single target account, and protected
+    (Roth/retirement) accounts must never contribute a dollar to sizing math.
+    Every ambiguity — no per-account rows parsed, reconciliation off, target
+    account missing, multi-account household without an explicit target,
+    unscrapeable per-account value/cash — raises ValueError (fail closed).
+    There is NO fallback to household totals.
+    """
+    accounts = balances.get("accounts") or []
+    if not accounts:
+        raise ValueError(
+            "Per-account balances could not be parsed from Fidelity — refusing to size. "
+            "Refresh the Broker page and retry."
+        )
+
+    def _digits(v) -> str:
+        return "".join(ch for ch in str(v or "") if ch.isdigit())
+
+    grand_total = balances.get("total_value")
+    if grand_total is not None and grand_total > 0:
+        acct_sum = sum(float(a.get("value") or 0) for a in accounts)
+        if abs(acct_sum - float(grand_total)) / float(grand_total) > _BALANCE_RECON_TOLERANCE:
+            raise ValueError(
+                f"Per-account values (${acct_sum:,.2f}) do not reconcile with the grand total "
+                f"(${float(grand_total):,.2f}) — balance parse unreliable, refusing to size."
+            )
+
+    protected = _protected_account_numbers()
+    if account:
+        target = _digits(account)
+        if target in protected:
+            # Defense in depth — _assert_account_tradeable already 403s this.
+            raise ValueError(f"Account {_mask_account(account)} is protected — refusing to size.")
+        matches = [a for a in accounts if _digits(a.get("number")) == target]
+        if not matches:
+            raise ValueError(
+                f"Account {_mask_account(account)} not found in scraped Fidelity balances — refusing to size."
+            )
+        acct = matches[0]
+    else:
+        eligible = [a for a in accounts if _digits(a.get("number")) not in protected]
+        if len(eligible) != 1:
+            raise ValueError(
+                "Cannot resolve a single target account for sizing — pass an explicit account number."
+            )
+        acct = eligible[0]
+
+    value, cash = acct.get("value"), acct.get("cash")
+    if value is None or value <= 0:
+        raise ValueError(
+            f"Account value could not be scraped for account {_mask_account(acct.get('number'))} — refusing to size."
+        )
+    if cash is None:
+        # E2FP5: never size/trade against an invented balance.
+        raise ValueError(
+            f"Cash balance could not be scraped for account {_mask_account(acct.get('number'))} — refusing to size."
+        )
+    return float(value), float(cash)
 
 
 def _log_fidelity_trade(record: dict) -> None:
@@ -2026,6 +2580,40 @@ def _trusted_quote_fields(ticker: str) -> dict:
         return {}
 
 
+def _apply_execution_quote(order_dict: dict, tq: dict, *, limit_factor: float | None) -> float:
+    """Stamp an execute order's quote evidence from the server's trusted gateway
+    quote (``_trusted_quote_fields`` output) — the SOLE source of execution
+    evidence. Caller-supplied quote_source/quote_time/bid/ask/consensus/backup
+    values are OVERWRITTEN, never trusted.
+
+    Raises ValueError when the gateway returned no trusted quote or no usable
+    reference price — callers convert that to HTTP 503 and the order stays
+    blocked (fail closed; an empty gateway result must never degrade into
+    "keep whatever quote fields were already in the dict").
+
+    ``limit_factor=None`` leaves ``limit_price`` untouched (it is an order
+    parameter on some paths — e.g. a deliberate far-from-market limit, or a
+    market sell where it must stay None); otherwise ``limit_price`` is re-priced
+    at the trusted reference. Returns the trusted reference price.
+    """
+    if not tq:
+        raise ValueError("No trusted execution quote available — refusing to execute")
+    try:
+        ref = float(tq.get("_trusted_reference_price") or 0)
+    except (TypeError, ValueError):
+        ref = 0.0
+    if ref <= 0:
+        raise ValueError("No trusted execution quote available — refusing to execute")
+    # Missing keys stamp None → compliance fails closed on absent quote_time.
+    for key in ("quote_time", "quote_source", "backup_sources", "consensus_ok",
+                "bid", "ask", "now", "max_quote_age_seconds"):
+        order_dict[key] = tq.get(key)
+    order_dict["quote_price"] = ref
+    if limit_factor is not None:
+        order_dict["limit_price"] = round(ref * limit_factor, 2)
+    return ref
+
+
 @router.post("/fidelity/thematic-trade")
 async def fidelity_thematic_trade(
     body: FidelityThematicTradeRequest,
@@ -2048,7 +2636,7 @@ async def fidelity_thematic_trade(
     from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
 
     ticker = body.ticker.upper().strip()
-    if not ticker.isalpha() or len(ticker) > 5:
+    if not valid_symbol(ticker):
         raise HTTPException(status_code=400, detail=f"Invalid ticker '{ticker}'")
 
     # Validate account number to prevent selector injection
@@ -2107,8 +2695,12 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
     if "error" in balances:
         raise HTTPException(status_code=401, detail="Not authenticated with Fidelity. Log in at /fidelity.")
 
-    total_value    = balances.get("total_value")
-    available_cash = balances.get("available_cash")
+    # F4: size against the TARGET account only — never household totals (which
+    # include protected Roth/retirement money). Any scoping ambiguity blocks.
+    try:
+        total_value, available_cash = _account_scoped_balances(balances, account)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # Refuse to size if we can't confirm account balance — never use hardcoded fallback
     if total_value is None or total_value <= 0:
@@ -2145,6 +2737,8 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
     order_dict = {
         "symbol":      ticker,
         "action":      "Buy",
+        "broker":      "fidelity",
+        "account_rule_profile": os.getenv("FIDELITY_ACCOUNT_RULE_PROFILE", "fidelity_cash"),
         "order_type":  "Limit",
         "quantity":    shares,
         "limit_price": limit_price,
@@ -2157,11 +2751,53 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
         "bid": body.bid,
         "ask": body.ask,
         "market_open": body.market_open,
+        # Naive-local 'now' matches the gateway's naive-local quote_time (F3) —
+        # compliance otherwise falls back to utcnow() and skews the age check.
+        "now": now_iso,
     }
-    # Route a trusted live quote (FMP/Finnhub/…) into the order so it can pass
-    # the compliance trusted-source gate. Only when the caller didn't already
-    # supply a trusted source. No trusted quote ⇒ order stays blocked (fail-safe).
-    if not body.quote_source:
+    if body.execute:
+        # F2: the server's trusted gateway quote is the SOLE execution evidence
+        # — caller-supplied quote_* is overwritten, never trusted. No trusted
+        # quote ⇒ 503, order blocked (fail closed).
+        _tq = await loop.run_in_executor(None, _trusted_quote_fields, ticker)
+        try:
+            _ref = _apply_execution_quote(order_dict, _tq, limit_factor=1.002)
+        except ValueError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        limit_price = order_dict["limit_price"]
+        if abs(_ref - price) / _ref > 0.05:
+            log.warning("Trusted ref $%.2f diverges >5%% from yfinance $%.2f for %s — trusted ref wins",
+                        _ref, price, ticker)
+        # Re-size at the executable price so the 10% cap and the cash cap hold
+        # at the price the order can actually fill at (not a stale yfinance close).
+        shares, cost = _size_fidelity_position(
+            account_value   = total_value,
+            available_cash  = available_cash,
+            price           = _ref,
+            dollar_amount   = body.dollar_amount,
+            pct_of_account  = body.pct_of_account,
+        )
+        if shares <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot size position at trusted price ${_ref:.2f} "
+                       f"(alloc=${body.dollar_amount}, cash=${available_cash:.2f})",
+            )
+        order_dict["quantity"] = shares
+        # Re-anchor stop/target to the TRUSTED reference. They were computed above
+        # off the stale yfinance close; the order itself re-prices at _ref, but the
+        # levels did not, so the real risk distance was wrong by exactly the gap
+        # between the two — and these names gap 10%+ routinely, which is often WHY
+        # they signalled. A "-8%" stop off a $10.00 close is -16.5% from an $11.00
+        # fill: double the intended risk. It is these stored numbers that the exit
+        # guard and _check_thematic_exits act on, so the error propagates into every
+        # later exit decision. `price` is also replaced below as the recorded entry.
+        price = _ref
+        stop_price   = round(_ref * (1 - body.stop_pct / 100), 4)
+        target_price = round(_ref * (1 + body.target_pct / 100), 4)
+    elif not body.quote_source:
+        # Preview: route a trusted quote in when available so the preview shows
+        # executable numbers — but a missing quote never blocks a preview.
         _tq = await loop.run_in_executor(None, _trusted_quote_fields, ticker)
         if _tq:
             _ref = _tq.pop("_trusted_reference_price", 0) or 0
@@ -2170,10 +2806,19 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
                 limit_price = round(_ref * 1.002, 2)
                 order_dict["limit_price"] = limit_price
                 order_dict["quote_price"] = _ref
+                # Preview the SAME levels execution will use — otherwise the
+                # human approves a stop computed off the stale close and gets a
+                # different one on the real order.
+                stop_price   = round(_ref * (1 - body.stop_pct / 100), 4)
+                target_price = round(_ref * (1 + body.target_pct / 100), 4)
 
     decision = validate_live_order(order_dict)
     if not decision.allowed:
         raise HTTPException(status_code=403, detail=f"Compliance: {decision.reason}")
+
+    # Share count BEFORE submission. A fill is a DELTA, not mere presence —
+    # otherwise adding to an existing position could never be verified.
+    _shares_before_order = _current_shares(admin["email"], ticker)
 
     # ── 5. Place order on Fidelity ────────────────────────────────────────────
     order_status  = "sized"
@@ -2184,10 +2829,14 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
             raise HTTPException(status_code=403, detail="LIVE_TRADING_HARD_BLOCKED=True in compliance.py")
         if not live_trading_enabled():
             raise HTTPException(status_code=403, detail="LIVE_TRADING_ENABLED not set to true in .env")
+        # Kill switch dedicated to the local Playwright execution route (SnapTrade
+        # migration): disables order placement without touching data/read flows.
+        if not env_bool("FIDELITY_LOCAL_EXECUTION_ENABLED", True):
+            raise HTTPException(status_code=403, detail="FIDELITY_LOCAL_EXECUTION_ENABLED=false — local Fidelity execution is disabled.")
 
         ctx = await _ensure_browser(admin["email"])
         page = await ctx.new_page()
-        _ORDER_IN_FLIGHT.add(_user_key(admin["email"]))  # freeze background browser resets
+        _order_in_flight_acquire(_user_key(admin["email"]))  # freeze background browser resets
         try:
             trade_url = "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry"
             await _nav(page, trade_url, sleep=5)
@@ -2195,16 +2844,8 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
             if _is_login_url(page.url):
                 raise HTTPException(status_code=401, detail="Session expired — log in again")
 
-            # Account — use pre-validated numeric account number only
-            if account:
-                try:
-                    await page.locator('#dest-acct-dropdown').click()
-                    await asyncio.sleep(1)
-                    # Use exact text match on numeric account number (injection-safe)
-                    await page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
-                    await asyncio.sleep(1)
-                except Exception:
-                    log.warning("Could not select account %s — using default", _mask_account(account))
+            # Account — use pre-validated numeric account number only (fail-closed)
+            await _select_and_verify_account(page, account)
 
             # Symbol
             sym_input = page.locator('#eq-ticket-dest-symbol')
@@ -2283,6 +2924,25 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
             if not preview_ok:
                 raise HTTPException(status_code=400, detail=f"Preview not confirmed: {preview_msg}\n\nPage excerpt:\n{preview_text[:400]}")
 
+            # ── Pre-submit order-ticket verification (SnapTrade migration hardening) ──
+            # Confirm the ticket the browser is about to submit matches the intended
+            # order (account/symbol/side/qty/type/limit/cost) AND that the live
+            # preview page reflects it — then screenshot + audit BEFORE clicking.
+            from tradingagents.brokers.order_verifier import OrderIntent, verify_order_ticket
+            _intent = OrderIntent(
+                account_mask=_mask_account(account),
+                symbol=ticker, side="buy", quantity=int(shares),
+                order_type="limit", limit_price=float(limit_price),
+                est_cost=round(int(shares) * float(limit_price), 2),
+            )
+            _ticket_ok, _ticket_reasons = verify_order_ticket(_intent, preview_text)
+            await _presubmit_audit(page, admin["email"], _intent, _ticket_ok, _ticket_reasons)
+            if not _ticket_ok:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Order ticket verification FAILED — not submitted: {'; '.join(_ticket_reasons)}",
+                )
+
             # Place order
             place_btn = page.locator('button:has-text("Place Order")').first
             await place_btn.wait_for(state="visible", timeout=8000)
@@ -2308,13 +2968,27 @@ async def _fidelity_thematic_trade_inner(body, admin, ticker, account):
             order_status = "executed"
             fidelity_resp = confirm_text[:500]
             log.info("Fidelity BUY order CONFIRMED: %s x%d @ $%.2f limit=%.2f (%s)", ticker, shares, price, limit_price, confirm_msg)
+            # ACCEPTED is not FILLED. This is a DAY limit order; if it never
+            # trades it expires at 16:00 silently while the state written below
+            # claims we hold the position. Record the submission so a later
+            # holdings snapshot can confirm or refute it — see
+            # tradingagents/brokers/fill_verifier.py and verify_pending_fills().
+            _record_pending_fill(
+                admin["email"], ticker=ticker, shares=shares, side="buy",
+                shares_before=_shares_before_order, limit_price=limit_price,
+            )
+            # Post-submit reconcile against SnapTrade executed history when available.
+            _recon = _reconcile_fill(admin["email"], _intent)
+            if _recon.get("source") == "snaptrade":
+                log.info("SnapTrade reconcile %s: matched=%s status=%s disc=%s",
+                         ticker, _recon.get("matched"), _recon.get("status"), _recon.get("discrepancies"))
 
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Fidelity order failed: {e}")
         finally:
-            _ORDER_IN_FLIGHT.discard(_user_key(admin["email"]))
+            _order_in_flight_release(_user_key(admin["email"]))
             await _save_storage(admin["email"])
             try:
                 await page.close()
@@ -2443,7 +3117,7 @@ async def fidelity_thematic_exit(
     from tradingagents.compliance import validate_live_order, live_trading_enabled, LIVE_TRADING_HARD_BLOCKED
 
     ticker = body.ticker.upper().strip()
-    if not ticker.isalpha() or len(ticker) > 5:
+    if not valid_symbol(ticker):
         raise HTTPException(status_code=400, detail=f"Invalid ticker '{ticker}'")
 
     try:
@@ -2548,23 +3222,20 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
     is_market = str(body.order_type or "Limit").strip().lower() == "market"
     limit_price = None if is_market else round(last_price * (1 + body.limit_pct / 100), 2)
 
-    # The Fidelity-scraped price IS a trusted execution source (fidelity_realtime)
-    # — stamp it with a fresh naive-local time so compliance passes WITHOUT relying
-    # on a (rate-limited / sometimes timeless) FMP quote.
     import datetime as _qdt
     _broker_now = _qdt.datetime.now().isoformat(timespec="seconds")  # naive local
-    eff_source = body.quote_source or price_source or "yfinance"
-    eff_time = body.quote_time or (_broker_now if price_source == "fidelity_realtime" else None)
 
     order_dict = {
         "symbol": ticker, "action": "Sell",
+        "broker": "fidelity",
+        "account_rule_profile": os.getenv("FIDELITY_ACCOUNT_RULE_PROFILE", "fidelity_cash"),
         "order_type": "Market" if is_market else "Limit",
         "quantity": shares_to_sell,
         "limit_price": limit_price,
         "execute": body.execute,
         "quote_price": last_price,
-        "quote_time": eff_time,
-        "quote_source": eff_source,
+        "quote_time": None,
+        "quote_source": None,
         "backup_sources": body.backup_sources,
         "consensus_ok": body.consensus_ok,
         "bid": body.bid,
@@ -2573,19 +3244,41 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
         "now": _broker_now,
         "max_quote_age_seconds": _broker_quote_max_age_seconds(),
     }
-    # If the price is NOT already from a trusted source (yfinance fallback), rescue
-    # the order with a trusted FMP/Finnhub quote. Skip when fidelity_realtime — it's
-    # already trusted and FMP can be unavailable.
-    if not body.quote_source and price_source != "fidelity_realtime":
+    if body.execute:
+        # F1/F2: the server's trusted gateway quote is the SOLE execution
+        # evidence. The scraped grid price is display/shares-lookup only — the
+        # old self-stamped 'fidelity_realtime' + scrape-time now() made the
+        # freshness gate a permanent no-op — and caller-supplied quote_* is
+        # overwritten, never trusted. No trusted quote ⇒ 503 (fail closed).
         _exit_loop = asyncio.get_running_loop()
         _tq = await _exit_loop.run_in_executor(None, _trusted_quote_fields, ticker)
-        if _tq:
-            _ref = _tq.pop("_trusted_reference_price", 0) or 0
-            order_dict.update({k: v for k, v in _tq.items() if not k.startswith("_")})
-            if _ref > 0:
-                limit_price = round(_ref * (1 + body.limit_pct / 100), 2)
-                order_dict["limit_price"] = limit_price
-                order_dict["quote_price"] = _ref
+        try:
+            _apply_execution_quote(
+                order_dict, _tq,
+                # Market sells keep limit_price=None; quote_price=ref still
+                # feeds the compliance $50k per-order cap.
+                limit_factor=None if is_market else 1 + body.limit_pct / 100,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+        limit_price = order_dict["limit_price"]
+    else:
+        # Preview-only: scraped/caller quote fields are fine for display —
+        # validate_live_order skips the quote gate when execute is falsy.
+        order_dict["quote_source"] = body.quote_source or price_source or "yfinance"
+        order_dict["quote_time"] = body.quote_time or (
+            _broker_now if price_source == "fidelity_realtime" else None
+        )
+        if not body.quote_source and price_source != "fidelity_realtime":
+            _exit_loop = asyncio.get_running_loop()
+            _tq = await _exit_loop.run_in_executor(None, _trusted_quote_fields, ticker)
+            if _tq:
+                _ref = _tq.pop("_trusted_reference_price", 0) or 0
+                order_dict.update({k: v for k, v in _tq.items() if not k.startswith("_")})
+                if _ref > 0:
+                    limit_price = round(_ref * (1 + body.limit_pct / 100), 2)
+                    order_dict["limit_price"] = limit_price
+                    order_dict["quote_price"] = _ref
 
     decision = validate_live_order(order_dict)
     if not decision.allowed:
@@ -2599,22 +3292,17 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
             raise HTTPException(status_code=403, detail="LIVE_TRADING_HARD_BLOCKED=True in compliance.py")
         if not live_trading_enabled():
             raise HTTPException(status_code=403, detail="LIVE_TRADING_ENABLED not set to true in .env")
+        if not env_bool("FIDELITY_LOCAL_EXECUTION_ENABLED", True):
+            raise HTTPException(status_code=403, detail="FIDELITY_LOCAL_EXECUTION_ENABLED=false — local Fidelity execution is disabled.")
 
         exit_page = None  # define before try so finally can safely check
-        _ORDER_IN_FLIGHT.add(_user_key(admin["email"]))  # freeze background browser resets
+        _order_in_flight_acquire(_user_key(admin["email"]))  # freeze background browser resets
         try:
             exit_page = await ctx.new_page()
             await _nav(exit_page, "https://digital.fidelity.com/ftgw/digital/trade-equity/index/orderEntry", sleep=5)
 
-            # Account — pre-validated numeric only, injection-safe
-            if account:
-                try:
-                    await exit_page.locator('#dest-acct-dropdown').click()
-                    await asyncio.sleep(1)
-                    await exit_page.locator(f'[data-value="{account}"], li:text-is("{account}")').first.click(timeout=2000)
-                    await asyncio.sleep(1)
-                except Exception:
-                    log.warning("Could not select account %s — using default", _mask_account(account))
+            # Account — pre-validated numeric only, injection-safe (fail-closed)
+            await _select_and_verify_account(exit_page, account)
 
             sym_input = exit_page.locator('#eq-ticket-dest-symbol')
             await sym_input.wait_for(state="visible", timeout=20000)  # ticket form loads slowly
@@ -2687,6 +3375,28 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
             if any(p in preview_text.lower() for p in _ORDER_ERROR_PATTERNS):
                 raise HTTPException(status_code=400, detail=f"Fidelity rejected at preview: {preview_msg}\n{preview_text[:400]}")
 
+            # ── Pre-submit order-ticket verification + audit (SnapTrade hardening) ──
+            from tradingagents.brokers.order_verifier import OrderIntent, verify_order_ticket
+            _lp = float(limit_price) if limit_price else 0.0
+            _exit_intent = OrderIntent(
+                account_mask=_mask_account(account),
+                symbol=ticker, side="sell", quantity=int(shares_to_sell),
+                order_type="limit" if _lp > 0 else "market",
+                limit_price=_lp,
+                est_cost=round(int(shares_to_sell) * _lp, 2) if _lp > 0 else 0.0,
+            )
+            if _lp > 0:
+                _eok, _ereasons = verify_order_ticket(_exit_intent, preview_text)
+            else:
+                # Market sell: strict price-match can't apply; audit only, don't hard-block.
+                _eok, _ereasons = True, ["market sell — ticket price check skipped"]
+            await _presubmit_audit(exit_page, admin["email"], _exit_intent, _eok, _ereasons)
+            if not _eok:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Exit ticket verification FAILED — not submitted: {'; '.join(_ereasons)}",
+                )
+
             place_btn = exit_page.locator('button:has-text("Place Order")').first
             await place_btn.wait_for(state="visible", timeout=8000)
             await place_btn.click()
@@ -2716,7 +3426,7 @@ async def _fidelity_thematic_exit_inner(body, admin, ticker, account):
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Fidelity exit failed: {e}")
         finally:
-            _ORDER_IN_FLIGHT.discard(_user_key(admin["email"]))
+            _order_in_flight_release(_user_key(admin["email"]))
             await _save_storage(admin["email"])
             if exit_page is not None:
                 try:

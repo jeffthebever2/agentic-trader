@@ -41,6 +41,7 @@ dependencies = [
     "whoosh>=2.7.4",
     "yfinance>=0.2.63",
     "fidelity-api>=0.0.16",
+    "snaptrade-python-sdk>=11.0.0",
 ]
 
 [project.optional-dependencies]
