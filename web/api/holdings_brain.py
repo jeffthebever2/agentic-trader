@@ -20,6 +20,7 @@ import datetime as dt
 import json
 import logging
 import os
+from tradingagents.config import env_bool
 import tempfile
 import time
 from dataclasses import asdict
@@ -100,7 +101,23 @@ def _hil_approval_link() -> str:
 
 
 def _brain_sms_enabled() -> bool:
-    return os.getenv("HOLDINGS_BRAIN_SMS", "true").strip().lower() == "true"
+    return env_bool("HOLDINGS_BRAIN_SMS", True)
+
+
+def _trail_ratchet_mult() -> Optional[float]:
+    """HOLDINGS_BRAIN_TRAIL_ATR_MULT — trail width for the exit-guard stop ratchet.
+    Unset/invalid → None (ExitManager default 0.5, the tighter/safer width);
+    accepted values clamped to [0.25, 3.0]."""
+    raw = os.getenv("HOLDINGS_BRAIN_TRAIL_ATR_MULT", "").strip()
+    if not raw:
+        return None
+    try:
+        val = float(raw)
+    except ValueError:
+        return None
+    if not (0 < val < float("inf")):  # rejects NaN/inf/non-positive
+        return None
+    return max(0.25, min(val, 3.0))
 
 
 def _summarize_for_sms(proposals: list[dict]) -> str:
@@ -215,6 +232,69 @@ def _trusted_quotes(tickers: list[str]) -> dict[str, float]:
     return out
 
 
+# ATR is a 14-day statistic; refetching it on every guard tick (default 15 min)
+# would hammer yfinance and leak sqlite fds — the known Errno 24 source — for no
+# extra signal. Cache per ticker for a few hours.
+_ATR_CACHE: dict[str, tuple[float, float]] = {}   # ticker → (atr, unix_ts)
+_ATR_CACHE_TTL_SECONDS = 6 * 3600
+
+
+def _real_atr_map(holdings: list, quotes: dict[str, float]) -> dict[str, float]:
+    """Real 14-day ATR per held ticker. Synchronous — call via run_in_executor.
+
+    Nothing used to supply this, so both the rule engine (`_atr_for`) and the
+    stop ratchet fell back to `_ATR_FALLBACK_PCT` — a synthetic 2% of price.
+    That put adoption targets at ~+2.4% against ~-9.6% stops (R:R 0.25) and made
+    the trailing ratchet sit ~1% under the high-water mark, so a real holding was
+    proposed for exit after a 1.8% move. Systematically cutting winners while
+    letting losers run is the single most expensive thing a stop engine can do.
+
+    Best-effort by design: any failure degrades to the previous 2% fallback
+    rather than blocking the guard, so a yfinance outage never leaves the live
+    book unwatched.
+    """
+    out: dict[str, float] = {}
+    now = time.time()
+    for h in holdings:
+        ticker = getattr(h, "ticker", None)
+        if not ticker:
+            continue
+        cached = _ATR_CACHE.get(ticker)
+        if cached and (now - cached[1]) < _ATR_CACHE_TTL_SECONDS:
+            if cached[0] > 0:
+                out[ticker] = cached[0]
+            continue
+        atr = 0.0
+        try:
+            price = float(quotes.get(ticker) or getattr(h, "last", 0) or 0)
+            if price > 0:
+                from web.api.thematic_auto import _real_atr
+                atr = float(_real_atr(ticker, price) or 0)
+        except Exception as e:
+            log.warning("ATR fetch failed for %s: %s", ticker, e)
+            atr = 0.0
+        _ATR_CACHE[ticker] = (atr, now)
+        if atr > 0:
+            out[ticker] = atr
+    return out
+
+
+async def _build_ctx(holdings: list, quotes: dict[str, float] | None = None) -> dict:
+    """Assessment context for the rule engine.
+
+    Carries a REAL ATR map so `hb._atr_for` never silently degrades to its
+    synthetic 2%-of-price estimate on the live book — that fallback is what
+    produced R:R 0.25 adoption levels. ATR is cached, so this is cheap.
+    """
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return {
+        "regime": _load_regime(),
+        "social_scores": _load_social_scores(),
+        "atr": await loop.run_in_executor(None, _real_atr_map, holdings, quotes or {}),
+    }
+
+
 def _make_llm_fn():
     """Return a sync llm_fn(prompt)->str|None, or None if no model configured.
 
@@ -224,7 +304,7 @@ def _make_llm_fn():
     floor; assess_holding clamps any LLM suggestion and never softens a mandatory
     exit. Any failure ⇒ None ⇒ rule engine used unchanged.
     """
-    if os.getenv("HOLDINGS_BRAIN_LLM", "true").strip().lower() not in ("1", "true", "yes", "on"):
+    if not env_bool("HOLDINGS_BRAIN_LLM", True):
         return None
     try:
         from web.api.thematic_auto import _ai_complete_sync, _ai_intent_enabled
@@ -332,7 +412,7 @@ async def get_unified_existing(
         try:
             holdings = await asyncio.wait_for(_read_holdings(email, broker), timeout=broker_timeout)
             store = hb.load_store(email, base_dir=TMP)
-            ctx = {"regime": _load_regime(), "social_scores": _load_social_scores()}
+            ctx = await _build_ctx(holdings)
             account_value = sum(float(h.market_value or 0) for h in holdings)
             # Prefer the TOTAL account value (incl. cash), implied by any weight.
             implied = [
@@ -419,7 +499,7 @@ async def run_brain_cycle(email: str, broker: str = "fidelity", use_ai: bool = T
     holdings = await _read_holdings(email, broker)
     store = hb.load_store(email, base_dir=TMP)
     recon = hb.reconcile(holdings, store)
-    ctx = {"regime": _load_regime(), "social_scores": _load_social_scores()}
+    ctx = await _build_ctx(holdings)
 
     for tkr in recon.closed:
         if tkr in store:
@@ -489,6 +569,23 @@ async def run_exit_guard(email: str, broker: str = "fidelity") -> list[dict]:
     holdings = await _read_holdings(email, broker)
     loop = asyncio.get_running_loop()
     quotes = await loop.run_in_executor(None, _trusted_quotes, [h.ticker for h in holdings])
+    # Reload after the awaits to shrink the load→await→save race window with
+    # run_brain_cycle; the ratchet is monotonic + idempotent so applying it to
+    # the freshest copy is always safe.
+    store = hb.load_store(email, base_dir=TMP)
+    # Real ATR, not the synthetic 2%-of-price fallback — see _real_atr_map.
+    atr_map = await loop.run_in_executor(None, _real_atr_map, holdings, quotes)
+    raised = hb.ratchet_stops(holdings, store, quotes, atr_map=atr_map,
+                              trail_atr_mult=_trail_ratchet_mult())
+    if raised:
+        hb.save_store(email, store, base_dir=TMP)
+        for r in raised:
+            if r.get("stop_raised"):
+                log.info("exit-guard ratchet %s: stop %.2f -> %.2f (trail_high %.2f)",
+                         r["ticker"], r["old_stop"], r["new_stop"], r["trail_high"])
+    # Ratchet-then-check: a mid-interval round-trip is caught at the RAISED level
+    # in the same pass (mirrors the paper book, where trail update and stop check
+    # share a pass).
     breaches = hb.check_stops(holdings, store, quotes)
     if not breaches:
         return []
@@ -501,10 +598,21 @@ async def run_exit_guard(email: str, broker: str = "fidelity") -> list[dict]:
         if b.ticker in pending:
             continue
         h = hmap.get(b.ticker)
+        # A target is not a stop. The considered rule engine TRIMs 33% on
+        # `target_reached` (holdings_brain.py:628-634); this fast guard used to
+        # propose a 100% liquidation for the same event, and it beats the slow
+        # loop into the queue. Combined with the guard's synthetic 2%-of-price
+        # "ATR" that puts targets at ~+2.4%, it was proposing to dump the entire
+        # real position after a 2.4% gain — the exact inverse of let-winners-run.
+        # Only a genuine downside breach warrants a full exit.
+        if b.reason == "target_hit":
+            act_kind, act_fraction = hb.ACTION_TRIM, 0.33
+        else:
+            act_kind, act_fraction = hb.ACTION_EXIT, 1.0
         action = hb.Action(
-            b.ticker, hb.ACTION_EXIT,
+            b.ticker, act_kind,
             reason=f"{b.reason}: price {b.price:.2f} crossed level {b.level:.2f}",
-            fraction=1.0, risk_flags=[b.reason], source="exit_guard",
+            fraction=act_fraction, risk_flags=[b.reason], source="exit_guard",
         ).to_dict()
         proposals.insert(0, {
             "id": f"{b.ticker}_{int(time.time()*1000)}",
@@ -531,7 +639,7 @@ async def brain_holdings(
     excluded = hb.excluded_holdings(raw_rows, b)
     store = hb.load_store(email, base_dir=TMP)
     recon = hb.reconcile(holdings, store)
-    ctx = {"regime": _load_regime(), "social_scores": _load_social_scores()}
+    ctx = await _build_ctx(holdings)
 
     loop = asyncio.get_running_loop()
     assessed = await loop.run_in_executor(None, _assess_all, holdings, store, ctx, use_ai)
@@ -583,7 +691,7 @@ class ApproveBrainBody(BaseModel):
 
 
 def _live_exit_auto_enabled() -> bool:
-    return os.getenv("THEMATIC_LIVE_EXIT_AUTONOMOUS", "false").strip().lower() in ("1", "true", "yes", "on")
+    return env_bool("THEMATIC_LIVE_EXIT_AUTONOMOUS", False)
 
 
 def _live_exit_arm_path(email: str) -> Path:
@@ -640,6 +748,18 @@ async def arm_autonomous_live_exits(
     return {"ok": True, "armed": True, "account": account[-4:], "ttl_minutes": ttl}
 
 
+#: Flags that permit autonomous live execution. DELIBERATELY DISJOINT from what
+#: `check_stops` emits ("stop_hit"/"target_hit"), so an exit-guard breach can
+#: never auto-fire — the guard is propose-only and a human + step-up 2FA is
+#: required. `tests/test_p1_exit_guard_trailing.py::test_no_autonomous_eligible_output`
+#: pins that boundary; do not "fix" the mismatch without an explicit decision to
+#: enable autonomous real-money selling. `_warn_if_armed_but_inert` keeps the
+#: consequence visible rather than silent.
+AUTO_LIVE_EXIT_FLAGS = frozenset({
+    "below_managed_stop", "regime_crash_risk", "trailing_stop_breach", "target_breach",
+})
+
+
 def _proposal_is_auto_live_exit_eligible(prop: dict) -> bool:
     action = prop.get("action") or {}
     flags = set(action.get("risk_flags") or [])
@@ -648,7 +768,7 @@ def _proposal_is_auto_live_exit_eligible(prop: dict) -> bool:
         and prop.get("priority") is True
         and action.get("kind") == hb.ACTION_EXIT
         and action.get("source") == "exit_guard"
-        and (flags & {"below_managed_stop", "regime_crash_risk", "trailing_stop_breach", "target_breach"})
+        and (flags & AUTO_LIVE_EXIT_FLAGS)
     )
 
 
@@ -683,6 +803,26 @@ async def run_autonomous_live_exit_executor(email: str, broker: str = "fidelity"
     proposals = _load_proposals(email)
     eligible = [p for p in proposals if _proposal_is_auto_live_exit_eligible(p)]
     if not eligible:
+        # Armed, but nothing can qualify. The operator completed step-up 2FA and
+        # believes stop breaches now fire autonomously — say plainly that they do
+        # not, rather than returning an empty list that reads as "all clear".
+        _blocked = [
+            p for p in proposals
+            if p.get("status") == "pending" and p.get("priority") is True
+            and (p.get("action") or {}).get("source") == "exit_guard"
+        ]
+        if _blocked:
+            log.warning(
+                "AUTO-LIVE-EXIT ARMED BUT INERT for %s: %d priority exit-guard "
+                "proposal(s) pending, 0 eligible. The guard emits %s while "
+                "autonomous execution requires %s — by design, the exit guard is "
+                "propose-only and needs human approval + step-up 2FA. These stops "
+                "will NOT self-execute.",
+                email[:16], len(_blocked),
+                sorted({f for p in _blocked
+                        for f in ((p.get("action") or {}).get("risk_flags") or [])}),
+                sorted(AUTO_LIVE_EXIT_FLAGS),
+            )
         return []
 
     max_orders = max(1, min(int(float(os.getenv("THEMATIC_LIVE_EXIT_MAX_ORDERS", "3"))), 10))
@@ -788,12 +928,17 @@ async def brain_approve(
 
     from web.api.fidelity import (
         FidelityExitRequest, FidelityThematicTradeRequest,
-        _validate_account_number, _fidelity_thematic_exit_inner,
+        _resolve_trade_account, _fidelity_thematic_exit_inner,
         _fidelity_thematic_trade_inner, _get_order_lock,
     )
     ticker = prop["ticker"]
+    # Resolve request account → env FIDELITY_TRADE_ACCOUNT. The HIL frontend
+    # posts {execute} with no account, and FIDELITY_REQUIRE_EXPLICIT_ACCOUNT
+    # strict mode (default on with a protected list) refuses account-less
+    # orders — without this fallback every brain EXIT/TRIM/ADD approval (and
+    # preview) dies with a 403. Protected accounts still 403 here, up-front.
     try:
-        account = _validate_account_number(body.account)
+        account = _resolve_trade_account(body.account)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -820,7 +965,7 @@ async def brain_approve(
         from tradingagents.compliance import market_sell_allowed
         order_type = "Market" if (urgent and market_sell_allowed()) else "Limit"
         exit_body = FidelityExitRequest(
-            ticker=ticker, shares=shares, account=body.account, execute=body.execute,
+            ticker=ticker, shares=shares, account=account, execute=body.execute,
             limit_pct=limit_pct, order_type=order_type,
         )
         lock = _get_order_lock(f"{email}:exit:{ticker}")

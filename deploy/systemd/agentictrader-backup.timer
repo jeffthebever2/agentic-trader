@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly AgenticTrader state backup (D5)
+
+[Timer]
+# 02:30 local, after market close and the daily perf snapshot. Persistent so a
+# missed run (box off) fires on next boot.
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

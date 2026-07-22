@@ -1,8 +1,10 @@
 import sys
 import asyncio
+import datetime as _dt
 import time
 import os
 from pathlib import Path
+from tradingagents.config import env_bool
 
 # Playwright needs ProactorEventLoop on Windows to spawn subprocesses
 if sys.platform == "win32":
@@ -16,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env", override=True)
 load_dotenv(ROOT / ".env.enterprise", override=False)
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +34,9 @@ from web.api.history import router as history_router
 from web.api.settings import router as settings_router
 from web.api.logs import router as logs_router
 from web.api.paper import router as paper_router
+from web.api.paper_portfolios import router as paper_portfolios_router
+from web.api.copytrade import router as copytrade_router
+from web.api.broker_routes import router as broker_router
 from web.api.ml import router as ml_router
 from web.api.rl import router as rl_router
 from web.api.webull_portfolio import router as webull_router
@@ -47,7 +52,7 @@ from web.api.cloudflare_ai import router as cloudflare_ai_router
 from web.api.admin import router as admin_router
 from web.api.system import router as system_router
 from web.api.portfolios import router as portfolios_router
-from web.auth import get_optional_user
+from web.auth import get_optional_user, require_admin as _require_admin
 
 import datetime as dt
 import json
@@ -82,7 +87,7 @@ async def _paper_autostart_loop():
         PaperStartRequest,
     )
     SYSTEM_ADMIN = {"email": "system@autostart", "role": "admin"}
-    ignore_window = os.getenv("PAPER_AUTOSTART_IGNORE_WINDOW", "false").lower() == "true"
+    ignore_window = env_bool("PAPER_AUTOSTART_IGNORE_WINDOW", False)
     first_tick = True
 
     while True:
@@ -304,6 +309,9 @@ app.include_router(history_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
 app.include_router(logs_router, prefix="/api")
 app.include_router(paper_router, prefix="/api")
+app.include_router(paper_portfolios_router, prefix="/api")
+app.include_router(copytrade_router, prefix="/api")
+app.include_router(broker_router, prefix="/api")
 app.include_router(ml_router, prefix="/api")
 app.include_router(rl_router, prefix="/api")
 app.include_router(webull_router, prefix="/api")
@@ -363,6 +371,89 @@ async def health_check():
             "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
 
+@app.get("/health/loops")
+@app.get("/api/health/loops")
+async def health_loops(admin: dict = Depends(_require_admin)):
+    """Background-loop supervision probe (D4). Reports each loop's liveness so a
+    monitor can alert on a dead task — previously invisible. Admin-gated (loop
+    names are internal)."""
+    loops = {}
+    for name, task in _LOOP_TASKS.items():
+        exc = None
+        if task.done() and not task.cancelled():
+            try:
+                e = task.exception()
+                exc = repr(e) if e else None
+            except Exception:
+                exc = None
+        # task.done() only reports the SUPERVISOR, which never returns — so it is
+        # True for a healthy loop and for one crash-looping every tick alike.
+        # _LOOP_HEALTH is what distinguishes them.
+        h = _LOOP_HEALTH.get(name, {})
+        consecutive = int(h.get("consecutive_failures", 0) or 0)
+        # crash_looping is derived from RECENCY, not a latched counter.
+        # `consecutive_failures` is only written when a loop exits, so it never
+        # returns to 0 on recovery — reporting it directly meant a loop that
+        # crashed twice at boot and then ran healthily for a week still showed
+        # not-ok forever, and an alert that can never go green gets muted.
+        # It also missed the opposite case: a loop crashing every 6 minutes
+        # resets the counter to 1 each time (ran_for >= 300) and looked healthy.
+        # Recency catches both: still failing recently ⇒ still crash-looping.
+        _since_fail = None
+        if h.get("last_failed_at"):
+            try:
+                _since_fail = (_dt.datetime.now()
+                               - _dt.datetime.fromisoformat(h["last_failed_at"])).total_seconds()
+            except (TypeError, ValueError):
+                _since_fail = None
+        recently_failed = _since_fail is not None and _since_fail <= _LOOP_CRASH_WINDOW_SECONDS
+        loops[name] = {
+            "alive": not task.done(),
+            "cancelled": task.cancelled(),
+            "exception": exc,
+            "restarts": int(h.get("restarts", 0) or 0),
+            "consecutive_failures": consecutive,
+            "seconds_since_last_failure": (None if _since_fail is None
+                                           else round(_since_fail, 1)),
+            "last_ran_seconds": h.get("last_ran_seconds"),
+            "last_error": h.get("last_error"),
+            "last_started_at": h.get("last_started_at"),
+            "last_failed_at": h.get("last_failed_at"),
+            # Failing repeatedly AND recently. Recovers on its own once the loop
+            # stays up past the window.
+            "crash_looping": bool(recently_failed and consecutive >= 2),
+            # A loop that keeps dying on a slow cadence never accumulates
+            # consecutive failures, so surface it separately.
+            "restarting_recently": bool(recently_failed),
+        }
+    all_alive = all(v["alive"] for v in loops.values()) if loops else False
+    none_looping = not any(v["crash_looping"] for v in loops.values())
+    return {"ok": all_alive and none_looping,
+            "count": len(loops),
+            "crash_looping": [n for n, v in loops.items() if v["crash_looping"]],
+            "loops": loops}
+
+
+@app.get("/health/preflight")
+@app.get("/api/health/preflight")
+async def health_preflight(admin: dict = Depends(_require_admin)):
+    """Configuration-safety probe.
+
+    Individual flags are all validated; their dangerous COMBINATIONS were not,
+    and every dangerous combination booted cleanly and reported healthy. A
+    CRITICAL finding here means live execution is latched OFF until the config
+    is corrected — see tradingagents/preflight.py."""
+    from tradingagents.compliance import (
+        LIVE_TRADING_HARD_BLOCKED, preflight_block_reason,
+    )
+    from tradingagents.preflight import run_preflight
+    result = run_preflight(os.environ, hard_blocked=LIVE_TRADING_HARD_BLOCKED)
+    payload = result.as_dict()
+    payload["live_execution_latched_off"] = bool(preflight_block_reason())
+    payload["latch_reason"] = preflight_block_reason()
+    return payload
+
+
 @app.get("/health/deep")
 @app.get("/api/health/deep")
 async def deep_health_check():
@@ -382,7 +473,9 @@ async def deep_health_check():
             mp = ROOT / "ml_models" / "stock_universe" / "model_bundle.joblib"
         if mp.exists():
             age_h = (now.timestamp() - mp.stat().st_mtime) / 3600
-            ml_detail = {"path": str(mp), "age_hours": round(age_h, 1)}
+            # Basename only — never disclose the absolute filesystem layout to an
+            # unauthenticated caller (M6). Operational health fields below are fine.
+            ml_detail = {"path": mp.name, "age_hours": round(age_h, 1)}
             # Run full ModelHealthChecker for ROC, drift, calibration, age_days
             try:
                 from tradingagents.portfolio.production_safety import ModelHealthChecker
@@ -569,9 +662,42 @@ async def _fidelity_keepalive_loop():
                                 # just-warmed cache (dedups to one per trading day;
                                 # read-only). Opt out with PERF_SNAPSHOT_ENABLED=false.
                                 import os as _po
-                                if _po.getenv("PERF_SNAPSHOT_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on"):
+                                if env_bool("PERF_SNAPSHOT_ENABLED", True):
                                     from web.api.performance import capture_snapshot as _cap
                                     await _cap(email, from_cache=True)
+                                # Did the orders we SUBMITTED actually fill? State is
+                                # committed on broker acceptance, but these are DAY
+                                # limit orders — one that never trades expires at
+                                # 16:00 silently, leaving a position the broker has
+                                # never heard of. The snapshots were just refreshed
+                                # above, so holdings are as fresh as they get.
+                                # Outside market hours the session is over, so an
+                                # unfilled order can no longer fill → treat as expired.
+                                try:
+                                    from web.api.fidelity import verify_pending_fills
+                                    _verdicts = verify_pending_fills(
+                                        email, session_expired=not _brain_market_open()
+                                    )
+                                    _phantom = [v for v in _verdicts if v.get("status") == "unfilled"]
+                                    if _phantom:
+                                        _log.error(
+                                            "PHANTOM POSITIONS for %s — order(s) never filled but "
+                                            "state was written on acceptance: %s. Internal state "
+                                            "believes these are held; the broker does not.",
+                                            email[:20],
+                                            ", ".join(f"{v['ticker']} x{v['intended_shares']:g}"
+                                                      for v in _phantom),
+                                        )
+                                    for _v in _verdicts:
+                                        if _v.get("status") == "partial":
+                                            _log.warning(
+                                                "PARTIAL FILL %s: %g of %g filled — sizing, stops "
+                                                "and the concentration cap are computed against "
+                                                "the intended quantity.",
+                                                _v["ticker"], _v["filled_shares"],
+                                                _v["intended_shares"])
+                                except Exception as _fe:
+                                    _log.debug("fill verification %s: %s", email[:20], _fe)
                             except Exception as _ce:
                                 _log.debug("keepalive cache warm %s: %s", email[:20], _ce)
                         else:
@@ -598,19 +724,22 @@ async def _fidelity_keepalive_loop():
 async def _thematic_scan_loop():
     """Auto-trigger thematic scan every 4 hours if THEMATIC_AUTO_SCAN=true in env."""
     import json as _json
-    from web.api.thematic_auto import _run_scan, STATUS_FILE as _SCAN_STATUS
+    from web.api.thematic_auto import _run_scan, _scan_status_stale, STATUS_FILE as _SCAN_STATUS
     _INTERVAL = 4 * 3600  # 4 hours
     await asyncio.sleep(60)  # initial delay — let server warm up
     while True:
         try:
-            if os.getenv("THEMATIC_AUTO_SCAN", "false").lower() == "true":
+            if env_bool("THEMATIC_AUTO_SCAN", False):
                 status = {}
                 if _SCAN_STATUS.exists():
                     try:
                         status = _json.loads(_SCAN_STATUS.read_text())
                     except Exception:
                         pass
-                if status.get("status") != "running":
+                # A "running" status left behind by a killed process would
+                # otherwise block this loop forever; trigger_scan already treats
+                # stale-running as not-running — mirror that here.
+                if status.get("status") != "running" or _scan_status_stale(status):
                     asyncio.create_task(_run_scan())
         except Exception as e:
             logging.getLogger("thematic_scan_loop").warning("Loop error: %s", e)
@@ -640,15 +769,46 @@ async def _fd_janitor_loop():
 
 
 def _brain_market_open() -> bool:
-    """True during US regular trading hours (ET, Mon-Fri 9:30-16:00)."""
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    now = datetime.now(ZoneInfo("America/New_York"))
-    if now.weekday() >= 5:
-        return False
-    o = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    c = now.replace(hour=16, minute=0, second=0, microsecond=0)
-    return o <= now <= c
+    """True during the US regular session — for anything that EXECUTES.
+
+    Now calendar-aware. The old weekday+clock test returned True on market
+    holidays, so the exit guard evaluated stops against quotes that had not
+    updated since the previous close: a stale-price decision on real positions,
+    proposing a fill that could not happen. It also ignored early closes."""
+    from tradingagents.market_calendar import is_regular_session
+    return is_regular_session()
+
+
+def _brain_risk_window() -> bool:
+    """True 04:00-20:00 ET on a trading day.
+
+    INTENTIONALLY UNUSED. Do not wire this into a loop without reading this note.
+
+    The motivation is real: gating stop DETECTION on the regular session means a
+    Friday 15:59 breach goes unlooked-at until Monday 09:30 (~65.5h, longer over
+    a holiday weekend), which is exactly when an earnings miss or a weekend
+    headline does its damage. It was wired into the exit guard and the paper exit
+    loop, and had to be reverted — "it only proposes, so widening is free" is
+    false here:
+
+      1. ``run_exit_guard`` calls ``ratchet_stops``, which MUTATES and PERSISTS
+         ``trail_high``/``stop``. On a thin after-hours print an earnings spike
+         ratchets the trail to a level that never really traded; the stock opens
+         below it and the guard proposes liquidating a real winner.
+      2. ``_trusted_quotes`` fans out one FMP call per holding with a 2s cache.
+         04:00-20:00 at 15-min cadence is ~448 calls/day against a 250/day limit.
+         Exhausting the only trusted provider makes PreTradeGate reject every
+         order INCLUDING EXITS — positions could not be closed.
+      3. ``_check_thematic_exits`` prices from yfinance DAILY bars, so out of
+         hours it re-reads a close already evaluated at 15:59.
+
+    Prerequisites before using it: batch/cache the quote fan-out, suppress the
+    stop ratchet outside the regular session, and move the paper exit loop to an
+    intraday price source. EXECUTION must stay on _brain_market_open() regardless
+    — extended-hours liquidity is thin.
+    """
+    from tradingagents.market_calendar import is_extended_session
+    return is_extended_session()
 
 
 def _fidelity_sessioned_emails() -> list[str]:
@@ -683,7 +843,7 @@ async def _holdings_brain_loop():
     await asyncio.sleep(90)  # let server + sessions warm up
     while True:
         try:
-            if os.getenv("HOLDINGS_BRAIN_ENABLED", "false").lower() == "true" and _brain_market_open():
+            if env_bool("HOLDINGS_BRAIN_ENABLED", False) and _brain_market_open():
                 from web.api.holdings_brain import run_brain_cycle
                 for email in _fidelity_sessioned_emails():
                     try:
@@ -704,9 +864,38 @@ async def _exit_guard_loop():
     2FA). Runs every EXIT_GUARD_INTERVAL_MIN (default 15) during market hours."""
     _log = logging.getLogger("exit_guard_loop")
     await asyncio.sleep(120)
+    _deferred_logged = False
     while True:
         try:
-            if os.getenv("HOLDINGS_BRAIN_ENABLED", "false").lower() == "true" and _brain_market_open():
+            # REGULAR SESSION, deliberately. Widening this to the extended risk
+            # window looked free ("it only proposes") and was not:
+            #   1. run_exit_guard calls ratchet_stops, which MUTATES and
+            #      PERSISTS trail_high/stop. On a thin after-hours print an
+            #      earnings spike ratchets the trail to a peak that never really
+            #      traded; the stock opens below it next morning and the guard
+            #      proposes a full liquidation of a real winner.
+            #   2. _trusted_quotes fans out one FMP call per holding with a 2s
+            #      cache. 04:00-20:00 at 15min = 64 cycles/day; with 7 holdings
+            #      that is ~448 calls against a 250/day limit. Exhausting the
+            #      only trusted provider makes PreTradeGate reject every order
+            #      INCLUDING EXITS — the exact failure preflight calls CRITICAL.
+            # The calendar-awareness below is the real fix (no more evaluating
+            # stops against stale quotes on holidays). The overnight gap remains
+            # a known limit, documented in the runbook.
+            if env_bool("HOLDINGS_BRAIN_ENABLED", False) and _brain_market_open():
+                # The standalone runner (scripts/run_exit_guard.py) holds
+                # tmp/exit_guard.lock for its lifetime — when it's up, it owns
+                # the live-book watch and this loop stands down (no duplicate
+                # proposals/SMS). If the runner dies, its flock vanishes and
+                # this loop resumes on the next cycle: belt and suspenders.
+                from tradingagents.portfolio.process_lock import flock_is_held
+                if flock_is_held(ROOT / "tmp" / "exit_guard.lock"):
+                    if not _deferred_logged:
+                        _log.info("standalone exit-guard runner active — in-server loop standing down")
+                        _deferred_logged = True
+                    await asyncio.sleep(60)
+                    continue
+                _deferred_logged = False
                 from web.api.holdings_brain import run_exit_guard
                 for email in _fidelity_sessioned_emails():
                     try:
@@ -737,7 +926,11 @@ async def _thematic_exit_loop():
     await asyncio.sleep(150)  # let the server warm up
     while True:
         try:
-            if os.getenv("THEMATIC_EXIT_LOOP", "false").lower() == "true" and _brain_market_open():
+            # REGULAR SESSION. _check_thematic_exits prices from yfinance DAILY
+            # bars, so out of hours it just re-reads a close already evaluated at
+            # 15:59 — zero new information for 2.5x the yfinance load, against a
+            # documented sqlite-fd leak (_fd_janitor_loop exists to mop it up).
+            if env_bool("THEMATIC_EXIT_LOOP", False) and _brain_market_open():
                 from web.api.thematic_auto import _check_thematic_exits
                 exits = await _check_thematic_exits(execute=True)  # paper-only
                 if exits:
@@ -761,8 +954,12 @@ async def _autonomous_live_exit_loop():
     await asyncio.sleep(180)
     while True:
         try:
-            if os.getenv("THEMATIC_LIVE_EXIT_AUTONOMOUS", "false").lower() == "true" and _brain_market_open():
-                from web.api.fidelity import _fidelity_sessioned_emails
+            if env_bool("THEMATIC_LIVE_EXIT_AUTONOMOUS", False) and _brain_market_open():
+                # _fidelity_sessioned_emails lives in THIS module (defined above),
+                # not in web.api.fidelity. The bad import raised ImportError every
+                # cycle and was swallowed by the outer `except Exception`, so the
+                # armed autonomous exit executor never ran once — a silent false
+                # safety net on the real book.
                 from web.api.holdings_brain import run_autonomous_live_exit_executor
                 for email in _fidelity_sessioned_emails():
                     try:
@@ -780,6 +977,81 @@ async def _autonomous_live_exit_loop():
 
 
 _background_tasks: list[asyncio.Task] = []
+# name → task, for supervision + the /health/loops probe.
+_LOOP_TASKS: dict[str, asyncio.Task] = {}
+# name → health record. The supervisor wrapper never returns, so task.done() is
+# always False and says nothing about the loop inside it; this is the real
+# liveness signal. See _spawn_supervised_loop.
+_LOOP_HEALTH: dict[str, dict] = {}
+#: How recently a loop must have failed to still count as crash-looping. Wider
+#: than the longest loop interval (copytrade 10min, thematic exit 15min) so a
+#: loop dying once per cycle stays visible, and narrow enough that a recovered
+#: loop clears on its own rather than latching the probe red forever.
+_LOOP_CRASH_WINDOW_SECONDS = 45 * 60
+
+
+def _spawn_supervised_loop(loop_factory, name: str) -> asyncio.Task:
+    """Start a background loop under a supervisor that restarts it if it ever
+    exits or raises (D4).
+
+    The loops are `while True` bodies with their own inner try/except, so they
+    should never return — if one does (or an exception escapes the inner guard,
+    e.g. a malformed-env parse), the task previously died SILENTLY and was never
+    restarted, making a dead trade/exit executor indistinguishable from a healthy
+    idle one. This wrapper logs CRITICAL and relaunches with a fixed backoff.
+    """
+    _sup_log = logging.getLogger("loop_supervisor")
+
+    async def _supervised():
+        # Exponential backoff. A loop that returns or crashes IMMEDIATELY (e.g. a
+        # bad import, or an early `return` when a feature flag is off) otherwise
+        # relaunches every 10s for the life of the process — a hot restart loop
+        # that spams CRITICAL and burns CPU while looking like an active alert.
+        # Backing off keeps a genuinely transient failure fast to recover while a
+        # permanent one settles into a quiet, still-visible heartbeat.
+        #
+        # The supervisor NEVER returns, so `task.done()` is permanently False and
+        # cannot indicate loop health. _LOOP_HEALTH carries the real signal —
+        # without it, a loop crashing on every tick reports {"ok": true}.
+        delay, max_delay = 10, 600
+        health = _LOOP_HEALTH.setdefault(
+            name, {"restarts": 0, "consecutive_failures": 0,
+                   "last_error": None, "last_started_at": None,
+                   "last_failed_at": None})
+        while True:
+            loop_time = asyncio.get_running_loop().time()
+            started = loop_time
+            health["last_started_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+            try:
+                await loop_factory()
+                health["last_error"] = "exited without raising"
+                _sup_log.critical("Background loop %r exited unexpectedly", name)
+            except asyncio.CancelledError:
+                raise  # honor shutdown
+            except Exception as exc:
+                health["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
+                _sup_log.critical("Background loop %r crashed: %s", name, exc)
+            ran_for = asyncio.get_running_loop().time() - started
+            health["restarts"] += 1
+            health["last_failed_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+            health["last_ran_seconds"] = round(ran_for, 1)
+            # Ran for a meaningful stretch ⇒ treat the next failure as fresh.
+            if ran_for >= 300:
+                delay = 10
+                health["consecutive_failures"] = 1
+            else:
+                health["consecutive_failures"] += 1
+            _sup_log.critical("Background loop %r restarting in %ds (restart #%d, "
+                              "%d consecutive fast failure(s))",
+                              name, delay, health["restarts"],
+                              health["consecutive_failures"])
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, max_delay)
+
+    task = asyncio.create_task(_supervised(), name=name)
+    _LOOP_TASKS[name] = task
+    _background_tasks.append(task)
+    return task
 
 
 async def _performance_snapshot_loop():
@@ -787,15 +1059,20 @@ async def _performance_snapshot_loop():
     for each connected user, so portfolio-performance history accrues automatically.
     Env-gated PERF_SNAPSHOT_ENABLED (default off). Manual capture is always available
     via POST /api/performance/sync."""
-    import os as _os
-    if _os.getenv("PERF_SNAPSHOT_ENABLED", "false").strip().lower() not in ("1", "true", "yes", "on"):
-        return
     import datetime as _dt2, hashlib as _hl, json as _json
     from pathlib import Path as _Path
     _log = logging.getLogger("performance")
     await asyncio.sleep(45)  # let the server + sessions warm up
     from web.api.performance import capture_snapshot, _load_snapshots
     while True:
+        # Gate INSIDE the loop. Returning early when disabled made the supervisor
+        # treat a clean exit as a crash and relaunch every 10s forever — a hot
+        # restart loop spamming CRITICAL logs for the entire life of the process.
+        # Checking here also matches every other loop: the flag is read fresh each
+        # tick, so an operator can enable it without a restart.
+        if not env_bool("PERF_SNAPSHOT_ENABLED", False):
+            await asyncio.sleep(300)
+            continue
         try:
             now = _dt2.datetime.now()
             # capture after 16:05 local on weekdays (US market closed) — one per day
@@ -825,21 +1102,157 @@ async def _performance_snapshot_loop():
         await asyncio.sleep(3600)  # re-check hourly
 
 
+async def _copytrade_loop():
+    """Follow a chosen paper portfolio into real Fidelity — HIL or autonomous.
+
+    Env-gated COPYTRADE_ENABLED (default off). Runs only in market hours on
+    COPYTRADE_INTERVAL_MIN cadence (default 10 min). Per-user mode decides whether
+    each reconcile enqueues HIL approvals or auto-executes (auto also requires the
+    COPYTRADE_AUTONOMOUS kill-switch). Never places an order outside the compliance
+    gates in the Fidelity execution layer."""
+    _log = logging.getLogger("copytrade_loop")
+    await asyncio.sleep(75)  # let server + sessions warm up
+    while True:
+        try:
+            if env_bool("COPYTRADE_ENABLED", False) and _brain_market_open():
+                from web.copytrade import run_copytrade_cycle
+                summary = await run_copytrade_cycle()
+                if summary:
+                    _log.info("copytrade cycle: %s", summary)
+        except Exception as e:
+            _log.warning("copytrade loop error: %s", e)
+        interval = max(2, int(float(os.getenv("COPYTRADE_INTERVAL_MIN", "10")))) * 60
+        await asyncio.sleep(interval)
+
+
+# Held (never released) for the process lifetime — see acquire_single_instance.
+_instance_lock_fd: int | None = None
+
+
 @app.on_event("startup")
 async def _startup():
-    _background_tasks.append(asyncio.create_task(_paper_autostart_loop()))
-    _background_tasks.append(asyncio.create_task(_performance_snapshot_loop()))
-    _background_tasks.append(asyncio.create_task(_thematic_scan_loop()))
-    _background_tasks.append(asyncio.create_task(_fidelity_keepalive_loop()))
-    _background_tasks.append(asyncio.create_task(_fd_janitor_loop()))
-    _background_tasks.append(asyncio.create_task(_holdings_brain_loop()))
-    _background_tasks.append(asyncio.create_task(_exit_guard_loop()))
-    _background_tasks.append(asyncio.create_task(_thematic_exit_loop()))
-    _background_tasks.append(asyncio.create_task(_autonomous_live_exit_loop()))
+    # All order/state guards in this tier (_ORDER_LOCKS, _paper_state_lock,
+    # alert cooldowns) assume ONE web process. A second worker (gunicorn -w N,
+    # uvicorn --workers N) voids them → duplicate live orders. Fail loud here
+    # rather than trade unguarded. flock dies with the process — no stale lock.
+    global _instance_lock_fd
+    if (env_bool("WEB_SINGLE_INSTANCE_LOCK", True)
+            and _instance_lock_fd is None):
+        # _instance_lock_fd guard: flock conflicts across fds even within one
+        # process, so a re-fired startup (TestClient, reload) must reuse the
+        # lock it already holds instead of fighting itself.
+        from tradingagents.portfolio.process_lock import (
+            SingleInstanceError, acquire_single_instance)
+        try:
+            _instance_lock_fd = acquire_single_instance(ROOT / "tmp" / "webserver.lock")
+        except SingleInstanceError:
+            logging.getLogger("startup").critical(
+                "REFUSING TO START: another web server process is running. "
+                "This server must be single-worker — its live-order and "
+                "paper-state locks are in-process. Stop the other instance or "
+                "set WEB_SINGLE_INSTANCE_LOCK=false (dangerous) to override.")
+            raise
+    elif not env_bool("WEB_SINGLE_INSTANCE_LOCK", True):
+        logging.getLogger("startup").warning(
+            "WEB_SINGLE_INSTANCE_LOCK=false — multi-instance protection OFF")
+    # ── Configuration preflight ───────────────────────────────────────────────
+    # Runs BEFORE any loop starts. Individual flags are validated everywhere;
+    # their dangerous combinations were not, and each of them booted cleanly and
+    # reported healthy — most importantly "live trading armed with no stop
+    # watcher", which means real positions get ZERO stop checks per day.
+    # A CRITICAL finding latches live execution OFF (fail closed) rather than
+    # merely logging; paper trading, scanning and proposals continue so the
+    # operator can see and fix the problem.
+    try:
+        from tradingagents.compliance import (
+            LIVE_TRADING_HARD_BLOCKED, block_live_trading_for_preflight,
+        )
+        from tradingagents.preflight import format_findings, run_preflight
+        _pf = run_preflight(os.environ, hard_blocked=LIVE_TRADING_HARD_BLOCKED)
+        _pf_log = logging.getLogger("preflight")
+        if _pf.critical:
+            _pf_log.critical("%s", format_findings(_pf))
+            _codes = ", ".join(f.code for f in _pf.critical)
+            block_live_trading_for_preflight(_codes)
+            _pf_log.critical(
+                "LIVE EXECUTION LATCHED OFF by preflight (%s). Paper trading and "
+                "proposals continue. Fix the configuration and restart; check "
+                "/health/preflight for detail.", _codes)
+        elif _pf.warnings:
+            _pf_log.warning("%s", format_findings(_pf))
+        else:
+            _pf_log.info("preflight: all checks passed")
+    except Exception as _pfe:  # never prevent boot on a preflight bug
+        logging.getLogger("preflight").error("preflight failed to run: %s", _pfe)
+
+    _spawn_supervised_loop(_paper_autostart_loop, "paper_autostart")
+    _spawn_supervised_loop(_performance_snapshot_loop, "performance_snapshot")
+    _spawn_supervised_loop(_thematic_scan_loop, "thematic_scan")
+    _spawn_supervised_loop(_fidelity_keepalive_loop, "fidelity_keepalive")
+    _spawn_supervised_loop(_fd_janitor_loop, "fd_janitor")
+    _spawn_supervised_loop(_holdings_brain_loop, "holdings_brain")
+    _spawn_supervised_loop(_exit_guard_loop, "exit_guard")
+    _spawn_supervised_loop(_thematic_exit_loop, "thematic_exit")
+    _spawn_supervised_loop(_autonomous_live_exit_loop, "autonomous_live_exit")
+    _spawn_supervised_loop(_copytrade_loop, "copytrade")
+
+    # SnapTrade is an OPTIONAL data overlay — the app runs fully on the local
+    # Fidelity path without it. If it's enabled but the keys don't authenticate
+    # (e.g. only trial/placeholder keys, no production access yet), log clearly and
+    # keep running on local data rather than failing.
+    try:
+        from web.broker.snaptrade_data import is_enabled as _st_enabled
+        from web.broker import snaptrade_store as _st_store
+        _slog = logging.getLogger("snaptrade")
+        if _st_enabled():
+            if not _st_store.keys_configured():
+                _slog.warning("SNAPTRADE_ENABLED=true but keys not set — using local Fidelity data.")
+            else:
+                _ok, _reason = _st_store.verify_credentials()
+                if _ok:
+                    _slog.info("SnapTrade credentials valid — Fidelity data overlay active (data only).")
+                else:
+                    _slog.warning("SnapTrade enabled but credentials invalid (%s) — using local Fidelity data. "
+                                  "Production keys require a public app page + company info at snaptrade.com.", _reason)
+        else:
+            _slog.info("SnapTrade disabled — using local Fidelity data + execution.")
+    except Exception as _e:
+        logging.getLogger("snaptrade").debug("snaptrade startup check skipped: %s", _e)
 
 
 @app.on_event("shutdown")
 async def _shutdown():
+    # Drain in-flight broker orders BEFORE cancelling anything. A restart (deploy,
+    # `systemctl restart`, launchd kickstart) that lands between "Place Order" and
+    # the confirmation read would otherwise kill the task with the order already
+    # live at the broker and no state written — a real position nothing tracks,
+    # with no stop. Bounded so shutdown can never hang: past the deadline we log
+    # loudly and proceed, and the pending-fill ledger + holdings reconciliation
+    # will surface the order on next boot.
+    _sd_log = logging.getLogger("shutdown")
+    try:
+        from web.api.fidelity import _ORDER_IN_FLIGHT
+        deadline = asyncio.get_running_loop().time() + 45.0
+        waited = False
+        while _ORDER_IN_FLIGHT and asyncio.get_running_loop().time() < deadline:
+            if not waited:
+                _sd_log.warning(
+                    "Shutdown held: %d broker order(s) in flight (%s) — draining "
+                    "before cancelling background tasks.",
+                    len(_ORDER_IN_FLIGHT), ", ".join(sorted(_ORDER_IN_FLIGHT)))
+                waited = True
+            await asyncio.sleep(0.5)
+        if _ORDER_IN_FLIGHT:
+            _sd_log.critical(
+                "SHUTTING DOWN WITH %d ORDER(S) STILL IN FLIGHT (%s). These may be "
+                "live at the broker with no local record — verify manually and "
+                "check /health/preflight and the pending-fill ledger on restart.",
+                len(_ORDER_IN_FLIGHT), ", ".join(sorted(_ORDER_IN_FLIGHT)))
+        elif waited:
+            _sd_log.info("In-flight orders drained cleanly.")
+    except Exception as _sde:
+        _sd_log.warning("order drain check failed: %s", _sde)
+
     for t in _background_tasks:
         if not t.done():
             t.cancel()

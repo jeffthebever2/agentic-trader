@@ -7,6 +7,7 @@ import { StepUpModal } from '@/components/modals/StepUpModal'
 import { HilToast } from '@/components/modals/HilToast'
 import { ToastRegion } from '@/components/ui/Toast'
 import { GlobalOverlays } from '@/components/ui/GlobalOverlays'
+import { CommandPalette } from '@/components/CommandPalette'
 import { useAuthStore } from '@/store/auth'
 
 interface AppShellProps {
@@ -95,6 +96,7 @@ export function AppShell({ children }: AppShellProps) {
       <HilToast />
       <ToastRegion />
       <GlobalOverlays />
+      <CommandPalette />
 
       {/* Nav chrome — CSS-animated, outside the layout flow */}
       <div id="nav-progress" />

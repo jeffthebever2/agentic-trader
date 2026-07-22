@@ -1,0 +1,28 @@
+# The 15 paper-only portfolio competition runner.
+# Runs scripts/run_paper_portfolios.py in loop mode: every 15 min it rebuilds
+# real candidates (breakout screen + model_bundle.joblib ML + UnifiedBrain),
+# fetches yfinance prices, and lets paper_engine gate/size/open/manage positions
+# across all 15 isolated $10k paper accounts.
+#
+# PAPER-ONLY — it never imports or calls any live broker route. Safe to run
+# independently of the webserver (the /paper UI just reads the state files).
+[Unit]
+Description=AgenticTrader 15-portfolio paper competition (candidate provider + engine)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/opt/agentictrader
+# --loop-interval 15 = one full cycle every 15 minutes. --max-tickers 0 = full file.
+ExecStart=/opt/agentictrader/.venv/bin/python scripts/run_paper_portfolios.py --loop-interval 15 --tickers tickers_liquid.txt
+Restart=always
+RestartSec=30
+# yfinance batch downloads open many fds — mirror the other units' raised limit.
+LimitNOFILE=8192
+StandardOutput=append:/opt/agentictrader/logs/paperportfolios.log
+StandardError=append:/opt/agentictrader/logs/paperportfolios.err
+
+[Install]
+WantedBy=multi-user.target

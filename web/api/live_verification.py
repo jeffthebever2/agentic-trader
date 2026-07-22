@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 
 from scripts.email_sender import smtp_configured
+from tradingagents.config import env_bool
 from web.auth import get_current_user
 from web.api.fidelity import _fidelity_state_path, _session_owner_hash
 from web.api.paper import AUTOSTART_CONFIG_PATH, DEFAULT_AUTOSTART_CONFIG, _process_status
@@ -168,7 +169,7 @@ async def live_verification(user: dict = Depends(get_current_user)):
             "running": bool(proc.get("running")),
             "pid": proc.get("pid"),
             "autostart_enabled": bool(autostart.get("enabled")),
-            "ignore_market_window": os.getenv("PAPER_AUTOSTART_IGNORE_WINDOW", "false").lower() == "true",
+            "ignore_market_window": env_bool("PAPER_AUTOSTART_IGNORE_WINDOW", False),
         },
     ))
 

@@ -1,7 +1,10 @@
 """Webull real-account portfolio integration (per-user isolated)."""
+import asyncio
 import datetime as dt
 import hashlib
+import os
 import sys
+import time as _time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -10,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 from tradingagents.compliance import (
     LIVE_TRADING_HARD_BLOCKED,
     live_trading_enabled,
@@ -18,6 +21,15 @@ from tradingagents.compliance import (
 )
 
 from web.auth import require_admin, require_step_up, get_current_user
+# Shared broker-order plumbing (one audited implementation for both brokers).
+# Safe: fidelity.py's module level is light (playwright imports lazily) and it
+# does not import webull_portfolio, so there is no cycle.
+from web.api.fidelity import (
+    _ORDER_LOCKS_META,
+    _broker_quote_max_age_seconds,
+    _get_order_lock,
+    _trusted_quote_fields,
+)
 from web.secure_store import is_encrypted_path, read_encrypted_json, write_encrypted_json
 
 router = APIRouter()
@@ -47,6 +59,47 @@ def _get_wb(email: str):
         inst = webull()
         _wb_instances[email] = inst
     return inst
+
+
+def _webull_protected_account_ids() -> set[str]:
+    """Webull account ids that must NEVER be traded.
+
+    Configured via env ``WEBULL_PROTECTED_ACCOUNTS`` (comma-separated), read
+    fresh per call — same semantics as ``FIDELITY_PROTECTED_ACCOUNTS``.
+    """
+    raw = os.getenv("WEBULL_PROTECTED_ACCOUNTS", "")
+    out = set()
+    for tok in raw.replace(" ", "").split(","):
+        t = tok.strip()
+        if t:
+            out.add(t)
+    return out
+
+
+def _assert_wb_account_tradeable(account_id: Any) -> None:
+    """Raise 403 if the session's active account is protected — or UNKNOWN while
+    a protected list exists.
+
+    Webull has no per-order account parameter: orders always land on the
+    session's single active ``wb._account_id``. If we cannot prove which account
+    that is while a protected list is configured, we refuse — the unknown
+    account could be the protected one (fail closed). No-op when
+    ``WEBULL_PROTECTED_ACCOUNTS`` is unset, preserving current behavior."""
+    protected = _webull_protected_account_ids()
+    if not protected:
+        return
+    cleaned = str(account_id or "").strip()
+    if cleaned in protected:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Account {cleaned} is protected (WEBULL_PROTECTED_ACCOUNTS) — trading is blocked.",
+        )
+    if not cleaned:
+        raise HTTPException(
+            status_code=403,
+            detail="WEBULL_PROTECTED_ACCOUNTS is set but the active Webull account id is unknown — "
+                   "refusing an order that could land on a protected account.",
+        )
 
 
 def _load_session(email: str) -> dict:
@@ -109,6 +162,39 @@ def _safe_bool(value: Any) -> Optional[bool]:
     return None
 
 
+def _webull_payload_quote_time(payload: dict[str, Any]) -> Optional[dt.datetime]:
+    """Extract the quote generation time from a Webull quote payload as a
+    NAIVE-LOCAL datetime (the repo-wide quote_time convention).
+
+    Returns None when the payload carries no provable timestamp — None means
+    the snapshot is NOT execution-fresh and compliance blocks the order. We
+    never self-stamp: a payload without its own timestamp cannot pass the
+    freshness gate. Field names vary by installed webull package version, so
+    the common candidates are tried in order; anything unparseable — or a
+    naive ISO string with no timezone (ambiguous zone) — is skipped.
+    """
+    for field in ("tradeStamp", "timestamp", "tradeTime", "mkTradeTime"):
+        raw = payload.get(field)
+        if raw in (None, ""):
+            continue
+        try:
+            if isinstance(raw, (int, float)) or (isinstance(raw, str) and raw.strip().isdigit()):
+                ts = float(raw)
+                if ts <= 0:
+                    continue
+                if ts > 1e12:  # epoch milliseconds
+                    ts /= 1000.0
+                return dt.datetime.fromtimestamp(ts)  # naive local
+            if isinstance(raw, str):
+                parsed = dt.datetime.fromisoformat(raw.strip())
+                if parsed.tzinfo is None:
+                    continue  # zone-ambiguous — cannot prove freshness
+                return parsed.astimezone().replace(tzinfo=None)
+        except (ValueError, OverflowError, OSError):
+            continue
+    return None
+
+
 def _webull_quote_snapshot(wb: object, symbol: str) -> dict[str, Any]:
     """Fetch a broker-side quote snapshot using whichever method the installed
     Webull package exposes. The response shape varies by package version, so the
@@ -149,9 +235,13 @@ def _webull_quote_snapshot(wb: object, symbol: str) -> dict[str, Any]:
     if price <= 0:
         raise HTTPException(status_code=502, detail=f"Webull quote for {symbol} did not include a usable price")
 
+    qt = _webull_payload_quote_time(quote)
     return {
         "quote_price": price,
-        "quote_time": dt.datetime.utcnow().isoformat(),
+        # quote_time comes ONLY from the broker payload's own timestamp — never
+        # self-stamped. None means the snapshot is not execution-fresh and
+        # compliance blocks on missing quote_time.
+        "quote_time": qt.isoformat() if qt else None,
         "quote_source": "broker",
         "bid": bid or None,
         "ask": ask or None,
@@ -161,6 +251,10 @@ def _webull_quote_snapshot(wb: object, symbol: str) -> dict[str, Any]:
             or quote.get("isMarketOpen")
             or quote.get("marketStatus")
         ),
+        # Naive-local "now", like-for-like with the payload-derived local
+        # quote_time (compliance otherwise falls back to utcnow → age skew).
+        "now": dt.datetime.now().isoformat(),
+        "max_quote_age_seconds": _broker_quote_max_age_seconds(),
     }
 
 
@@ -212,13 +306,10 @@ class PlaceOrderRequest(BaseModel):
     qty: int
     price: Optional[float] = None
     time_in_force: str = "GTC"
-    quote_time: Optional[str] = None
-    quote_source: Optional[str] = None
-    backup_sources: list[str] = Field(default_factory=list)
-    consensus_ok: Optional[bool] = None
-    bid: Optional[float] = None
-    ask: Optional[float] = None
-    market_open: Optional[bool] = None
+    # No quote-evidence fields: execution evidence (quote_time/source/bid/ask/…)
+    # is built SERVER-side only — client-supplied evidence is forgeable and would
+    # bypass the PreTradeGate. Unknown payload keys are ignored (pydantic default
+    # extra="ignore"), so old clients that still send them keep working.
 
     # Input bounds (real money). Compliance (validate_live_order) also rejects
     # qty<=0 and market BUYs, but reject obvious garbage at the model boundary too.
@@ -294,13 +385,20 @@ def _webull_compliance_order(req: PlaceOrderRequest, quote: Optional[dict[str, A
         "limit_price": req.price or 0,
         "execute": True,
         "quote_price": quote_price,
-        "quote_time": req.quote_time or quote.get("quote_time"),
-        "quote_source": req.quote_source or quote.get("quote_source"),
-        "backup_sources": req.backup_sources or quote.get("backup_sources", []),
-        "consensus_ok": req.consensus_ok if req.consensus_ok is not None else quote.get("consensus_ok"),
-        "bid": req.bid if req.bid is not None else quote.get("bid"),
-        "ask": req.ask if req.ask is not None else quote.get("ask"),
-        "market_open": req.market_open if req.market_open is not None else quote.get("market_open"),
+        # Execution evidence comes ONLY from the server-side quote dict; with
+        # quote={} quote_time is None → validate_live_order fails closed.
+        "quote_time": quote.get("quote_time"),
+        "quote_source": quote.get("quote_source"),
+        "backup_sources": quote.get("backup_sources", []),
+        "consensus_ok": quote.get("consensus_ok"),
+        "bid": quote.get("bid"),
+        "ask": quote.get("ask"),
+        "market_open": quote.get("market_open"),
+        # Both server quote paths stamp a naive-local "now" alongside the
+        # naive-local quote_time — forwarding it prevents the utcnow-fallback
+        # skew in compliance's age check.
+        "now": quote.get("now"),
+        "max_quote_age_seconds": quote.get("max_quote_age_seconds"),
     }
 
 
@@ -556,30 +654,62 @@ async def wb_place_order(req: PlaceOrderRequest, admin: dict = Depends(require_s
         raise HTTPException(status_code=401, detail="Not connected")
     if not getattr(wb, "_trade_token", None):
         raise HTTPException(status_code=403, detail="Trading PIN not unlocked — call /webull/trade-pin first")
-    quote = {}
-    if not req.quote_time or not req.quote_source:
-        quote = _webull_quote_snapshot(wb, req.ticker)
-    decision = validate_live_order(_webull_compliance_order(req, quote))
-    if not decision.allowed:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "LIVE_TRADING_BLOCKED",
-                "message": decision.reason,
-            },
-        )
-    try:
-        result = wb.place_order(
-            stock=req.ticker,
-            action=req.action,
-            orderType=req.order_type,
-            enforce=req.time_in_force,
-            quant=req.qty,
-            price=req.price,
-        )
+    _assert_wb_account_tradeable(getattr(wb, "_account_id", None))
+    # Idempotency: one in-flight order per (user, ticker, action). The "webull:"
+    # prefix keeps these keys disjoint from fidelity's "{email}:{ticker}" keys.
+    lock_key = f"webull:{admin['email']}:{req.ticker}:{req.action}"
+    order_lock = _get_order_lock(lock_key)
+    if order_lock.locked():
+        raise HTTPException(status_code=429, detail=f"Order for {req.ticker} already in progress — wait for it to complete.")
+    async with order_lock:
+        _ORDER_LOCKS_META[lock_key] = _time.time()
+        # Execution evidence is built SERVER-side only (client quote fields were
+        # removed from PlaceOrderRequest as forgeable): gateway trusted quote
+        # first, broker snapshot only when its payload proves its own timestamp.
+        loop = asyncio.get_running_loop()
+        quote = await loop.run_in_executor(None, _trusted_quote_fields, req.ticker)
+        if not quote:
+            snap = _webull_quote_snapshot(wb, req.ticker)  # raises 502 when unusable
+            # {} deliberately fails compliance on missing quote_time — a
+            # timestamp-less broker payload is never execution-fresh.
+            quote = snap if snap.get("quote_time") else {}
+        decision = validate_live_order(_webull_compliance_order(req, quote))
+        if not decision.allowed:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "LIVE_TRADING_BLOCKED",
+                    "message": decision.reason,
+                },
+            )
+        try:
+            result = wb.place_order(
+                stock=req.ticker,
+                action=req.action,
+                orderType=req.order_type,
+                enforce=req.time_in_force,
+                quant=req.qty,
+                price=req.price,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # The webull client returns the broker's raw envelope. A REJECTED order
+        # (buying power, PDT, expired trade token) comes back as HTTP 200 with
+        # {"success": false, "msg": ..., "code": ...} — only a raised exception
+        # was being treated as failure. Returning {"success": True} for that
+        # manufactures a phantom position: the UI shows a fill, no stop is ever
+        # placed, and the intended entry is silently lost. Fail closed on
+        # anything that is not an unambiguous acceptance.
+        if isinstance(result, dict):
+            rejected = result.get("success") is False
+            no_ticket = not (result.get("orderId") or result.get("order_id"))
+            has_error = bool(result.get("msg") or result.get("code"))
+            if rejected or (no_ticket and has_error):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "BROKER_REJECTED", "result": result},
+                )
         return {"success": True, "result": result}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.delete("/webull/orders/{order_id}")

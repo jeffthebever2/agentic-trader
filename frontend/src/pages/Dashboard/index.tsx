@@ -5,6 +5,7 @@ import { getPaperStatus } from '@/api/paper'
 import { getMarketChart, getQuotes, getNewsSummary } from '@/api/market'
 import { getMlStatus } from '@/api/ml'
 import { CandlestickChart } from '@/components/charts/CandlestickChart'
+import { AnimatedNumber } from '@/components/ui/AnimatedNumber'
 import api from '@/api/client'
 import type { Quote, Portfolio, PaperAccount, CandidateRow } from '@/types'
 
@@ -54,6 +55,13 @@ function fmt$(n: number, decimals = 0) {
     minimumFractionDigits: decimals,
   })
 }
+
+/** Parse a pre-formatted money string ("$4,925.13", "-$5.00", "+$12") to a number. */
+function toNum(s: string): number | null {
+  const n = parseFloat(s.replace(/[^0-9.+-]/g, ''))
+  return Number.isFinite(n) ? n : null
+}
+const intFmt = (n: number) => Math.round(n).toLocaleString('en-US')
 
 function winRateColor(wr: number) {
   if (wr >= 0.65) return '#4ade80'
@@ -199,11 +207,26 @@ function StatRow({ paperQ }: { paperQ: ReturnType<typeof useQuery<ReturnType<typ
     ? (fidSummary.daily_change.startsWith('-') ? '#f87171' : '#4ade80')
     : pnlColor(totalPnl)
 
-  const stats = [
-    { id: 'stat-portfolio', label: 'Portfolio Value', value: portfolioValue, color: 'var(--ink)', sub: portfolioSub },
-    { id: 'stat-daypnl',    label: 'Day P&L',         value: dayPnlValue,   color: dayPnlColor, sub: fidSummary?.daily_change_pct ?? 'Since open' },
-    { id: 'stat-analyses',  label: 'Total Analyses',  value: logsQ.isLoading ? '—' : String(totalAnalyses), color: 'var(--ink)', sub: 'LLM signals' },
-    { id: 'stat-cash',      label: 'Cash Available',  value: paperQ.isLoading ? '—' : fmt$(totalCash),   color: 'var(--ink)', sub: `${uniqueTickers} tickers analyzed` },
+  const fidVal = fidSummary?.total_value ? toNum(fidSummary.total_value) : null
+  const fidPnl = fidSummary?.daily_change != null ? toNum(fidSummary.daily_change) : null
+
+  // `num` drives the count-up; `value` is the static fallback while loading.
+  const stats: Array<{
+    id: string; label: string; value: string; num: number | null
+    format: (n: number) => string; flash: boolean; color: string; sub: string
+  }> = [
+    { id: 'stat-portfolio', label: 'Portfolio Value', value: portfolioValue,
+      num: fidVal ?? (paperQ.isLoading ? null : totalValue), format: fmt$, flash: false,
+      color: 'var(--ink)', sub: portfolioSub },
+    { id: 'stat-daypnl',    label: 'Day P&L',         value: dayPnlValue,
+      num: fidPnl ?? (paperQ.isLoading ? null : totalPnl), format: fmt$, flash: true,
+      color: dayPnlColor, sub: fidSummary?.daily_change_pct ?? 'Since open' },
+    { id: 'stat-analyses',  label: 'Total Analyses',  value: logsQ.isLoading ? '—' : String(totalAnalyses),
+      num: logsQ.isLoading ? null : totalAnalyses, format: intFmt, flash: false,
+      color: 'var(--ink)', sub: 'LLM signals' },
+    { id: 'stat-cash',      label: 'Cash Available',  value: paperQ.isLoading ? '—' : fmt$(totalCash),
+      num: paperQ.isLoading ? null : totalCash, format: fmt$, flash: false,
+      color: 'var(--ink)', sub: `${uniqueTickers} tickers analyzed` },
   ]
 
   return (
@@ -223,7 +246,9 @@ function StatRow({ paperQ }: { paperQ: ReturnType<typeof useQuery<ReturnType<typ
             {s.label}
           </div>
           <div className={`dash-stat-num${s.color === 'var(--ink)' ? ' text-gradient-ink' : ''}`} style={{ fontSize: 22, fontWeight: 700, color: s.color, fontFamily: 'var(--font-mono)', letterSpacing: '-0.035em' }}>
-            {s.value}
+            {s.num == null
+              ? s.value
+              : <AnimatedNumber value={s.num} format={s.format} flash={s.flash} />}
           </div>
           <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginTop: 4, minHeight: 16 }}>
             {s.sub}

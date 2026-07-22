@@ -517,6 +517,58 @@ button:active, [role="button"]:active { transform: scale(.965); }
 .spin { animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── Command palette (cmdk) ──────────────────────────────────────────────── */
+[cmdk-overlay] {
+  position: fixed; inset: 0; z-index: 240;
+  background: rgba(0,0,0,.44);
+  backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+  animation: backdropIn .16s var(--ease-out);
+}
+[cmdk-dialog] {
+  position: fixed; z-index: 241;
+  top: 15vh; left: 50%; transform: translateX(-50%);
+  width: min(560px, calc(100vw - 32px));
+}
+[cmdk-root] {
+  background: var(--surface); border: 1px solid var(--surface-rule);
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 24px 60px -12px rgba(0,0,0,.5), 0 8px 20px -8px rgba(0,0,0,.35);
+  animation: modalPop .18s var(--ease-out);
+}
+[cmdk-input] {
+  width: 100%; border: 0; outline: 0; background: transparent; color: var(--ink);
+  font-family: var(--font-mono); font-size: 14px; padding: 16px 18px;
+  border-bottom: 1px solid var(--surface-rule);
+}
+[cmdk-input]::placeholder { color: var(--ink-faint); }
+[cmdk-list] { max-height: 340px; overflow-y: auto; padding: 8px; scroll-padding-block: 8px; }
+[cmdk-group-heading] {
+  font-family: var(--font-mono); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .1em; color: var(--ink-faint); padding: 8px 10px 4px;
+}
+[cmdk-item] {
+  display: flex; align-items: center; gap: 12px; padding: 9px 10px;
+  border-radius: 8px; cursor: pointer; color: var(--ink); font-size: 13.5px;
+}
+[cmdk-item][aria-selected="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+[cmdk-item][aria-selected="true"] .cmdk-ic { color: var(--accent); }
+.cmdk-ic { display: inline-flex; color: var(--ink-faint); flex-shrink: 0; }
+.cmdk-label { flex: 1; }
+.cmdk-path { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); }
+[cmdk-empty] { padding: 24px; text-align: center; color: var(--ink-faint); font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { [cmdk-overlay], [cmdk-root] { animation: none; } }
+
+/* ── Portfolio competition cards ─────────────────────────────────────────── */
+.pf-card { transition: transform .16s var(--ease-out), border-color .16s var(--ease-out), box-shadow .16s var(--ease-out); will-change: transform; }
+.pf-card:hover { box-shadow: 0 10px 24px -12px rgba(0,0,0,.45); }
+.pf-card:hover { transform: translateY(-3px); border-color: var(--accent) !important; }
+.pf-card:active { transform: translateY(-1px) scale(.985) !important; }
+.pf-row { transition: background .12s var(--ease-out); }
+.pf-row:hover { background: var(--surface-raised); }   /* lighter than --surface → visible on dark */
+.pf-row:active { background: var(--surface-soft); }
+.pf-tab:hover { color: var(--ink) !important; }        /* hover feedback on unselected modal tabs */
+@media (prefers-reduced-motion: reduce) { .pf-card { transition: none; } .pf-card:hover, .pf-card:active { transform: none !important; } }
+
 /* ── Reduced motion ───────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
@@ -1212,3 +1264,98 @@ body.theme-dark .data-table thead th { background: var(--surface); }
 @media (max-width: 640px) {
   #panel-performance { padding: 10px !important; }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   UI PRIMITIVES — Button / Spinner / EmptyState (components/ui/*)
+   Base layout only; color comes from the existing .btn-* variant classes.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+.ui-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  white-space: nowrap;
+  user-select: none;
+  line-height: 1;
+  vertical-align: middle;
+}
+.ui-btn:disabled,
+.ui-btn[aria-disabled="true"] { cursor: not-allowed; opacity: .55; }
+.ui-btn.is-loading { cursor: progress; }
+.ui-btn-block { width: 100%; }
+.ui-btn-icon { display: inline-flex; align-items: center; }
+
+/* Ghost variant — quiet, borderless action (the missing 4th variant). */
+.btn-ghost {
+  background: transparent;
+  color: var(--ink-muted);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.btn-ghost:hover { background: var(--surface-soft); color: var(--ink); }
+
+/* Sizes — compound specificity guarantees override of the variant padding/font. */
+.ui-btn.ui-btn-sm { padding: 4px 10px; font-size: var(--text-xs); border-radius: var(--radius-sm); gap: 5px; }
+.ui-btn.ui-btn-md { padding: 7px 14px; font-size: var(--text-sm); }
+.ui-btn.ui-btn-lg { padding: 10px 18px; font-size: var(--text-base); gap: 9px; }
+
+/* Spinner — indeterminate rotation, reduced-motion safe. */
+.ui-spinner {
+  display: inline-block;
+  border-style: solid;
+  border-radius: 50%;
+  animation: ui-spin .6s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes ui-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .ui-spinner { animation-duration: 1.4s; }
+}
+
+.ui-visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+
+/* EmptyState — centered zero-data / error view. */
+.ui-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 8px;
+  padding: 40px 20px;
+  color: var(--ink-muted);
+}
+.ui-empty-compact { padding: 22px 14px; gap: 6px; }
+.ui-empty-icon { font-size: 30px; line-height: 1; opacity: .8; }
+.ui-empty-compact .ui-empty-icon { font-size: 22px; }
+.ui-empty-title { font-size: var(--text-base); font-weight: 600; color: var(--ink); }
+.ui-empty-desc { font-size: var(--text-sm); color: var(--ink-muted); max-width: 42ch; line-height: var(--leading-body); }
+.ui-empty-action { margin-top: 6px; }
+
+/* ── Data-viz categorical series (validated palette — light/dark stepped) ──────
+   Source: dataviz reference palette, worst-adjacent CVD ΔE ≥10 in both modes.
+   Used by the portfolio allocation treemap + weight bars. */
+:root {
+  --series-1:#2a78d6; --series-2:#1baf7a; --series-3:#eda100; --series-4:#008300;
+  --series-5:#4a3aa7; --series-6:#e34948; --series-7:#e87ba4; --series-8:#eb6834;
+}
+body.theme-dark {
+  --series-1:#3987e5; --series-2:#199e70; --series-3:#c98500; --series-4:#008300;
+  --series-5:#9085e9; --series-6:#e66767; --series-7:#d55181; --series-8:#d95926;
+}
+
+/* Portfolio dashboard motion + interaction */
+.pf-fade { animation: pf-fade .42s var(--ease-out) both; }
+@keyframes pf-fade { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
+.pf-row { transition: background .12s ease; }
+.pf-row:hover { background: var(--surface-soft); }
+@media (prefers-reduced-motion: reduce) { .pf-fade { animation: none; } }

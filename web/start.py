@@ -5,6 +5,7 @@ Usage:
     python web/start.py              # default port 8000
     python web/start.py --port 8080
 """
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -39,6 +40,7 @@ if __name__ == "__main__":
         host=args.host,
         port=args.port,
         reload=args.reload,
+        # SECURITY (H5): trust forwarding headers only from the loopback tunnel peer.
         proxy_headers=True,
-        forwarded_allow_ips="*",
+        forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1,::1"),
     )

@@ -83,6 +83,11 @@ if __name__ == "__main__":
         access_log=False,
         # Honor X-Forwarded-Proto/For from cloudflared so request.url.scheme
         # is "https" behind the tunnel and WebSocket upgrades work over wss://.
+        # SECURITY (H5): trust forwarding headers ONLY from the loopback peer
+        # (cloudflared connects to the origin on 127.0.0.1). "*" trusted X-Forwarded-For
+        # from any client, letting an attacker spoof their source IP to defeat the
+        # rate limiter and feed the localhost trust check. Override via
+        # FORWARDED_ALLOW_IPS only for a non-loopback proxy topology.
         proxy_headers=True,
-        forwarded_allow_ips="*",
+        forwarded_allow_ips=os.getenv("FORWARDED_ALLOW_IPS", "127.0.0.1,::1"),
     )

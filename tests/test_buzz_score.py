@@ -24,7 +24,8 @@ def test_bullish_raises_buzz():
     b = bz.compute_buzz(base, _tally(bull_w=3.0, buy=4))
     assert b.bull > 0 and b.bear == 0
     assert b.buzz > base                 # bullish conviction lifts buzz
-    assert b.net_sentiment > 0.5
+    # Smoothed by BuzzConfig.sentiment_prior — clearly positive, never saturated.
+    assert 0.4 < b.net_sentiment < 1.0
 
 
 def test_bearish_lowers_buzz():
@@ -32,7 +33,7 @@ def test_bearish_lowers_buzz():
     b = bz.compute_buzz(base, _tally(bear_w=3.0, sell=4))
     assert b.bear > 0 and b.bull == 0
     assert b.buzz < base                 # bearish conviction cuts buzz
-    assert b.net_sentiment < -0.5
+    assert b.net_sentiment <= -0.4       # smoothed; still decisively bearish
     assert b.avoid is True
 
 
@@ -57,8 +58,36 @@ def test_thousands_bearish_ne_thousands_bullish():
     bullish = bz.compute_buzz(40.0, _tally(bull_w=20.0, buy=2000))
     bearish = bz.compute_buzz(40.0, _tally(bear_w=20.0, sell=2000))
     assert bullish.buzz > bearish.buzz + 30      # wildly different, not the same buzz
-    assert bullish.net_sentiment > 0.9
-    assert bearish.net_sentiment < -0.9
+    # Heavy, one-sided evidence still approaches (but never reaches) full conviction.
+    assert bullish.net_sentiment > 0.85
+    assert bearish.net_sentiment < -0.85
+
+
+def test_single_unopposed_mention_does_not_saturate_sentiment():
+    """One bullish mention with nothing against it must not read as certainty.
+
+    Before the evidence-mass prior this returned exactly 1.0, which fed the
+    composite's 1.25x sentiment multiplier at full strength and admitted names
+    with almost no measured buzz — the raw buzz needed to clear the composite
+    floor collapsed from ~91 to ~8, and ~40% of scored tickers carried +1.0.
+    """
+    one = bz.compute_buzz(10.0, _tally(bull_w=1.0, buy=1))
+    assert 0.0 < one.net_sentiment < 0.4
+
+    many = bz.compute_buzz(10.0, _tally(bull_w=20.0, buy=200))
+    assert many.net_sentiment > one.net_sentiment * 2   # consensus outweighs one voice
+    assert many.net_sentiment < 1.0                     # never total certainty
+
+
+def test_sentiment_is_monotonic_in_evidence_mass():
+    """More one-sided evidence ⇒ strictly higher sentiment, asymptotic to 1.0.
+    A flat/saturating curve cannot rank names, which is the whole point."""
+    prev = -1.0
+    for w in (1.0, 2.0, 5.0, 10.0, 40.0):
+        s = bz.compute_buzz(10.0, _tally(bull_w=w, buy=int(w))).net_sentiment
+        assert s > prev, f"sentiment not increasing at bull_w={w}"
+        prev = s
+    assert prev < 1.0
 
 
 def test_buzz_floored_at_zero():

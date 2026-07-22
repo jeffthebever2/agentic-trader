@@ -95,7 +95,7 @@ async def passkey_remove(passkey_id: str, user: dict[str, Any] = Depends(get_cur
 
 
 class MethodBody(BaseModel):
-    method: str = Field(..., pattern="^(none|totp|passkey|email|passcode)$")
+    method: str = Field(..., pattern="^(none|totp|passkey|email|passcode|clerk)$")
 
 
 @router.post("/auth/2fa/method")
@@ -110,6 +110,8 @@ async def set_method(body: MethodBody, user: dict[str, Any] = Depends(get_curren
         raise HTTPException(status_code=400, detail="Email sending is not configured")
     if body.method == "passcode" and not st.get("passcode_enabled"):
         raise HTTPException(status_code=400, detail="No trading passcode set")
+    if body.method == "clerk" and not st.get("clerk_enabled"):
+        raise HTTPException(status_code=400, detail="Clerk is not configured on the server")
     user_store.update_user(user["email"], step_up_method=body.method)
     return {"ok": True, "method": body.method}
 
@@ -140,6 +142,21 @@ async def passcode_disable(user: dict[str, Any] = Depends(get_current_user)):
 async def step_up_totp(body: CodeBody, user: dict[str, Any] = Depends(get_current_user)):
     if not twofa.totp_verify(user["email"], body.code):
         raise HTTPException(status_code=401, detail="Invalid code")
+    return {"step_up_token": twofa.issue_step_up_token(user["email"])}
+
+
+class ClerkTokenBody(BaseModel):
+    clerk_token: str = Field(..., min_length=10)
+
+
+@router.post("/auth/2fa/step-up/clerk")
+async def step_up_clerk(body: ClerkTokenBody, user: dict[str, Any] = Depends(get_current_user)):
+    """Verify a fresh Clerk (Google) re-auth token and mint a step-up token. The
+    Clerk identity's verified email MUST match the signed-in (CF Access) user."""
+    from web import clerk
+    ok, reason = clerk.verify_step_up(body.clerk_token, user["email"])
+    if not ok:
+        raise HTTPException(status_code=401, detail=f"Clerk step-up failed: {reason}")
     return {"step_up_token": twofa.issue_step_up_token(user["email"])}
 
 

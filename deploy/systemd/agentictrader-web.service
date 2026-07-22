@@ -1,0 +1,22 @@
+[Unit]
+Description=AgenticTrader web dashboard (uvicorn on 127.0.0.1:8001)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/opt/agentictrader
+# run_web.py runs uvicorn workers=1 — REQUIRED: order/state locks are
+# in-process. The app also takes tmp/webserver.lock at startup and refuses
+# to start beside another instance (WEB_SINGLE_INSTANCE_LOCK gate).
+ExecStart=/opt/agentictrader/.venv/bin/python run_web.py
+Restart=always
+RestartSec=5
+# yfinance fd leak history (Errno 24) — keep the raised limit + fd janitor
+LimitNOFILE=8192
+StandardOutput=append:/opt/agentictrader/logs/webserver.log
+StandardError=append:/opt/agentictrader/logs/webserver.err
+
+[Install]
+WantedBy=multi-user.target

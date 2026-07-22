@@ -22,6 +22,10 @@ SENSITIVE_KEYS = [
     "ALPHA_VANTAGE_API_KEY", "FIDELITY_USERNAME", "FIDELITY_PASSWORD",
     "TEXTNOW_USERNAME", "TEXTNOW_SID",
     "TEXTBELT_KEY",
+    # SMS provider secrets — the inbound secret is the ONLY auth on the
+    # unauthenticated /api/paper/sms/inbound webhook, so it must never be echoed.
+    "SENDBLUE_API_SECRET",
+    "SENDBLUE_INBOUND_SECRET",
     # Cloudflare Workers AI + Access
     "CLOUDFLARE_API_TOKEN",
     "CF_ACCESS_AUD",
@@ -46,9 +50,7 @@ CONFIG_KEYS = [
     "SMS_PROVIDER",
     "TEXTBELT_SENDER",
     "SENDBLUE_API_KEY_ID",
-    "SENDBLUE_API_SECRET",
     "SENDBLUE_FROM_NUMBER",
-    "SENDBLUE_INBOUND_SECRET",
     # Cloudflare Workers AI (non-secret config)
     "CLOUDFLARE_ACCOUNT_ID",
     "CLOUDFLARE_AI_GATEWAY_URL",
@@ -171,15 +173,16 @@ def _split_change_controlled_updates(
 
 
 def _mask(val: str) -> str:
+    """Fully redact a secret — reveal NOTHING, not even a prefix. A masked value
+    is a fixed dot-string; presence/length live in the separate `set` flag. (Prior
+    behavior leaked the first 4 chars, meaningfully weakening e.g. a password.)"""
     if not val:
         return ""
-    if len(val) <= 4:
-        return "****"
-    return val[:4] + "*" * min(len(val) - 4, 20)
+    return "•" * 8
 
 
 @router.get("/settings")
-async def get_settings(_user: dict = Depends(get_current_user)):
+async def get_settings(_user: dict = Depends(require_admin)):
     env = _load_env_file()
     result: dict = {}
 

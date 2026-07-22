@@ -9,10 +9,13 @@ import web.sms_router as sms_router
 import web.api.paper as paper
 
 
+_SECRET = "test-inbound-secret"
+
+
 class _FakeReq:
-    def __init__(self, payload):
+    def __init__(self, payload, key=_SECRET):
         self._p = payload
-        self.query_params = {}
+        self.query_params = {"key": key} if key is not None else {}
         self.headers = {}
 
     async def json(self):
@@ -22,13 +25,36 @@ class _FakeReq:
         return {}
 
 
-def _run(payload, dispatch_result, monkeypatch):
-    monkeypatch.delenv("SENDBLUE_INBOUND_SECRET", raising=False)
+def _run(payload, dispatch_result, monkeypatch, key=_SECRET):
+    monkeypatch.setenv("SENDBLUE_INBOUND_SECRET", _SECRET)
     sent = []
     monkeypatch.setattr(sms_alerts, "send_sms", lambda to, msg, *a, **k: sent.append((to, msg)))
     monkeypatch.setattr(sms_router, "dispatch", lambda num, txt: dispatch_result)
-    out = asyncio.run(paper.sendblue_inbound(_FakeReq(payload)))
+    out = asyncio.run(paper.sendblue_inbound(_FakeReq(payload, key=key)))
     return out, sent
+
+
+def test_webhook_rejects_missing_key(monkeypatch):
+    """M2: no/incorrect inbound key → rejected, and no SMS is dispatched."""
+    monkeypatch.setenv("SENDBLUE_INBOUND_SECRET", _SECRET)
+    sent = []
+    monkeypatch.setattr(sms_alerts, "send_sms", lambda to, msg, *a, **k: sent.append((to, msg)))
+    monkeypatch.setattr(sms_router, "dispatch", lambda num, txt: {"reply": "x", "user": "wt@x.com"})
+    out = asyncio.run(paper.sendblue_inbound(_FakeReq({"from_number": "+16145078688", "content": "STATUS"}, key="wrong")))
+    assert out["success"] is False and "unauthorized" in out["error"]
+    assert sent == []
+
+
+def test_webhook_fails_closed_when_secret_unset(monkeypatch):
+    """M2: when SENDBLUE_INBOUND_SECRET is unset the endpoint fails CLOSED (does not
+    accept any caller as it did before)."""
+    monkeypatch.delenv("SENDBLUE_INBOUND_SECRET", raising=False)
+    sent = []
+    monkeypatch.setattr(sms_alerts, "send_sms", lambda to, msg, *a, **k: sent.append((to, msg)))
+    monkeypatch.setattr(sms_router, "dispatch", lambda num, txt: {"reply": "x", "user": "wt@x.com"})
+    out = asyncio.run(paper.sendblue_inbound(_FakeReq({"from_number": "+16145078688", "content": "STATUS"}, key=None)))
+    assert out["success"] is False
+    assert sent == []
 
 
 def test_unregistered_sender_gets_no_reply(monkeypatch):

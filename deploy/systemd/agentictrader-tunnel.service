@@ -1,0 +1,17 @@
+[Unit]
+Description=AgenticTrader cloudflared tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+# cloudflared reads ~/.cloudflared/config.yml + tunnel credentials
+ExecStart=/usr/local/bin/cloudflared tunnel run
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/agentictrader/logs/tunnel.log
+StandardError=append:/opt/agentictrader/logs/tunnel.err
+
+[Install]
+WantedBy=multi-user.target

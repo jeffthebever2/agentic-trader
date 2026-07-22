@@ -1,0 +1,25 @@
+# P0 (audit 2026-07-05): the live-book watch must NOT ride the webserver.
+# This unit runs scripts/run_exit_guard.py as its own service so stops/targets
+# on real Fidelity holdings are checked even when the webserver is down.
+# Propose-only — it raises HIL EXIT proposals (+SMS); it never places orders.
+#
+# Do NOT add Requires=/BindsTo= on agentictrader-web — independence is the point.
+[Unit]
+Description=AgenticTrader standalone exit guard (live-book stop/target watch)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/opt/agentictrader
+ExecStart=/opt/agentictrader/.venv/bin/python scripts/run_exit_guard.py
+Restart=always
+RestartSec=10
+# Playwright/yfinance fd usage — mirror the Mac's raised limit
+LimitNOFILE=8192
+StandardOutput=append:/opt/agentictrader/logs/exitguard.log
+StandardError=append:/opt/agentictrader/logs/exitguard.err
+
+[Install]
+WantedBy=multi-user.target

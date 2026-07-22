@@ -322,8 +322,15 @@ class ModelHealthChecker:
         bundle: Optional[Dict] = None,
         drift_log_path: Optional[str | Path] = None,
         validation_summary_path: Optional[str | Path] = None,
+        ml_enforcing: bool = True,
     ) -> Dict[str, Any]:
-        """Return model health dict with halt/warn flags."""
+        """Return model health dict with halt/warn flags.
+
+        ml_enforcing=False (gate in shadow mode / thresholds disabled) demotes the
+        model-AGE halt to a warning: a model that is not in the decision path must
+        not freeze the rule-based book. All other halts (load failure, ROC floor,
+        drift) still fire — they signal problems worth stopping for regardless.
+        """
         result: Dict[str, Any] = {
             "load_status": "ok",
             "age_days": None,
@@ -366,9 +373,15 @@ class ModelHealthChecker:
                 age = max(0, (now_dt - created_dt).days)
                 result["age_days"] = age
                 if age > self.max_age_days:
-                    result["halt_reasons"].append(
-                        f"model_too_old: {age}d > {self.max_age_days}d (retrain required)"
-                    )
+                    if ml_enforcing:
+                        result["halt_reasons"].append(
+                            f"model_too_old: {age}d > {self.max_age_days}d (retrain required)"
+                        )
+                    else:
+                        result["warn_reasons"].append(
+                            f"WARN_model_too_old_shadow: {age}d > {self.max_age_days}d "
+                            f"(gate in shadow mode — not halting rule-based entries; retrain still required)"
+                        )
                 elif age > self.warn_age_days:
                     result["warn_reasons"].append(
                         f"WARN_model_stale: {age}d > {self.warn_age_days}d (retrain recommended)"
@@ -736,6 +749,7 @@ class ProductionSafetyMonitor:
         bundle_path: Optional[str | Path] = None,
         output_dir: Optional[str | Path] = None,
         cfg: Optional[Dict] = None,
+        ml_enforcing: bool = True,
     ) -> Tuple[Dict[str, Any], List[str], List[str]]:
         """Run model health checks."""
         cfg = cfg or {}
@@ -765,6 +779,7 @@ class ProductionSafetyMonitor:
             bundle=bundle,
             drift_log_path=drift_log,
             validation_summary_path=val_summary,
+            ml_enforcing=ml_enforcing,
         )
         return health, health.pop("halt_reasons", []), health.pop("warn_reasons", [])
 
@@ -841,6 +856,9 @@ class ProductionSafetyMonitor:
         # DL-5: grades_path for DriftDetector; validation_summary_path for WF-gap check
         grades_path: Optional[str | Path] = None,
         validation_summary_path: Optional[str | Path] = None,
+        # False when the ML gate runs in shadow mode / disabled thresholds:
+        # demotes the model-age halt so a bystander model can't freeze entries.
+        ml_enforcing: bool = True,
     ) -> SafetyReport:
         """Run all safety checks and return a SafetyReport.
 
@@ -861,7 +879,8 @@ class ProductionSafetyMonitor:
 
         # ── 2. Model health ───────────────────────────────────────────────
         model_health, mh_halt, mh_warn = self.check_model_health(
-            bundle=bundle, bundle_path=bundle_path, output_dir=output_dir, cfg=cfg
+            bundle=bundle, bundle_path=bundle_path, output_dir=output_dir, cfg=cfg,
+            ml_enforcing=ml_enforcing,
         )
         all_halt.extend(mh_halt)
         all_warn.extend(mh_warn)

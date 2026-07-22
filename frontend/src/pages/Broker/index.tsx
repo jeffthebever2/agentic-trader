@@ -4,6 +4,8 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import api, { wsUrl } from '@/api/client'
+import { AnimatedNumber } from '@/components/ui/AnimatedNumber'
+import SnapTradeConnect from './SnapTradeConnect'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -81,6 +83,15 @@ function fmt$(n: number | null | undefined): string {
 function pnlColor(n: number): string {
   return n >= 0 ? '#4ade80' : '#f87171'
 }
+
+/** Parse a pre-formatted money string ("$4,925.13", "-$5.00") to a number. */
+function toNum(s: string): number | null {
+  const n = parseFloat(s.replace(/[^0-9.+-]/g, ''))
+  return Number.isFinite(n) ? n : null
+}
+const usdSigned = (n: number) =>
+  (n > 0 ? '+$' : n < 0 ? '-$' : '$') +
+  Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
 function fmtPct(n: number): string {
   return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'
@@ -564,7 +575,7 @@ function WebullPlaceOrder() {
   )
 }
 
-function WebullPanel() {
+export function WebullPanel() {
   const qc = useQueryClient()
   const [pinUnlocked, setPinUnlocked] = useState(false)
 
@@ -847,13 +858,13 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 36, flex: 1 }}>
             <div>
               <div style={{ fontSize: 9, color: 'var(--ink-faint)', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700, marginBottom: 2 }}>Portfolio Value</div>
-              <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--ink)', lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}>{grand.total_value}</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--ink)', lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}>{toNum(grand.total_value) == null ? grand.total_value : <AnimatedNumber value={toNum(grand.total_value)!} format={fmt$} flash={false} />}</div>
             </div>
             {grand.daily_change && (
               <div>
                 <div style={{ fontSize: 9, color: 'var(--ink-faint)', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700, marginBottom: 2 }}>Day P&L</div>
                 <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums', color: gainColor(grand.daily_change) }}>
-                  {grand.daily_change}{grand.daily_change_pct ? <span style={{ fontSize: 13, marginLeft: 6 }}>{grand.daily_change_pct}</span> : null}
+                  {toNum(grand.daily_change) == null ? grand.daily_change : <AnimatedNumber value={toNum(grand.daily_change)!} format={usdSigned} flash />}{grand.daily_change_pct ? <span style={{ fontSize: 13, marginLeft: 6 }}>{grand.daily_change_pct}</span> : null}
                 </div>
               </div>
             )}
@@ -1003,7 +1014,7 @@ function FidelityTradingPanel({ onDisconnect }: { onDisconnect: () => void }) {
   )
 }
 
-function FidelityPanel() {
+export function FidelityPanel() {
   const qc = useQueryClient()
   const [forceLogin, setForceLogin] = useState(false)
 
@@ -1038,57 +1049,13 @@ function FidelityPanel() {
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 
-const BROKERS = [
-  { id: 'webull',   label: 'Webull' },
-  { id: 'fidelity', label: 'Fidelity' },
-] as const
-
-type BrokerId = typeof BROKERS[number]['id']
-
 export default function BrokerPage() {
-  const [active, setActive] = useState<BrokerId>('fidelity')
-
+  // Broker connections are SnapTrade-only now — the old direct Fidelity/Webull
+  // login panels (FidelityPanel/WebullPanel below) are retired from the UI.
+  // Centered, uses the content width without spilling under the sidebar.
   return (
-    <div id="panel-broker" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-      {/* Broker switcher bar */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        padding: '10px 20px',
-        background: 'var(--surface)',
-        borderBottom: '1px solid var(--surface-rule)',
-        flexShrink: 0,
-      }}>
-        <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-faint)', textTransform: 'uppercase', letterSpacing: '.05em' }}>Broker</span>
-        {BROKERS.map(b => (
-          <button
-            key={b.id}
-            onClick={() => setActive(b.id)}
-            style={{
-              padding: '5px 16px',
-              fontSize: 13,
-              fontWeight: 600,
-              borderRadius: 999,
-              border: active === b.id ? '1px solid var(--accent)' : '1px solid var(--surface-rule)',
-              cursor: 'pointer',
-              background: active === b.id ? 'rgba(214,58,0,.1)' : 'transparent',
-              color: active === b.id ? 'var(--accent)' : 'var(--ink-faint)',
-              transition: 'all .15s',
-            }}
-          >
-            {b.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Panel — Fidelity gets full-height layout, Webull gets scrollable */}
-      {active === 'fidelity' && <FidelityPanel />}
-      {active === 'webull' && (
-        <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
-          <WebullPanel />
-        </div>
-      )}
+    <div id="panel-broker" style={{ height: '100%', overflowY: 'auto', padding: '28px 24px', display: 'flex', justifyContent: 'center' }}>
+      <SnapTradeConnect />
     </div>
   )
 }

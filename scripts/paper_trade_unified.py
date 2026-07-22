@@ -325,7 +325,16 @@ def _process_exits(
             f"[unified] EXIT {ticker}: {result.signal.value} "
             f"price={price:.2f} shares={shares_to_sell} reason={result.reason}"
         )
-        account.sell(ticker, price, reason_tag, now)
+        # A PARTIAL must sell only `shares_to_sell` — `sell()` pops the whole
+        # position, which silently turned every scale-out into a full close.
+        # With partial_profit_trigger at 0.833 that closed 100% of every winner
+        # at ~83% of target, so TARGET_HIT was unreachable, the trailing stop
+        # never engaged, and the runner this exit model exists to protect never
+        # existed. `sell_partial` clamps to shares-1, so a runner always survives.
+        if shares_to_sell < pos.shares:
+            account.sell_partial(ticker, price, shares_to_sell, reason_tag, now)
+        else:
+            account.sell(ticker, price, reason_tag, now)
 
         # Log exit audit
         audit_path = output_dir / f"unified_brain_audit_{now.strftime('%Y%m%d')}.jsonl"
@@ -484,6 +493,13 @@ def scan_once(
     bundle_path = args.model_bundle
     bundle: Optional[Dict] = getattr(args, "_bundle_ref", None)
     safety_monitor = ProductionSafetyMonitor(output_dir=str(output_dir))
+    # ML enforces nothing when disabled outright or when both thresholds are 0
+    # (current default — ROC<0.5). In that state a stale model must not halt
+    # the rule-based entries that actually carry the book.
+    _ml_enforcing = (not getattr(args, "no_ml", False)) and (
+        float(getattr(args, "ml_probability_threshold", 0.0) or 0.0) > 0.0
+        or float(getattr(args, "min_confidence", 0.0) or 0.0) > 0.0
+    )
     safety_report = safety_monitor.check_all(
         account=account,
         prices=prices,
@@ -494,6 +510,7 @@ def scan_once(
         regime_state=regime_state,
         output_dir=str(output_dir),
         now=now,
+        ml_enforcing=_ml_enforcing,
     )
     skip_entries = not safety_report.safe_to_trade
     for reason in safety_report.halt_reasons:
@@ -520,6 +537,13 @@ def scan_once(
 
     # ── Exits (always run, even on safety halt) ───────────────────────────
     _process_exits(account, exit_plans, prices, now, args, output_dir)
+    # Persist trail state IMMEDIATELY. _process_exits ratchets peak/trail_stop/
+    # trail_active/partial_taken in place, but the two early returns below (EOD
+    # flatten, and any safety halt) used to skip the save at the end of this
+    # function. On a halt day — exactly the high-volatility day when the ratchet
+    # matters — a restart reverted trail_stop to its last persisted, LOWER value,
+    # giving back locked-in gain and re-arming an already-taken partial.
+    _save_exit_plans(exit_plans, output_dir / EXIT_PLANS_FILENAME)
 
     # ── EOD flatten ───────────────────────────────────────────────────────
     market_close = now.replace(hour=15, minute=55, second=0, microsecond=0)
@@ -701,6 +725,42 @@ def main() -> None:
         max_portfolio_drawdown         = 12.0,
     )
 
+    # ── ML bundle ─────────────────────────────────────────────────────────
+    # Load ONCE at startup. Nothing here used to load it at all: `bundle=None`
+    # was hardcoded into build_candidates and `_bundle_ref` was only ever read
+    # back as None, so `--model-bundle` and `--no-ml` were inert flags and the
+    # ProductionSafetyMonitor received bundle=None — losing ML drift and feature
+    # monitoring entirely.
+    #
+    # GATING IS DELIBERATELY UNCHANGED. The measured result is rule_only
+    # +0.78%/trade vs a full ML gate −0.05%/trade at WF ROC ~0.51, so the bundle
+    # is loaded for MONITORING and only reaches build_candidates when ML gating
+    # is explicitly enabled (a non-zero threshold). Handing a bundle to
+    # build_candidates flips `bundle is None or …` at paper_trade_today.py:2663
+    # from fail-open to enforcing, which is exactly the configuration measured to
+    # lose money — so that stays opt-in rather than becoming a side effect of
+    # fixing the wiring.
+    _ml_bundle: Optional[Dict] = None
+    if not getattr(args, "no_ml", False):
+        try:
+            from scripts.paper_trade_today import load_model_bundle
+            _bp = Path(args.model_bundle) if args.model_bundle else None
+            if _bp is not None and _bp.exists():
+                _ml_bundle = load_model_bundle(_bp, disabled=False)
+                print(f"[unified] ML bundle loaded for monitoring: {_bp}")
+            else:
+                print(f"[unified] ML bundle not found at {_bp} — drift monitoring degraded")
+        except Exception as e:
+            print(f"[unified] ML bundle load failed ({e}) — drift monitoring degraded")
+            _ml_bundle = None
+    _today_args._bundle_ref = _ml_bundle
+    _ml_gate_enforcing = (not getattr(args, "no_ml", False)) and (
+        float(getattr(_today_args, "ml_probability_threshold", 0.0) or 0.0) > 0.0
+        or float(getattr(_today_args, "min_confidence", 0.0) or 0.0) > 0.0
+    )
+    print(f"[unified] ML gating enforced: {_ml_gate_enforcing} "
+          f"(bundle {'present' if _ml_bundle else 'absent'})")
+
     # ── Main loop ─────────────────────────────────────────────────────────
     interval_secs = args.scan_interval_minutes * 60
     first_run     = True
@@ -726,8 +786,12 @@ def main() -> None:
             # ── Build candidates (reuses existing pipeline unchanged) ─────
             print("[unified] Building candidates…")
             trade_date = now.date()
+            # Bundle only when gating is explicitly enabled — see the load block
+            # above. Passing it unconditionally would silently start enforcing a
+            # gate measured to cost 0.83%/trade.
             candidates_by_strategy, raw_daily = build_candidates(
-                _today_args, trade_date, bundle=None
+                _today_args, trade_date,
+                bundle=(_ml_bundle if _ml_gate_enforcing else None),
             )
 
             # Extract regime info from raw_daily side-channel
@@ -749,8 +813,10 @@ def main() -> None:
 
             vix_level = _fetch_vix()
 
-            # Cache refs on args for safety monitor
-            _today_args._bundle_ref        = getattr(_today_args, "_bundle_ref", None)
+            # Cache refs on args for safety monitor (bundle set once at startup —
+            # the monitor needs it for ML drift + feature-coverage checks even
+            # when the entry gate itself is not enforcing).
+            _today_args._bundle_ref        = _ml_bundle
             _today_args._regime_state_cache = regime_state
             _today_args.ml_model_bundle     = args.model_bundle
 

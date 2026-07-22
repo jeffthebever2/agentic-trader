@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd counterpart of deploy/systemd/agentictrader-paperportfolios.service.
+  Installed copy lives at ~/Library/LaunchAgents/org.agentictrader.paperportfolios.plist.
+
+  The 30-portfolio paper competition runner. Runs scripts/run_paper_portfolios.py
+  once per invocation; launchd re-fires it every 15 min (StartInterval 900). A
+  fresh process each cycle self-cleans the known yfinance fd-leak (Errno 24) —
+  the standalone provider has no janitor, so we deliberately DON'T keep it
+  long-lived. launchd won't overlap runs.
+
+  PAPER-ONLY — never imports or calls any live broker route. Writes only to
+  tmp/paper_portfolios/. Safe alongside the webserver and the legacy papertrader.
+
+  Mon/Thu sit-out is now a PER-PORTFOLIO A/B (paper_configs.trade_skip_days):
+  ~half the field trades on Mon/Thu signal bars, ~half sits out, so all-time ROR
+  settles whether the calendar edge holds. Default (no skip flags below) runs
+  that split. Exits always run for everyone regardless of weekday.
+
+  --skip-monday / --skip-thursday are optional GLOBAL forces: add
+  <string>--no-skip-monday</string> to make EVERY portfolio trade Mondays, or
+  <string>--skip-monday</string> to make every portfolio sit out.
+
+  Install (macOS):
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.agentictrader.paperportfolios.plist
+  Fire immediately / status / stop:
+    launchctl kickstart -k gui/$(id -u)/org.agentictrader.paperportfolios
+    launchctl print    gui/$(id -u)/org.agentictrader.paperportfolios
+    launchctl bootout  gui/$(id -u)/org.agentictrader.paperportfolios
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+	</dict>
+	<key>Label</key>
+	<string>org.agentictrader.paperportfolios</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14</string>
+		<string>-W</string>
+		<string>ignore::UserWarning:sklearn</string>
+		<string>-W</string>
+		<string>ignore::UserWarning:joblib</string>
+		<string>-W</string>
+		<string>ignore::ResourceWarning</string>
+		<string>scripts/run_paper_portfolios.py</string>
+		<string>--once</string>
+		<string>--tickers</string>
+		<string>tickers_liquid.txt</string>
+		<string>--max-tickers</string>
+		<string>0</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>900</integer>
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>8192</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>/Users/williamscott/Desktop/TradingAgents-0.2.4 copy/logs/paperportfolios.err</string>
+	<key>StandardOutPath</key>
+	<string>/Users/williamscott/Desktop/TradingAgents-0.2.4 copy/logs/paperportfolios.log</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/williamscott/Desktop/TradingAgents-0.2.4 copy</string>
+</dict>
+</plist>

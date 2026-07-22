@@ -75,3 +75,37 @@ def test_totp_disable_clears_method(store):
     st = twofa.step_up_status("trader@example.com")
     assert st["totp_enabled"] is False
     assert st["method"] == "none"
+
+
+def test_email_code_locks_out_after_max_attempts():
+    """H5: a wrong email code is invalidated after _EMAIL_CODE_MAX_ATTEMPTS guesses,
+    so the 6-digit code cannot be brute-forced within its TTL."""
+    import time as _t
+    from web import twofa as tf
+    email = "victim@example.com"
+    tf._PENDING_EMAIL[email.lower()] = {
+        "digest": tf._code_digest(email, "123456"),
+        "exp": int(_t.time()) + 600,
+        "sent_at": int(_t.time()),
+        "purpose": "step_up",
+    }
+    # Wrong guesses up to the cap
+    for _ in range(tf._EMAIL_CODE_MAX_ATTEMPTS):
+        assert tf.verify_email_code(email, "000000") is False
+    # Code is now invalidated — even the CORRECT code no longer works
+    assert tf.verify_email_code(email, "123456") is False
+    assert email.lower() not in tf._PENDING_EMAIL
+
+
+def test_email_code_correct_before_lockout():
+    import time as _t
+    from web import twofa as tf
+    email = "ok@example.com"
+    tf._PENDING_EMAIL[email.lower()] = {
+        "digest": tf._code_digest(email, "654321"),
+        "exp": int(_t.time()) + 600,
+        "sent_at": int(_t.time()),
+        "purpose": "step_up",
+    }
+    assert tf.verify_email_code(email, "111111") is False   # one wrong
+    assert tf.verify_email_code(email, "654321") is True     # correct still works

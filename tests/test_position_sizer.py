@@ -14,8 +14,10 @@ from tradingagents.portfolio.position_sizer import (
     candidate_adv_dollars, correlation_factor, inverse_vol_factor, quality_factor,
     realized_vol_pct, size_position,
 )
+from tradingagents.portfolio.diversification import DiversifyConfig
 
 CFG = SizerConfig()
+DIV = DiversifyConfig()  # shipped defaults: 3 names / 25% per cluster (deterministic, env-free)
 
 
 def _cand(**kw):
@@ -73,24 +75,31 @@ def test_never_exceeds_per_position_cap():
     assert res.binding_constraint == "per_position_cap"
 
 
-def test_sector_cap_limits_when_overweight():
+def test_cluster_cap_blocks_when_overweight():
+    # v2 diversification: NVDA+AMD+MU all fold to the ai_complex macro-cluster.
+    # 27% already in it exceeds the aggressive 25% cluster budget, so the tighter
+    # CLUSTER cap (not the old 30% sector cap) blocks a 3rd AI name outright.
     existing = [
         BookPosition("NVDA", weight_pct=15, sector="Technology"),
         BookPosition("AMD", weight_pct=12, sector="Technology"),
-    ]  # 27% already in Tech; cap 30 → only 3% room
+    ]
     res = size_position(
         100_000,
         _cand(ticker="MU", conviction=9, score=90, sector="Technology"),
-        existing,
+        existing, divcfg=DIV,
     )
-    assert res.dollars <= 3_000 + 0.01
-    assert res.binding_constraint == "sector_cap"
+    assert res.dollars == 0.0
+    assert "cluster_dollar_cap" in res.binding_constraint
 
 
-def test_unknown_sector_no_sector_clamp():
+def test_unknown_sector_fails_closed_to_singleton():
+    # Unknown sector no longer removes the constraint (old math.inf fail-open):
+    # the candidate lands in its OWN singleton bucket, so a 28% Tech position
+    # doesn't clamp it, but the constraint machinery stays finite/active.
     existing = [BookPosition("NVDA", weight_pct=28, sector="Technology")]
-    res = size_position(100_000, _cand(conviction=8, score=85, sector=None), existing)
-    assert res.binding_constraint != "sector_cap"
+    res = size_position(100_000, _cand(conviction=8, score=85, sector=None), existing, divcfg=DIV)
+    assert "sector_cap" not in res.binding_constraint
+    assert res.dollars > 0  # a lone unknown-sector name still sizes (per-position cap governs)
 
 
 def test_portfolio_heat_caps_when_almost_fully_deployed():

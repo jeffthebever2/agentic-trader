@@ -88,6 +88,24 @@ def _parse_ts(ts: str) -> Optional[datetime]:
         return None
 
 
+# Keys the scanner writes into the per-ticker breakdown dict for LOGGING, which
+# are not sources and must never be learned from. `bull_bear_ratio` is capped at
+# 999.0, so an all-bullish name contributed a ~999-point "source" — measured on
+# production data these six keys absorbed 82.8% of every observation's
+# attribution (bull_bear_ratio alone 73.1%), leaving real feeds 17.2%. That
+# inflated every source's observation requirement past the min_weight_obs floor,
+# so after 53 scans the weights file had never been written and every source
+# multiplier was permanently 1.0 — the adaptive learning loop was inert.
+_NON_SOURCE_KEYS = frozenset({
+    "bull_contrib", "bear_contrib", "neutral_contrib",
+    "volume_contrib", "buzz_sentiment", "bull_bear_ratio",
+    # Derived SCORE ADJUSTMENTS, not feeds. They are positive floats written into
+    # the same breakdown dict, so they were being learned from as if a source
+    # named "multi_source_bonus" had predictive value of its own.
+    "multi_source_bonus", "insider_social_combo", "single_source_dampener",
+})
+
+
 # ── 1. Record ─────────────────────────────────────────────────────────────────
 def record_scan(
     rows: list[dict],
@@ -102,6 +120,10 @@ def record_scan(
     A ticker with an OPEN row (5d horizon not yet filled) is skipped — otherwise
     a name that trends for a week would contribute 40+ near-duplicate
     observations and drown everything else.
+
+    Only real SOURCES are recorded — see ``_NON_SOURCE_KEYS``. The caller's
+    breakdown dict doubles as a telemetry sink, and those fields were being
+    learned from as if they were feeds.
     """
     open_tickers = {
         r.get("ticker") for r in rows
@@ -115,7 +137,7 @@ def record_scan(
             continue
         sources = {
             k: float(v) for k, v in (breakdown.get(t) or {}).items()
-            if isinstance(v, (int, float)) and v > 0
+            if isinstance(v, (int, float)) and v > 0 and k not in _NON_SOURCE_KEYS
         }
         if not sources:
             continue

@@ -10,7 +10,10 @@
 import { useEffect, useState } from 'react'
 import { create } from 'zustand'
 import { Lock } from 'lucide-react'
+import { useAuth, useClerk } from '@clerk/react'
 import api from '@/api/client'
+
+const CLERK_ENABLED = !!import.meta.env.VITE_CLERK_PUBLISHABLE_KEY
 
 // ── Global store so any component can trigger step-up ─────────────────────────
 // Cache the minted step-up token slightly under the server's 300s TTL so a
@@ -116,6 +119,54 @@ const btnSecondary: React.CSSProperties = {
   border: '1px solid var(--surface-rule)', borderRadius: 6, fontWeight: 600, fontSize: 13, cursor: 'pointer',
 }
 
+// ── Clerk (Google re-auth) step-up button ────────────────────────────────────
+// Uses Clerk hooks, so it must only mount when ClerkProvider is present (i.e. a
+// publishable key is configured). Renders a Google verify button instead of a
+// code field: sign in with Clerk if needed, then exchange the session token for a
+// step-up token at /auth/2fa/step-up/clerk.
+function ClerkStepUpButton({ onDone, onError }: { onDone: () => void; onError: (m: string) => void }) {
+  const { isLoaded, isSignedIn, getToken } = useAuth()
+  const clerk = useClerk()
+  const [busy, setBusy] = useState(false)
+
+  const verify = async () => {
+    onError('')
+    if (!isLoaded) return
+    if (!isSignedIn) {
+      // Open Clerk's Google sign-in; the user re-verifies, then clicks again.
+      clerk.openSignIn({})
+      onError('Signed in with Google? Click “Verify with Google” again to finish.')
+      return
+    }
+    setBusy(true)
+    try {
+      const token = await getToken()
+      if (!token) { onError('Could not get a Clerk token — try signing in again.'); return }
+      const res = await api.post('/auth/2fa/step-up/clerk', { clerk_token: token })
+      const tok = (res.data as { step_up_token?: string })?.step_up_token
+      useStepUpStore.getState().setToken(tok ?? '')
+      onDone()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { detail?: string } }; message?: string }
+      onError(err?.response?.data?.detail ?? err?.message ?? 'Clerk verification failed.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <button onClick={verify} disabled={busy || !isLoaded}
+      style={{
+        width: '100%', padding: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+        background: 'var(--surface-soft)', border: '1px solid var(--surface-rule)', borderRadius: 8,
+        color: 'var(--ink)', fontWeight: 600, fontSize: 14, cursor: 'pointer',
+      }}>
+      <span aria-hidden style={{ fontSize: 16 }}>🔵</span>
+      {busy ? 'Verifying…' : isSignedIn ? 'Verify with Google' : 'Sign in with Google'}
+    </button>
+  )
+}
+
 export function StepUpModal() {
   const { open, title, copy, close } = useStepUpStore()
   const [code, setCode] = useState('')
@@ -133,7 +184,9 @@ export function StepUpModal() {
       .then(r => {
         if (cancelled) return
         const m = r.data?.method || 'totp'
-        const use = METHOD_CFG[m] ? m : 'totp'
+        // 'clerk' has no code input (Google re-auth button); other methods must
+        // be in METHOD_CFG or we fall back to totp.
+        const use = m === 'clerk' ? 'clerk' : (METHOD_CFG[m] ? m : 'totp')
         setMethod(use)
         if (use === 'email') api.post('/auth/2fa/step-up/email/send').catch(() => {})
       })
@@ -182,8 +235,13 @@ export function StepUpModal() {
             <div style={{ fontSize: 13, color: 'var(--ink-muted)', lineHeight: 1.5, marginBottom: 8 }}>{copy}</div>
           )}
           <div style={{ fontSize: 13, color: 'var(--ink)', lineHeight: 1.5, marginBottom: 14, fontWeight: 500 }}>
-            {cfg.instruction}
+            {method === 'clerk' ? 'Re-verify your identity with Google to authorize this trade.' : cfg.instruction}
           </div>
+          {method === 'clerk' ? (
+            CLERK_ENABLED
+              ? <ClerkStepUpButton onDone={() => { setCode(''); close(true) }} onError={setMsg} />
+              : <div style={{ fontSize: 13, color: '#ef4444' }}>Clerk isn’t configured in this build.</div>
+          ) : (
           <input
             type={cfg.type}
             {...(cfg.numeric ? { inputMode: 'numeric' as const } : {})}
@@ -202,6 +260,7 @@ export function StepUpModal() {
               borderRadius: 8, color: 'var(--ink)', boxSizing: 'border-box',
             }}
           />
+          )}
           {method === 'email' && (
             <button onClick={resendEmail}
               style={{ marginTop: 8, background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 12, padding: 0 }}>
@@ -212,9 +271,11 @@ export function StepUpModal() {
         </div>
         <div style={{ padding: '14px 24px', borderTop: '1px solid var(--surface-rule)', display: 'flex', gap: 10, justifyContent: 'flex-end', background: 'var(--surface-soft)' }}>
           <button style={btnSecondary} onClick={cancel}>Cancel</button>
-          <button style={btnPrimary} onClick={submit} disabled={loading}>
-            {loading ? 'Checking…' : 'Authorize'}
-          </button>
+          {method !== 'clerk' && (
+            <button style={btnPrimary} onClick={submit} disabled={loading}>
+              {loading ? 'Checking…' : 'Authorize'}
+            </button>
+          )}
         </div>
       </div>
     </div>

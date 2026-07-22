@@ -31,7 +31,10 @@ class PreTradeGate:
         "alpaca_iex",
         "broker",
         "fidelity",
-        "fidelity_realtime",
+        # "fidelity_realtime" removed 2026-07-05: it was only ever produced by the
+        # exit path self-stamping a scraped grid price with scrape-time now(),
+        # which made the freshness gate a no-op. Execution evidence must come
+        # from the quote gateway's trusted providers.
         "finnhub",
         "fmp",            # Financial Modeling Prep — the configured trusted provider
         "ibkr",

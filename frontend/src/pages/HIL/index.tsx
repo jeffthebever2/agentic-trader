@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import api from '@/api/client'
 import { LoadingState } from '@/components/shared/LoadingState'
 import { openStepUp, stepUpHeaders } from '@/components/modals/StepUpModal'
+import CopyTrade from './CopyTrade'
 
 // ── Thematic HIL types ────────────────────────────────────────────────────────
 
@@ -28,6 +29,17 @@ interface ThematicSignal {
   stop_pct?: number
   hold_days?: number
   status: string
+  diversify?: {
+    cluster: string | null
+    cluster_names: number
+    cluster_pct: number | null
+    max_names: number
+    max_cluster_pct: number
+    blocked: boolean
+    cap_reason: string | null
+    decay_mult: number
+    n_eff: number
+  }
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -472,11 +484,14 @@ export default function HILPage() {
     onSuccess: () => refetchThematicSignals(),
   })
 
-  const [tab, setTab] = useState<'approvals' | 'settings'>(() => {
-    // Deep link from the trade-request SMS lands on the Approvals tab.
+  const [tab, setTab] = useState<'approvals' | 'settings' | 'copytrade'>(() => {
+    // Deep link from the trade-request SMS lands on the Approvals tab; the
+    // copy-trade SMS deep-links to ?tab=copytrade.
     try {
       const t = new URLSearchParams(window.location.search).get('tab')
-      return t === 'settings' ? 'settings' : 'approvals'
+      if (t === 'settings') return 'settings'
+      if (t === 'copytrade') return 'copytrade'
+      return 'approvals'
     } catch {
       return 'approvals'
     }
@@ -656,10 +671,16 @@ export default function HILPage() {
         <button style={tabBtn(tab === 'approvals')} onClick={() => setTab('approvals')}>
           ⏳ Approvals{approvalsCount ? ` (${approvalsCount})` : ''}
         </button>
+        <button style={tabBtn(tab === 'copytrade')} onClick={() => setTab('copytrade')}>
+          🔁 Copy Trade
+        </button>
         <button style={tabBtn(tab === 'settings')} onClick={() => setTab('settings')}>
           ⚙️ HIL Settings
         </button>
       </div>
+
+      {/* ===== COPY TRADE ===== */}
+      {tab === 'copytrade' && <CopyTrade disclosureAccepted={fullyAccepted} />}
 
       {/* ===== SETTINGS: disclosure (also shown until accepted) ===== */}
       {(tab === 'settings' || !fullyAccepted) && (
@@ -1348,6 +1369,27 @@ export default function HILPage() {
                           <div style={{ fontSize: 11, color: 'var(--ink-faint)', marginBottom: 10 }}>
                             Target +{sig.target_pct ?? 12}% · Stop -{sig.stop_pct ?? 6}% · Hold {sig.hold_days ?? 5}d
                           </div>
+                          {sig.diversify?.cluster && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 11, marginBottom: 10 }}>
+                              <span style={{ ...badge(sig.diversify.blocked ? 'red' : 'grey'), fontSize: 10 }}>
+                                {sig.diversify.cluster}
+                              </span>
+                              <span style={{ color: 'var(--ink-faint)' }}>
+                                {sig.diversify.cluster_names}/{sig.diversify.max_names} names
+                                {sig.diversify.cluster_pct != null && ` · ${sig.diversify.cluster_pct}% of book`}
+                                {` · N_eff ${sig.diversify.n_eff}`}
+                              </span>
+                              {sig.diversify.blocked ? (
+                                <span style={{ color: '#ef4444', fontWeight: 600 }}>
+                                  ⛔ {sig.diversify.cap_reason || 'cluster full'}
+                                </span>
+                              ) : sig.diversify.decay_mult < 1 ? (
+                                <span style={{ color: '#fbbf24', fontWeight: 600 }}>
+                                  sized ×{sig.diversify.decay_mult}
+                                </span>
+                              ) : null}
+                            </div>
+                          )}
                           <TradeChart ticker={sig.ticker}
                             stopPct={sig.stop_pct ?? 6} targetPct={sig.target_pct ?? 12} />
                           <div style={{ display: 'flex', gap: 8 }}>

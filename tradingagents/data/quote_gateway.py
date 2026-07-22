@@ -136,8 +136,13 @@ def _fetch_finnhub(symbol: str, timeout: float) -> Quote | None:
     if last <= 0:
         return None
     ts = float(data.get("t") or 0)
-    quote_time = dt.datetime.fromtimestamp(ts) if ts > 0 else dt.datetime.now()
-    return Quote(symbol=symbol, last=last, source="finnhub", quote_time=quote_time)
+    if ts <= 0:
+        # No provider timestamp → cannot prove freshness. Stamping now() here
+        # would let a stale quote from a TRUSTED source pass the execution
+        # freshness gate. Drop the quote instead (fail closed).
+        return None
+    return Quote(symbol=symbol, last=last, source="finnhub",
+                 quote_time=dt.datetime.fromtimestamp(ts))
 
 
 def _fetch_twelve_data(symbol: str, timeout: float) -> Quote | None:
@@ -152,8 +157,10 @@ def _fetch_twelve_data(symbol: str, timeout: float) -> Quote | None:
     if last <= 0:
         return None
     ts = float(data.get("timestamp") or 0)
-    quote_time = dt.datetime.fromtimestamp(ts) if ts > 0 else dt.datetime.now()
-    return Quote(symbol=symbol, last=last, source="twelve_data", quote_time=quote_time)
+    if ts <= 0:
+        return None  # no provider timestamp → freshness unprovable (fail closed)
+    return Quote(symbol=symbol, last=last, source="twelve_data",
+                 quote_time=dt.datetime.fromtimestamp(ts))
 
 
 def _fetch_fmp(symbol: str, timeout: float) -> Quote | None:
@@ -169,8 +176,10 @@ def _fetch_fmp(symbol: str, timeout: float) -> Quote | None:
     if last <= 0:
         return None
     ts = float(row.get("timestamp") or 0)
-    quote_time = dt.datetime.fromtimestamp(ts) if ts > 0 else dt.datetime.now()
-    return Quote(symbol=symbol, last=last, source="fmp", quote_time=quote_time)
+    if ts <= 0:
+        return None  # no provider timestamp → freshness unprovable (fail closed)
+    return Quote(symbol=symbol, last=last, source="fmp",
+                 quote_time=dt.datetime.fromtimestamp(ts))
 
 
 def _fetch_yahoo_chart(symbol: str, timeout: float) -> Quote | None:
@@ -314,7 +323,22 @@ class QuoteGateway:
         if not quotes:
             return None
         fresh = [q for q in quotes if q.age_seconds <= self.max_quote_age_seconds]
-        pool = fresh or quotes  # nothing fresh → still report, gate will reject on age
+        # A TRUSTED quote must never be dropped merely for missing this gateway's
+        # own freshness heuristic. yfinance self-stamps quote_time=now(), so it is
+        # always "fresh" — filtering on age alone guaranteed a non-empty `fresh`
+        # list, so `fresh or quotes` never fell back, and an untrusted source
+        # outranked a usable FMP/Finnhub print. Execution then saw
+        # best.trusted=False and refused the order (503) on entries *and exits* —
+        # the presence of a fresh untrusted quote made us trade less.
+        #
+        # PreTradeGate stays the single freshness authority: it re-checks
+        # quote_time against the per-order max_quote_age_seconds (default 120s for
+        # broker orders) and still rejects a genuinely stale quote. Keeping trusted
+        # quotes in the pool removes a hidden, stricter, uncoordinated second gate
+        # that failed *open into an untrusted source*. It widens no real gate.
+        _fresh_ids = {id(q) for q in fresh}
+        held_back_trusted = [q for q in quotes if q.trusted and id(q) not in _fresh_ids]
+        pool = (fresh + held_back_trusted) or quotes  # empty → gate rejects on age
 
         # consensus across ALL collected quotes (fresh preferred)
         consensus_ok, consensus_spread = self._consensus(pool)
